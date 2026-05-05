@@ -47,6 +47,7 @@ const manifest = {
     '*://*.kimi.com/*',
     '*://*.chat.z.ai/*',
     '*://*.chat.qwen.ai/*',
+    '*://*.notion.so/*',
 
   ],
 
@@ -160,6 +161,12 @@ const manifest = {
     },
     {
       matches: ['*://*.chat.qwen.ai/*'],
+      js: ['content/index.iife.js'],
+      run_at: 'document_idle',
+    },
+    // Specific content script for Notion AI tool call parsing
+    {
+      matches: ['*://*.notion.so/*'],
       js: ['content/index.iife.js'],
       run_at: 'document_idle',
     },
