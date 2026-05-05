@@ -379,6 +379,19 @@ class McpClient {
       throw new Error(`Not connected to MCP server. Current status: ${connectionStore.status}. Please check your connection.`);
     }
 
+    let availableTools = useToolStore.getState().availableTools;
+    if (!availableTools.some(tool => tool.name === toolName)) {
+      try {
+        availableTools = await this.getAvailableTools(false);
+      } catch (error) {
+        logMessage(`[McpClient] Failed to validate tool registry before call: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (!availableTools.some(tool => tool.name === toolName)) {
+      throw new Error(`Tool "${toolName}" is not registered in the current MCP tool registry`);
+    }
+
     logMessage(`[McpClient] Calling tool: ${toolName} with args: ${JSON.stringify(args)}`);
 
     // Get active adapter name for analytics

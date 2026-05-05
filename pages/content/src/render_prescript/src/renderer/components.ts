@@ -1,10 +1,12 @@
 import type { ParamValueElement } from '../core/types';
+import type { ParsedFunctionCall } from '../core/types';
 import { StabilizedBlock } from '../core/types';
 import { CONFIG } from '../core/config';
 import { safelySetContent } from '../utils/index';
 import { storeExecutedFunction, generateContentSignature } from '../mcpexecute/storage';
 import { checkAndDisplayFunctionHistory, createHistoryPanel, updateHistoryPanel } from './functionHistory';
-import { extractJSONParameters, stripLanguageTags, extractCleanContent } from '../parser/jsonFunctionParser';
+import { extractCleanContent } from '../parser/jsonFunctionParser';
+import { validateFunctionCallContent } from '../parser/functionCallValidator';
 import { createLogger } from '@extension/shared/lib/logger';
 
 // Add type declarations for the global adapter and mcpClient access
@@ -104,7 +106,6 @@ const websiteName = window.location.hostname
   .split('.')[0];
 
 // Pre-compiled regexes for better performance
-const INVOKE_REGEX = /<invoke name="([^"]+)"(?:\s+call_id="([^"]+)")?>/;
 const PARAM_REGEX = /<parameter\s+name="([^"]+)"\s*(?:type="([^"]+)")?\s*>(.*?)<\/parameter>/gs;
 const CDATA_REGEX = /<!\[CDATA\[([\s\S]*?)\]\]>/;
 const NUMBER_REGEX = /^-?\d+(\.\d+)?$/;
@@ -579,65 +580,28 @@ export const smoothlyUpdateBlockContent = (
  * @param blockDiv Function block div container
  * @param rawContent Raw XML content containing the function call
  */
-export const addExecuteButton = (blockDiv: HTMLDivElement, rawContent: string): void => {
+export const addExecuteButton = (
+  blockDiv: HTMLDivElement,
+  rawContent: string,
+  validatedCall?: ParsedFunctionCall,
+): boolean => {
   // Check for existing execute button to avoid duplicates
   if (blockDiv.querySelector('.execute-button')) {
-    return;
+    return true;
   }
 
-  // Detect format and extract function name and parameters
-  const isJSON = rawContent.includes('"type"') && rawContent.includes('function_call');
-  const functionName = extractFunctionName(rawContent);
+  const validation = validatedCall
+    ? { isValid: true, isComplete: validatedCall.isComplete, isExecutable: validatedCall.isExecutable, call: validatedCall }
+    : validateFunctionCallContent(rawContent);
 
-  let parameters: Record<string, any>;
-  let callId: string;
-
-  if (isJSON) {
-    // Extract JSON parameters
-    parameters = extractJSONParameters(rawContent);
-
+  if (!validation.isValid || !validation.call || !validation.isExecutable) {
     if (CONFIG.debug) {
-      logger.debug('[Execute Button] Extracted JSON parameters:', parameters);
+      logger.debug('[Execute Button] Function call failed validation, skipping button:', validation.reason);
     }
-
-    // Extract call_id from JSON
-    const lines = rawContent.split('\n');
-    let extractedCallId: string | null = null;
-    for (const line of lines) {
-      try {
-        const trimmed = stripLanguageTags(line);
-        if (!trimmed) continue;
-
-        const parsed = JSON.parse(trimmed);
-        if (parsed.type === 'function_call_start' && parsed.call_id) {
-          extractedCallId = parsed.call_id.toString();
-          break;
-        }
-      } catch (e) {
-        // Skip invalid lines
-      }
-    }
-    callId = extractedCallId || `call-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-  } else {
-    // XML format
-    parameters = extractFunctionParameters(rawContent);
-
-    if (CONFIG.debug) {
-      logger.debug('[Execute Button] Extracted XML parameters:', parameters);
-    }
-
-    // Extract call_id from XML using pre-compiled regex
-    const callIdMatch = INVOKE_REGEX.exec(rawContent);
-    callId = callIdMatch?.[2] || `call-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    return false;
   }
 
-  // If we couldn't extract a function name, don't add the button
-  if (!functionName) {
-    if (CONFIG.debug) {
-      logger.debug('[Execute Button] No function name found, skipping button');
-    }
-    return;
-  }
+  const { functionName, callId, parameters } = validation.call;
 
   if (CONFIG.debug) {
     logger.debug('[Execute Button] Creating button for:', functionName, 'with params:', Object.keys(parameters));
@@ -726,6 +690,14 @@ export const addExecuteButton = (blockDiv: HTMLDivElement, rawContent: string): 
     };
 
     try {
+      const currentValidation = validateFunctionCallContent(rawContent);
+      if (!currentValidation.isValid || !currentValidation.isExecutable) {
+        resetButtonState();
+        displayResult(resultsPanel, loadingIndicator, false, 'Error: function call no longer validates against current MCP tools');
+        resultsPanel.style.display = 'block';
+        return;
+      }
+
       // Use global mcpClient instead of mcpHandler
       const mcpClient = (window as any).mcpClient;
 
@@ -813,40 +785,8 @@ export const addExecuteButton = (blockDiv: HTMLDivElement, rawContent: string): 
 
   // Check for previous executions efficiently
   checkAndDisplayFunctionHistory(blockDiv, functionName, callId, contentSignature);
-};
 
-/**
- * Extract function name from raw content (supports both XML and JSON formats)
- *
- * @param rawContent Raw XML or JSON content
- * @returns The function name or null if not found
- */
-const extractFunctionName = (rawContent: string): string | null => {
-  // Check for JSON format first
-  const isJSON = rawContent.includes('"type"') && rawContent.includes('function_call_start');
-
-  if (isJSON) {
-    // Extract from JSON format
-    const lines = rawContent.split('\n');
-    for (const line of lines) {
-      try {
-        const trimmed = stripLanguageTags(line);
-        if (!trimmed) continue;
-
-        const parsed = JSON.parse(trimmed);
-        if (parsed.type === 'function_call_start' && parsed.name) {
-          return parsed.name;
-        }
-      } catch (e) {
-        // Skip invalid JSON lines
-      }
-    }
-    return null;
-  }
-
-  // XML format
-  const invokeMatch = rawContent.match(/<invoke name="([^"]+)"(?:\s+call_id="([^"]+)")?>/);
-  return invokeMatch && invokeMatch[1] ? invokeMatch[1] : null;
+  return true;
 };
 
 /**

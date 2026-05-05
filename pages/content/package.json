@@ -14,6 +14,7 @@
     "clean": "pnpm clean:turbo && pnpm clean:node_modules",
     "build": "vite build",
     "dev": "vite build --mode development",
+    "test:render-prescript": "node --test --experimental-strip-types src/render_prescript/src/parser/functionCallValidator.test.mjs",
     "lint": "eslint .",
     "lint:fix": "pnpm lint --fix",
     "prettier": "prettier . --write --ignore-path ../../.prettierignore",

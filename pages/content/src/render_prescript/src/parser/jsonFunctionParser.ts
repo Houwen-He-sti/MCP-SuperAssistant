@@ -1,6 +1,7 @@
 import type { FunctionInfo } from '../core/types';
 import { CONFIG } from '../core/config';
 import { createLogger } from '@extension/shared/lib/logger';
+import { functionInfoFromValidation, validateFunctionCallElement } from './functionCallValidator';
 
 /**
  * JSON function call line types
@@ -226,6 +227,30 @@ function reconstructJSONObjects(lines: string[]): string[] {
  * Returns detailed information about the JSON function call state
  */
 export const containsJSONFunctionCalls = (block: HTMLElement): FunctionInfo => {
+  const validation = validateFunctionCallElement(block);
+  if (validation.call?.format === 'json') {
+    const info = functionInfoFromValidation(validation);
+    const { description } = extractJSONFunctionInfo(validation.call.rawContent);
+    return {
+      ...info,
+      description: description ?? undefined,
+    };
+  }
+
+  return {
+    hasFunctionCalls: false,
+    isComplete: false,
+    hasInvoke: false,
+    hasParameters: false,
+    hasClosingTags: false,
+    languageTag: null,
+    detectedBlockType: null,
+    partialTagDetected: false,
+    validationReason: validation.reason,
+  };
+};
+
+export const containsJSONFunctionCallsLenient = (block: HTMLElement): FunctionInfo => {
   let content = '';
 
   // Skip if this element is inside a function-block (avoid re-parsing rendered UI)

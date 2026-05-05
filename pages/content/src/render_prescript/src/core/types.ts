@@ -45,6 +45,21 @@ export interface Parameter {
   isIncompleteTag?: boolean;
 }
 
+export type FunctionCallFormat = 'xml' | 'json';
+
+/**
+ * Function call that passed parser-level validation.
+ */
+export interface ParsedFunctionCall {
+  format: FunctionCallFormat;
+  functionName: string;
+  callId: string;
+  parameters: Record<string, any>;
+  isComplete: boolean;
+  isExecutable: boolean;
+  rawContent: string;
+}
+
 /**
  * Information about a function call detection
  */
@@ -58,8 +73,13 @@ export interface FunctionInfo {
   detectedBlockType: string | null;
   partialTagDetected: boolean;
   invokeName?: string;
+  callId?: string;
+  parameters?: Record<string, any>;
+  isExecutable?: boolean;
   textContent?: string;
   description?: string;
+  validatedCall?: ParsedFunctionCall;
+  validationReason?: string;
 }
 
 /**
