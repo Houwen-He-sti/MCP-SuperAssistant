@@ -28,6 +28,8 @@ export class NotionAdapter extends BaseAdapterPlugin {
             'div[role="textbox"][contenteditable="true"], div.content-editable-leaf-rtl[contenteditable="true"]',
         // Send button — data-testid provided by Notion
         SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
+        // Chat conversation content — lives inside .notion-app-inner (not the sidebar scroller)
+        CHAT_CONTENT: '.notion-app-inner',
         // Button insertion points for MCP popover — near the plus menu button
         BUTTON_INSERTION_CONTAINER: '[data-testid="unified-chat-plus-menu-button"]',
     };
@@ -580,7 +582,6 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
     private createToggleStateManager() {
         const context = this.context;
-        const adapterName = this.name;
 
         const stateManager = {
             getState: () => {
