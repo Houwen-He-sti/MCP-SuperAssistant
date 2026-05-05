@@ -45,6 +45,15 @@ const initialState: Omit<ToolState, 'setAvailableTools' | 'addDetectedTool' | 'c
   isLoadingEnablement: false, // Initially not loading
 };
 
+const exposeToolRegistry = (tools: Tool[]): void => {
+  if (typeof window === 'undefined') return;
+
+  const names = tools.map(tool => tool.name).filter((name): name is string => typeof name === 'string' && name.length > 0);
+  (window as any).__mcpAvailableTools = tools;
+  (window as any).__mcpToolNames = names;
+  window.dispatchEvent(new CustomEvent('mcp:tool-registry-updated', { detail: { tools, names } }));
+};
+
 export const useToolStore = create<ToolState>()(
   devtools(
     (set, get) => ({
@@ -52,6 +61,7 @@ export const useToolStore = create<ToolState>()(
 
       setAvailableTools: (tools: Tool[]) => {
         set({ availableTools: tools });
+        exposeToolRegistry(tools);
         logger.debug('[ToolStore] Available tools updated:', tools);
         eventBus.emit('tool:list-updated', { tools });
         

@@ -4,3 +4,4 @@ export * from './languageParser';
 export * from './parameterParser';
 export * from './jsonFunctionParser';
 export * from './parseUtils';
+export * from './functionCallValidator';

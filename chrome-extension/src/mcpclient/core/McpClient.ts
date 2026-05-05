@@ -333,6 +333,11 @@ export class McpClient extends EventEmitter<AllEvents> {
       throw new Error('Not connected to any MCP server');
     }
 
+    const toolExists = await this.hasRegisteredTool(toolName);
+    if (!toolExists) {
+      throw new Error(`Tool "${toolName}" is not registered on the current MCP server`);
+    }
+
     const startTime = Date.now();
     this.emit('tool:call-started', { toolName, args });
 
@@ -386,6 +391,16 @@ export class McpClient extends EventEmitter<AllEvents> {
       }
 
       throw toolError;
+    }
+  }
+
+  private async hasRegisteredTool(toolName: string): Promise<boolean> {
+    try {
+      const primitives = await this.getPrimitives(false);
+      return primitives.tools.some(tool => tool.name === toolName);
+    } catch (error) {
+      logger.warn('[McpClient] Failed to validate tool registry before tool call:', error);
+      return false;
     }
   }
 
