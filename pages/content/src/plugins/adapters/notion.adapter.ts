@@ -1,4 +1,3 @@
-import { createLogger } from '@extension/shared/lib/logger';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
 
@@ -11,8 +10,6 @@ import { BaseAdapterPlugin } from './base.adapter';
  * Phase 1: Only supports the /ai chat panel. Does not activate on
  * regular Notion pages, databases, or settings.
  */
-
-const logger = createLogger('NotionAdapter');
 
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
@@ -31,12 +28,8 @@ export class NotionAdapter extends BaseAdapterPlugin {
             'div[role="textbox"][contenteditable="true"], div.content-editable-leaf-rtl[contenteditable="true"]',
         // Send button — data-testid provided by Notion
         SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
-        // Chat container — scrollable area holding messages
-        CHAT_CONTAINER: '.notion-scroller.vertical',
         // Button insertion points for MCP popover — near the plus menu button
         BUTTON_INSERTION_CONTAINER: '[data-testid="unified-chat-plus-menu-button"]',
-        // Fallback insertion — the input area ancestor
-        FALLBACK_INSERTION: '.notion-app-inner',
     };
 
     // SPA URL tracking
@@ -403,7 +396,13 @@ export class NotionAdapter extends BaseAdapterPlugin {
         }
 
         this.waitForPageReady()
-            .then(() => this.injectMCPPopoverWithRetry())
+            .then(() => {
+                if (!this.isSupported() || this.currentStatus !== 'active') {
+                    this.context.logger.debug('Skipping MCP popover injection: no longer on /ai or adapter inactive');
+                    return;
+                }
+                this.injectMCPPopoverWithRetry();
+            })
             .catch((error) => {
                 this.context.logger.warn('Failed to wait for page ready:', error);
             });
@@ -432,6 +431,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
     private injectMCPPopoverWithRetry(maxRetries: number = 5): void {
         const attemptInjection = (attempt: number) => {
+            if (!this.isSupported() || this.currentStatus !== 'active') {
+                this.context.logger.debug('Skipping MCP popover injection: no longer on /ai or adapter inactive');
+                return;
+            }
+
             this.context.logger.debug(`Attempting MCP popover injection (attempt ${attempt}/${maxRetries})`);
 
             if (document.getElementById('mcp-popover-container')) {
@@ -582,13 +586,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
             getState: () => {
                 try {
                     const uiState = context.stores.ui;
-                    const mcpEnabled = uiState?.mcpEnabled ?? false;
-                    const autoSubmitEnabled = uiState?.preferences?.autoSubmit ?? false;
                     return {
-                        mcpEnabled,
-                        autoInsert: autoSubmitEnabled,
-                        autoSubmit: autoSubmitEnabled,
-                        autoExecute: false,
+                        mcpEnabled: uiState?.mcpEnabled ?? false,
+                        autoInsert: uiState?.preferences?.autoInsert ?? false,
+                        autoSubmit: uiState?.preferences?.autoSubmit ?? false,
+                        autoExecute: uiState?.preferences?.autoExecute ?? false,
                     };
                 } catch {
                     return { mcpEnabled: false, autoInsert: false, autoSubmit: false, autoExecute: false };
@@ -621,7 +623,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
             setAutoInsert: (enabled: boolean) => {
                 context.logger.debug(`Setting Auto Insert ${enabled ? 'enabled' : 'disabled'}`);
                 if (context.stores.ui?.updatePreferences) {
-                    context.stores.ui.updatePreferences({ autoSubmit: enabled });
+                    context.stores.ui.updatePreferences({ autoInsert: enabled });
                 }
                 stateManager.updateUI();
             },
@@ -636,6 +638,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
             setAutoExecute: (enabled: boolean) => {
                 context.logger.debug(`Setting Auto Execute ${enabled ? 'enabled' : 'disabled'}`);
+                if (context.stores.ui?.updatePreferences) {
+                    context.stores.ui.updatePreferences({ autoExecute: enabled });
+                }
                 stateManager.updateUI();
             },
 
