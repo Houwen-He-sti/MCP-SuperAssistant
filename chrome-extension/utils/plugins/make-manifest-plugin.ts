@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { platform } from 'node:process';
 import type { Manifest } from '@extension/dev-utils';
 import { colorLog, ManifestParser } from '@extension/dev-utils';
-import type { PluginOption } from 'vite';
 import { IS_DEV, IS_FIREFOX } from '@extension/env';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { platform } from 'node:process';
+import { pathToFileURL } from 'node:url';
+import type { PluginOption } from 'vite';
 
 const manifestFile = resolve(import.meta.dirname, '..', '..', 'manifest.js');
 const refreshFilePath = resolve(
@@ -52,6 +52,20 @@ export default (config: { outDir: string }): PluginOption => {
     }
 
     writeFileSync(manifestPath, ManifestParser.convertManifestToString(manifest, IS_FIREFOX));
+
+    // Validate all icon files referenced in manifest exist
+    if (manifest.icons) {
+      const missing: string[] = [];
+      for (const [size, file] of Object.entries(manifest.icons)) {
+        const iconPath = resolve(to, file as string);
+        if (!existsSync(iconPath)) {
+          missing.push(`icon ${size}: ${file}`);
+        }
+      }
+      if (missing.length > 0) {
+        throw new Error(`Manifest references missing icon files:\n  ${missing.join('\n  ')}`);
+      }
+    }
 
     const refreshFileString = readFileSync(refreshFilePath, 'utf-8');
 
