@@ -5,6 +5,7 @@
  * Phase 2: Will add cutoff (abort/drain-drop) — see plans/stream-pause-inject.md
  */
 
-export { installStreamInterceptor, onStreamEvent, isStreamInterceptorActive } from './interceptor';
-export { detectFunctionCall, tryParseNDJSON, extractTextFromChunk } from './parser';
-export type { StreamEvent, StreamFunctionCallEvent, StreamLifecycleEvent, StreamEventListener } from './types';
+export { installStreamInterceptor, isStreamInterceptorActive, onStreamEvent } from './interceptor';
+export { detectFunctionCall, extractTextFromChunk, tryParseNDJSON } from './parser';
+export type { StreamEvent, StreamEventListener, StreamFunctionCallEvent, StreamLifecycleEvent } from './types';
+

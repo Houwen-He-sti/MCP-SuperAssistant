@@ -34,87 +34,99 @@ let streamCounter = 0;
  * Register a listener for stream events.
  */
 export function onStreamEvent(listener: StreamEventListener): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
 }
 
 /**
  * Emit a stream event to all registered listeners.
  */
 function emit(event: StreamEvent): void {
-  for (const listener of listeners) {
-    try {
-      listener(event);
-    } catch (err) {
-      logger.error('Stream event listener error:', err);
+    for (const listener of listeners) {
+        try {
+            listener(event);
+        } catch (err) {
+            logger.error('Stream event listener error:', err);
+        }
     }
-  }
 }
 
 /**
  * Create an observer TransformStream that passes through all chunks unchanged
  * while scanning for function_call signals in the NDJSON text.
+ *
+ * Uses pull-based semantics to preserve backpressure from downstream consumer.
+ * cancel() is propagated to the original reader.
  */
 function createObserverStream(
-  originalBody: ReadableStream<Uint8Array>,
-  streamId: string,
-  url: string,
+    originalBody: ReadableStream<Uint8Array>,
+    streamId: string,
+    url: string,
 ): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder();
-  let chunkIndex = 0;
-  let functionCallDetected = false;
-  const startTime = performance.now();
-  let buffer = '';
+    const decoder = new TextDecoder();
+    let chunkIndex = 0;
+    let functionCallDetected = false;
+    const startTime = performance.now();
+    let buffer = '';
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
 
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const reader = originalBody.getReader();
+    return new ReadableStream<Uint8Array>({
+        start() {
+            reader = originalBody.getReader();
+        },
 
-      const pump = (): Promise<void> =>
-        reader.read().then(({ done, value }) => {
-          if (done) {
-            // Process any remaining buffer
-            if (buffer.length > 0) {
-              processLine(buffer, streamId, startTime, chunkIndex);
+        // pull() is called by the downstream consumer when it wants more data.
+        // This preserves natural backpressure — we only read from upstream
+        // when downstream is ready to receive.
+        async pull(controller) {
+            try {
+                const { done, value } = await reader.read();
+
+                if (done) {
+                    // Process any remaining buffer
+                    if (buffer.length > 0) {
+                        processLine(buffer, streamId, startTime, chunkIndex);
+                    }
+                    emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
+                    controller.close();
+                    return;
+                }
+
+                chunkIndex++;
+
+                // Decode and scan for function_call (passive observation)
+                if (!functionCallDetected && value) {
+                    const text = decoder.decode(value, { stream: true });
+                    buffer += text;
+
+                    // Process complete lines (NDJSON = one JSON object per line)
+                    const lines = buffer.split('\n');
+                    // Keep last incomplete line in buffer
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (trimmed.length === 0) continue;
+                        if (processLine(trimmed, streamId, startTime, chunkIndex)) {
+                            functionCallDetected = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Pass through unchanged (Phase 1: no modification)
+                controller.enqueue(value);
+            } catch (err) {
+                emit({ type: 'stream_error', streamId, url });
+                controller.error(err);
             }
-            emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
-            controller.close();
-            return;
-          }
+        },
 
-          chunkIndex++;
-
-          // Decode and scan for function_call (passive observation)
-          if (!functionCallDetected && value) {
-            const text = decoder.decode(value, { stream: true });
-            buffer += text;
-
-            // Process complete lines (NDJSON = one JSON object per line)
-            const lines = buffer.split('\n');
-            // Keep last incomplete line in buffer
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (trimmed.length === 0) continue;
-              if (processLine(trimmed, streamId, startTime, chunkIndex)) {
-                functionCallDetected = true;
-                break;
-              }
-            }
-          }
-
-          // Pass through unchanged (Phase 1: no modification)
-          controller.enqueue(value);
-          return pump();
-        }).catch(err => {
-          emit({ type: 'stream_error', streamId, url });
-          controller.error(err);
-        });
-
-      pump();
-    },
-  });
+        // Propagate cancel to the original reader
+        cancel(reason) {
+            return reader.cancel(reason);
+        },
+    });
 }
 
 /**
@@ -122,27 +134,27 @@ function createObserverStream(
  * Returns true if function_call was detected.
  */
 function processLine(
-  line: string,
-  streamId: string,
-  startTime: number,
-  chunkIndex: number,
+    line: string,
+    streamId: string,
+    startTime: number,
+    chunkIndex: number,
 ): boolean {
-  if (detectFunctionCall(line)) {
-    const elapsed = performance.now() - startTime;
-    logger.info(
-      `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms`,
-    );
+    if (detectFunctionCall(line)) {
+        const elapsed = performance.now() - startTime;
+        logger.info(
+            `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms`,
+        );
 
-    emit({
-      type: 'function_call',
-      chunk: line,
-      chunkIndex,
-      elapsedMs: elapsed,
-      streamId,
-    });
-    return true;
-  }
-  return false;
+        emit({
+            type: 'function_call',
+            rawLine: line,
+            chunkIndex,
+            elapsedMs: elapsed,
+            streamId,
+        });
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -150,63 +162,69 @@ function processLine(
  * to override fetch before Notion's bundle caches it.
  *
  * Safe to call multiple times — only installs once.
+ * No-ops in non-browser environments (Node/test).
  */
 export function installStreamInterceptor(): void {
-  if (installed) return;
+    if (installed) return;
 
-  // Only install on notion.so
-  if (!window.location.hostname.includes('notion.so')) return;
+    // Browser guard: skip in Node/test environments
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
 
-  const originalFetch = window.fetch;
+    // Only install on notion.so
+    if (!window.location.hostname.includes('notion.so')) return;
 
-  window.fetch = async function (
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<Response> {
-    const url = typeof input === 'string'
-      ? input
-      : input instanceof URL
-        ? input.href
-        : input.url;
+    const originalFetch = window.fetch;
 
-    // Only intercept the target endpoint
-    if (!url.includes(TARGET_ENDPOINT)) {
-      return originalFetch.call(window, input, init);
-    }
+    window.fetch = async function (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+    ): Promise<Response> {
+        const url = typeof input === 'string'
+            ? input
+            : input instanceof URL
+                ? input.href
+                : input.url;
 
-    const streamId = `notion-ai-${++streamCounter}`;
-    logger.info(`[${streamId}] Intercepting: ${url}`);
-    emit({ type: 'stream_start', streamId, url });
+        // Only intercept the target endpoint
+        if (!url.includes(TARGET_ENDPOINT)) {
+            return originalFetch.call(window, input, init);
+        }
 
-    const response = await originalFetch.call(window, input, init);
-    const contentType = response.headers.get('content-type') || '';
+        const streamId = `notion-ai-${++streamCounter}`;
+        logger.info(`[${streamId}] Intercepting: ${url}`);
 
-    // Only wrap NDJSON responses with a body
-    if (!contentType.includes('ndjson') && !contentType.includes('json')) {
-      return response;
-    }
+        const response = await originalFetch.call(window, input, init);
+        const contentType = response.headers.get('content-type') || '';
 
-    if (!response.body) {
-      return response;
-    }
+        // Only wrap NDJSON responses with a body
+        if (!contentType.includes('ndjson') && !contentType.includes('json')) {
+            return response;
+        }
 
-    // Wrap the body with our passive observer
-    const observedBody = createObserverStream(response.body, streamId, url);
+        if (!response.body) {
+            return response;
+        }
 
-    return new Response(observedBody, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
-  };
+        // Emit stream_start only after confirming we will wrap the stream
+        emit({ type: 'stream_start', streamId, url });
 
-  installed = true;
-  logger.info('Stream interceptor installed (Phase 1: passive observer)');
+        // Wrap the body with our passive observer
+        const observedBody = createObserverStream(response.body, streamId, url);
+
+        return new Response(observedBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        });
+    };
+
+    installed = true;
+    logger.info('Stream interceptor installed (Phase 1: passive observer)');
 }
 
 /**
  * Check if the interceptor is active.
  */
 export function isStreamInterceptorActive(): boolean {
-  return installed;
+    return installed;
 }

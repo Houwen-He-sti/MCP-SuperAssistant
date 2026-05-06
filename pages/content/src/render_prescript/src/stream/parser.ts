@@ -15,10 +15,10 @@ const logger = createLogger('NDJSONParser');
  * a JSON object with these identifiers in chunk #9.
  */
 const FUNCTION_CALL_KEYWORDS = [
-  'function_call',
-  'tool_use',
-  'tool_calls',
-  'name',
+    'function_call',
+    'tool_use',
+    'tool_calls',
+    'name',
 ] as const;
 
 /**
@@ -33,16 +33,16 @@ const MIN_KEYWORD_MATCHES = 2;
  * Uses keyword scan (fast, resilient to format changes).
  */
 export function detectFunctionCall(line: string): boolean {
-  if (!line || line.length < 10) return false;
+    if (!line || line.length < 10) return false;
 
-  let matches = 0;
-  for (const keyword of FUNCTION_CALL_KEYWORDS) {
-    if (line.includes(keyword)) {
-      matches++;
-      if (matches >= MIN_KEYWORD_MATCHES) return true;
+    let matches = 0;
+    for (const keyword of FUNCTION_CALL_KEYWORDS) {
+        if (line.includes(keyword)) {
+            matches++;
+            if (matches >= MIN_KEYWORD_MATCHES) return true;
+        }
     }
-  }
-  return false;
+    return false;
 }
 
 /**
@@ -50,11 +50,11 @@ export function detectFunctionCall(line: string): boolean {
  * Returns null on failure (lenient — partial lines are expected during streaming).
  */
 export function tryParseNDJSON(line: string): unknown | null {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
-  }
+    try {
+        return JSON.parse(line);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -62,27 +62,27 @@ export function tryParseNDJSON(line: string): unknown | null {
  * Notion uses varying structures; this handles common patterns.
  */
 export function extractTextFromChunk(parsed: unknown): string | null {
-  if (!parsed || typeof parsed !== 'object') return null;
+    if (!parsed || typeof parsed !== 'object') return null;
 
-  const obj = parsed as Record<string, unknown>;
+    const obj = parsed as Record<string, unknown>;
 
-  // Pattern: { type: "text", value: "..." }
-  if (typeof obj.value === 'string') return obj.value;
+    // Pattern: { type: "text", value: "..." }
+    if (typeof obj.value === 'string') return obj.value;
 
-  // Pattern: { text: "..." }
-  if (typeof obj.text === 'string') return obj.text;
+    // Pattern: { text: "..." }
+    if (typeof obj.text === 'string') return obj.text;
 
-  // Pattern: { content: "..." }
-  if (typeof obj.content === 'string') return obj.content;
+    // Pattern: { content: "..." }
+    if (typeof obj.content === 'string') return obj.content;
 
-  // Pattern: { choices: [{ delta: { content: "..." } }] } (OpenAI-like)
-  if (Array.isArray(obj.choices)) {
-    const delta = (obj.choices[0] as Record<string, unknown>)?.delta;
-    if (delta && typeof delta === 'object') {
-      const content = (delta as Record<string, unknown>).content;
-      if (typeof content === 'string') return content;
+    // Pattern: { choices: [{ delta: { content: "..." } }] } (OpenAI-like)
+    if (Array.isArray(obj.choices)) {
+        const delta = (obj.choices[0] as Record<string, unknown>)?.delta;
+        if (delta && typeof delta === 'object') {
+            const content = (delta as Record<string, unknown>).content;
+            if (typeof content === 'string') return content;
+        }
     }
-  }
 
-  return null;
+    return null;
 }
