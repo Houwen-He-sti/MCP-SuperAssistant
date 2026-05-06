@@ -86,3 +86,76 @@ export function extractTextFromChunk(parsed: unknown): string | null {
 
     return null;
 }
+
+/**
+ * Extracted function call identity from an NDJSON line.
+ * Used by Phase 2+ to pass structured info to executionGuard.
+ */
+export interface FunctionCallIdentity {
+    /** Function/tool name (e.g., "mcp__search") */
+    name: string | null;
+    /** Call ID if present (e.g., "call_abc123") */
+    callId: string | null;
+    /** Raw arguments string (may be partial JSON) */
+    arguments: string | null;
+}
+
+/**
+ * Attempt to extract a structured function call identity from an NDJSON line.
+ * Falls back gracefully — returns partial info if full parse fails.
+ *
+ * Handles multiple formats:
+ * - { "type": "function_call", "name": "...", "arguments": "..." }
+ * - { "function_call": { "name": "...", "arguments": "..." } }
+ * - { "tool_calls": [{ "id": "...", "function": { "name": "...", "arguments": "..." } }] }
+ * - { "tool_use": { "name": "...", "input": {...} } }
+ */
+export function extractFunctionCallIdentity(line: string): FunctionCallIdentity | null {
+    const parsed = tryParseNDJSON(line);
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const obj = parsed as Record<string, unknown>;
+
+    // Format 1: { type: "function_call", name: "...", id: "...", arguments: "..." }
+    if (obj.type === 'function_call') {
+        return {
+            name: typeof obj.name === 'string' ? obj.name : null,
+            callId: typeof obj.id === 'string' ? obj.id : null,
+            arguments: typeof obj.arguments === 'string' ? obj.arguments : null,
+        };
+    }
+
+    // Format 2: { function_call: { name: "...", arguments: "..." } }
+    if (obj.function_call && typeof obj.function_call === 'object') {
+        const fc = obj.function_call as Record<string, unknown>;
+        return {
+            name: typeof fc.name === 'string' ? fc.name : null,
+            callId: typeof obj.id === 'string' ? obj.id : null,
+            arguments: typeof fc.arguments === 'string' ? fc.arguments : null,
+        };
+    }
+
+    // Format 3: { tool_calls: [{ id: "...", function: { name: "...", arguments: "..." } }] }
+    if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+        const tc = obj.tool_calls[0] as Record<string, unknown>;
+        const fn = tc.function as Record<string, unknown> | undefined;
+        return {
+            name: fn && typeof fn.name === 'string' ? fn.name : null,
+            callId: typeof tc.id === 'string' ? tc.id : null,
+            arguments: fn && typeof fn.arguments === 'string' ? fn.arguments : null,
+        };
+    }
+
+    // Format 4: { tool_use: { name: "...", input: {...} } }
+    if (obj.tool_use && typeof obj.tool_use === 'object') {
+        const tu = obj.tool_use as Record<string, unknown>;
+        return {
+            name: typeof tu.name === 'string' ? tu.name : null,
+            callId: typeof tu.id === 'string' ? tu.id : null,
+            arguments: tu.input ? JSON.stringify(tu.input) : null,
+        };
+    }
+
+    // Keyword match detected but can't extract structured identity
+    return { name: null, callId: null, arguments: null };
+}

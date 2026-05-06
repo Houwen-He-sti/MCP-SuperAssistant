@@ -13,7 +13,7 @@
  */
 
 import { createLogger } from '@extension/shared/lib/logger';
-import { detectFunctionCall } from './parser';
+import { detectFunctionCall, extractFunctionCallIdentity } from './parser';
 import type { StreamEvent, StreamEventListener } from './types';
 
 const logger = createLogger('StreamInterceptor');
@@ -83,9 +83,14 @@ function createObserverStream(
                 const { done, value } = await reader.read();
 
                 if (done) {
+                    // Flush the decoder (handle any remaining partial multi-byte sequences)
+                    const remaining = decoder.decode();
+                    if (remaining) {
+                        buffer += remaining;
+                    }
                     // Process any remaining buffer
-                    if (buffer.length > 0) {
-                        processLine(buffer, streamId, startTime, chunkIndex);
+                    if (buffer.trim().length > 0) {
+                        processLine(buffer.trim(), streamId, startTime, chunkIndex);
                     }
                     emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                     controller.close();
@@ -141,13 +146,17 @@ function processLine(
 ): boolean {
     if (detectFunctionCall(line)) {
         const elapsed = performance.now() - startTime;
+        const identity = extractFunctionCallIdentity(line);
+
         logger.info(
-            `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms`,
+            `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms` +
+            (identity?.name ? ` — ${identity.name}` : ''),
         );
 
         emit({
             type: 'function_call',
             rawLine: line,
+            identity,
             chunkIndex,
             elapsedMs: elapsed,
             streamId,

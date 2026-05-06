@@ -2,17 +2,21 @@
  * Types for Notion AI stream interception (Phase 1+)
  */
 
+import type { FunctionCallIdentity } from './parser';
+
 /** Event emitted when a function_call is detected in the NDJSON stream */
 export interface StreamFunctionCallEvent {
-    type: 'function_call';
-    /** Raw NDJSON line string containing the function_call signal */
-    rawLine: string;
-    /** Index of the chunk in the stream */
-    chunkIndex: number;
-    /** Milliseconds since stream started */
-    elapsedMs: number;
-    /** Unique identifier for this stream session */
-    streamId: string;
+  type: 'function_call';
+  /** Raw NDJSON line string containing the function_call signal */
+  rawLine: string;
+  /** Structured identity extracted from the line (may be partial) */
+  identity: FunctionCallIdentity | null;
+  /** Chunk index where the function_call was detected */
+  chunkIndex: number;
+  /** Milliseconds elapsed since stream start */
+  elapsedMs: number;
+  /** Unique identifier for this stream session */
+  streamId: string;
 }
 
 /** Event emitted for stream lifecycle */

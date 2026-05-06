@@ -6,6 +6,7 @@
  */
 
 export { installStreamInterceptor, isStreamInterceptorActive, onStreamEvent } from './interceptor';
-export { detectFunctionCall, extractTextFromChunk, tryParseNDJSON } from './parser';
+export { detectFunctionCall, extractFunctionCallIdentity, extractTextFromChunk, tryParseNDJSON } from './parser';
+export type { FunctionCallIdentity } from './parser';
 export type { StreamEvent, StreamEventListener, StreamFunctionCallEvent, StreamLifecycleEvent } from './types';
 
