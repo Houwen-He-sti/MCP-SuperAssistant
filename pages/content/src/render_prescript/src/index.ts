@@ -19,6 +19,11 @@ import {
   updateStalledStreamTimeoutConfig
 } from './observer/index';
 import { styles } from './renderer/styles';
+import { installStreamInterceptor, onStreamEvent } from './stream';
+
+// Install Notion AI stream interceptor IMMEDIATELY (before any bundle caches fetch).
+// Phase 1: passive observer only — logs function_call detection to console.
+installStreamInterceptor();
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';
 // import { initGrokComponents } from './websites_components/grok';
@@ -407,7 +412,9 @@ if (typeof window !== 'undefined') {
 
 // --- Exports for potential module usage ---
 export {
-  CONFIG, checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, configure as configureFunctionCallRenderer, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles
+  CONFIG, checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, configure as configureFunctionCallRenderer, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles,
+  // Stream interceptor (Phase 1)
+  onStreamEvent,
 };
 
 export type { FunctionCallRendererConfig };
