@@ -1184,9 +1184,27 @@ const AutoExecutionUtils = {
   },
 
   findReplacementBlock: (functionDetails: any): HTMLDivElement | null => {
+    // First try: precise match using data attributes (preferred, set during rendering)
+    if (functionDetails.contentSignature) {
+      const preciseMatch = document.querySelector<HTMLDivElement>(
+        `.function-block[data-content-signature="${functionDetails.contentSignature}"][data-function-name="${functionDetails.functionName}"]`
+      );
+      if (preciseMatch) {
+        const alreadyExecuted = getPreviousExecution(
+          functionDetails.functionName,
+          functionDetails.callId,
+          functionDetails.contentSignature,
+        );
+        if (!alreadyExecuted) {
+          logger.debug(`Auto-execute: Found replacement block via data-content-signature, attempting execution.`);
+          return preciseMatch;
+        }
+      }
+    }
+
     const potentialBlocks = document.querySelectorAll<HTMLDivElement>('.function-block');
     for (const block of potentialBlocks) {
-      // First try: check pre element text content (standard sites)
+      // Second try: check pre element text content (standard sites)
       const preElement = block.querySelector('pre');
       if (preElement?.textContent) {
         const match = REGEX_CACHE.invokeMatch.exec(preElement.textContent);
@@ -1205,17 +1223,17 @@ const AutoExecutionUtils = {
         }
       }
 
-      // Second try: check block's textContent directly (for Notion and other non-pre sites)
-      // Must match functionName + callId + at least one parameter value to prevent mismatches
-      // when models reuse generic callIds (e.g., call_id="1") across different invocations
+      // Third try: check block's textContent directly (for Notion and other non-pre sites)
+      // Must match functionName + callId + ALL parameter values to prevent mismatches
+      // when models reuse generic callIds across different invocations
       const blockText = block.textContent || '';
       if (blockText.includes(functionDetails.functionName) && blockText.includes(functionDetails.callId)) {
-        // Additional validation: verify at least one param value appears in block text
+        // Strict validation: ALL param values must appear in block text
         const params = functionDetails.params || {};
         const paramValues = Object.values(params).filter((v): v is string => typeof v === 'string' && v.length > 0);
-        const hasParamMatch = paramValues.length === 0 || paramValues.some(val => blockText.includes(val));
+        const hasAllParams = paramValues.length === 0 || paramValues.every(val => blockText.includes(val));
 
-        if (hasParamMatch) {
+        if (hasAllParams) {
           const alreadyExecuted = getPreviousExecution(
             functionDetails.functionName,
             functionDetails.callId,
@@ -1535,6 +1553,10 @@ export const renderFunctionCall = (block: HTMLPreElement, isProcessingRef: { cur
   let contentSignature: string | null = null;
   if (functionInfo.isComplete && completeParameters) {
     contentSignature = generateContentSignature(functionName, completeParameters);
+    // Write content signature as data attribute for precise replacement block matching
+    blockDiv.setAttribute('data-content-signature', contentSignature);
+    blockDiv.setAttribute('data-function-name', functionName);
+    blockDiv.setAttribute('data-call-id', callId);
   }
 
   // Replace original element on new render
