@@ -1,27 +1,24 @@
+import { createLogger } from '@extension/shared/lib/logger';
 import type { FunctionCallRendererConfig } from './core/config';
 import { CONFIG } from './core/config';
-import { styles } from './renderer/styles';
 import {
-  processFunctionCalls,
   checkForUnprocessedFunctionCalls,
-  startDirectMonitoring,
-  stopDirectMonitoring,
-  initializeObserver,
-  processFunctionResults,
   checkForUnprocessedFunctionResults,
-  startFunctionResultMonitoring,
-  stopFunctionResultMonitoring,
-  initializeFunctionResultObserver,
-  processUpdateQueue,
-  checkStreamingUpdates,
   checkStalledStreams,
   detectPreExistingIncompleteBlocks,
+  initializeFunctionResultObserver,
+  initializeObserver,
+  processFunctionCalls,
+  processFunctionResults,
+  processUpdateQueue,
+  startDirectMonitoring,
+  startFunctionResultMonitoring,
   startStalledStreamDetection,
-  updateStalledStreamTimeoutConfig,
+  stopDirectMonitoring,
+  stopFunctionResultMonitoring,
+  updateStalledStreamTimeoutConfig
 } from './observer/index';
-import { renderFunctionCall, renderedFunctionBlocks } from './renderer/index';
-import { createLogger } from '@extension/shared/lib/logger';
-import { initExecutionGuardListener } from './mcpexecute/executionGuard';
+import { styles } from './renderer/styles';
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';
 // import { initGrokComponents } from './websites_components/grok';
@@ -271,9 +268,6 @@ const initializeRenderer = () => {
   // Make sure stalled stream detection is explicitly started
   startStalledStreamDetection();
 
-  // Initialize execution guard event listener for state transitions
-  initExecutionGuardListener();
-
   // // Initialize website-specific components
   // // Check if we're on Perplexity website
   // if (window.location.href.includes('perplexity.ai')) {
@@ -413,21 +407,8 @@ if (typeof window !== 'undefined') {
 
 // --- Exports for potential module usage ---
 export {
-  CONFIG,
-  styles,
-  processFunctionCalls,
-  checkForUnprocessedFunctionCalls,
-  processFunctionResults,
-  checkForUnprocessedFunctionResults,
-  startDirectMonitoring,
-  stopDirectMonitoring,
-  startFunctionResultMonitoring,
-  stopFunctionResultMonitoring,
-  configure as configureFunctionCallRenderer,
-  initializeRenderer as initialize,
-  processUpdateQueue as forceStreamingUpdate,
-  checkStalledStreams,
-  detectPreExistingIncompleteBlocks,
+  CONFIG, checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, configure as configureFunctionCallRenderer, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles
 };
 
 export type { FunctionCallRendererConfig };
+

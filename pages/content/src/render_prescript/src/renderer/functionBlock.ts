@@ -2,7 +2,7 @@ import { createLogger } from '@extension/shared/lib/logger';
 import { CONFIG } from '../core/config';
 import type { ParamValueElement, ParsedFunctionCall } from '../core/types';
 import { generateContentSignature, getPreviousExecution, getPreviousExecutionLegacy } from '../mcpexecute/storage';
-import { canAutoExecute, reserveExecution, executionGuardStore } from '../mcpexecute/executionGuard';
+import { canAutoExecute, reserveExecution } from '../mcpexecute/executionGuard';
 import { containsFunctionCalls, extractLanguageTag } from '../parser/index';
 import { extractJSONFunctionInfo, extractJSONParameters } from '../parser/jsonFunctionParser';
 import { applyThemeClass } from '../utils/themeDetector';
@@ -1145,9 +1145,8 @@ const AutoExecutionUtils = {
 
             logger.debug(`Auto-execute: Executing function ${functionDetails.functionName}`);
             executeButton.click();
-            // NOTE: Do NOT markSucceeded here — execution is async.
-            // The 'pending' state prevents re-entry. The actual succeeded/failed
-            // transition happens via the execution event listener (see below).
+            // 'pending' state prevents MutationObserver re-entry.
+            // Permanent dedup handled by storeExecutedFunction → localStorage.
             executionTracker.cleanupBlock(blockId);
           } else {
             logger.debug(`Auto-execute: Execute button not found (attempt ${attempts}/${MAX_AUTO_EXECUTE_ATTEMPTS})`);
