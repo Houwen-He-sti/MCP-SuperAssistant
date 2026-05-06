@@ -1,12 +1,13 @@
 /**
- * Execution Attribution Guard
+ * Execution Attribution Guard — Session-level auto-execute reservation latch
  * 
- * Implements reserve-before-execute pattern with pending/succeeded/failed states
- * to prevent race conditions from MutationObserver concurrent re-entry.
+ * Prevents MutationObserver concurrent re-entry via reserve-before-execute pattern.
+ * Guard store tracks 'pending' state only for same-session race prevention.
+ * Permanent dedup is handled by localStorage execution history
+ * (storeExecutedFunction / getPreviousExecution / isFunctionExecuted).
  * 
- * Two-layer identity:
- * - ExecutionKey: core dedup (conversationUrl + functionName + callId + contentSignature)
- * - BlockScope: range/binding (latestAssistantMessage + blockOrdinal)
+ * Identity key: conversationUrl + functionName + callId + contentSignature
+ * Block scope: only auto-executes blocks in the latest assistant message
  * 
  * See: Issue #20, plans/auto-execute-attribution-guard.md
  */
@@ -88,7 +89,8 @@ class ExecutionGuardStore {
   }
 
   /**
-   * Mark execution as failed (does NOT auto-retry)
+   * Mark execution as failed (does NOT auto-retry).
+   * Manual retry is available via the Execute button's explicit click path.
    */
   markFailed(key: string, error?: string): void {
     const record = this.records.get(key);
