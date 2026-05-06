@@ -1186,8 +1186,12 @@ const AutoExecutionUtils = {
   findReplacementBlock: (functionDetails: any): HTMLDivElement | null => {
     // First try: precise match using data attributes (preferred, set during rendering)
     if (functionDetails.contentSignature) {
-      const preciseMatch = document.querySelector<HTMLDivElement>(
-        `.function-block[data-content-signature="${functionDetails.contentSignature}"][data-function-name="${functionDetails.functionName}"]`
+      const preciseMatch = Array.from(
+        document.querySelectorAll<HTMLDivElement>('.function-block')
+      ).find(block =>
+        block.getAttribute('data-content-signature') === functionDetails.contentSignature &&
+        block.getAttribute('data-function-name') === functionDetails.functionName &&
+        block.getAttribute('data-call-id') === functionDetails.callId
       );
       if (preciseMatch) {
         const alreadyExecuted = getPreviousExecution(
