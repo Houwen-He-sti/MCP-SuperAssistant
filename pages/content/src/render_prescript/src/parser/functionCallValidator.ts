@@ -1,4 +1,5 @@
-import type { FunctionInfo, FunctionCallFormat, ParsedFunctionCall } from '../core/types';
+import { CONFIG } from '../core/config';
+import type { FunctionInfo, ParsedFunctionCall } from '../core/types';
 
 export interface FunctionCallValidationOptions {
   requireStandaloneCodeBlock?: boolean;
@@ -328,7 +329,18 @@ const parseJSONFunctionCall = (
 export const isStandaloneCodeBlock = (element: MinimalElement | null | undefined): boolean => {
   const tag = element?.tagName?.toLowerCase();
   if (tag === 'pre') return true;
-  return tag === 'code' && element?.parentElement?.tagName?.toLowerCase() === 'pre';
+  if (tag === 'code' && element?.parentElement?.tagName?.toLowerCase() === 'pre') return true;
+  // Also accept elements matching configured targetSelectors (for sites like Notion using div-based code blocks)
+  if (element && typeof (element as any).matches === 'function') {
+    for (const selector of CONFIG.targetSelectors) {
+      if (selector !== 'pre' && selector !== 'code') {
+        try {
+          if ((element as any).matches(selector)) return true;
+        } catch { /* invalid selector */ }
+      }
+    }
+  }
+  return false;
 };
 
 export const getStandaloneCodeBlockElement = (element: HTMLElement): HTMLElement | null => {
@@ -337,7 +349,20 @@ export const getStandaloneCodeBlockElement = (element: HTMLElement): HTMLElement
   }
 
   const nearestPre = element.closest?.('pre');
-  return nearestPre instanceof HTMLElement ? nearestPre : null;
+  if (nearestPre instanceof HTMLElement) return nearestPre;
+
+  // For sites using non-pre code blocks (e.g., Notion uses div.notion-code-block),
+  // check if any ancestor matches the configured targetSelectors
+  for (const selector of CONFIG.targetSelectors) {
+    if (selector !== 'pre' && selector !== 'code') {
+      try {
+        const match = element.closest?.(selector);
+        if (match instanceof HTMLElement) return match;
+      } catch { /* invalid selector */ }
+    }
+  }
+
+  return null;
 };
 
 export const getRegisteredToolNames = (): Set<string> => {

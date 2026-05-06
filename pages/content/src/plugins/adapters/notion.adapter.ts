@@ -53,12 +53,12 @@ export class NotionAdapter extends BaseAdapterPlugin {
     private wasOnAiPage: boolean = false;
 
     /**
-     * Route gating: only activate on Notion AI chat pages (/ai path).
+     * Route gating: activate on Notion AI pages (/ai, /chat, /agent paths).
      * Prevents interference with normal Notion pages.
      */
     isSupported(): boolean {
         const path = window.location.pathname;
-        return path === '/ai' || path.startsWith('/ai/');
+        return path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
     }
 
     async initialize(context: PluginContext): Promise<void> {

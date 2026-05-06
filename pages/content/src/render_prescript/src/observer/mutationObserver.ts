@@ -1,23 +1,22 @@
+import { createLogger } from '@extension/shared/lib/logger';
 import { CONFIG } from '../core/config';
-import { debounce } from '../utils/index';
-import { renderFunctionCall, renderedFunctionBlocks, processedElements } from '../renderer/index';
-import { stabilizeBlock, unstabilizeBlock } from '../renderer/components';
-import {
-  monitorNode,
-  streamingObservers,
-  updateQueue,
-  streamingLastUpdated,
-  startProgressiveUpdates,
-} from './streamObserver';
 import type { StabilizedBlock } from '../core/types';
-import { streamingContentLengths } from '../parser/index';
 import { getStandaloneCodeBlockElement, hasFunctionCallLikePattern, isStandaloneCodeBlock } from '../parser/functionCallValidator';
+import { streamingContentLengths } from '../parser/index';
+import { processedElements, renderFunctionCall, renderedFunctionBlocks } from '../renderer/index';
+import { debounce } from '../utils/index';
 import {
   preExistingIncompleteBlocks,
   startStalledStreamDetection,
   stopStalledStreamDetection,
 } from './stalledStreamHandler';
-import { createLogger } from '@extension/shared/lib/logger';
+import {
+  monitorNode,
+  startProgressiveUpdates,
+  streamingLastUpdated,
+  streamingObservers,
+  updateQueue,
+} from './streamObserver';
 
 // State for processing and observers
 let isProcessing = false;
@@ -233,7 +232,10 @@ export const startDirectMonitoring = (): void => {
             const element = node as Element;
 
             const standaloneElement = getStandaloneCodeBlockElement(element as HTMLElement);
-            const standaloneDescendant = element.querySelector?.('pre, pre > code') as HTMLElement | null;
+            // Also check descendants matching targetSelectors (not just pre/code)
+            const targetSelectorQuery = CONFIG.targetSelectors.join(', ');
+            const standaloneDescendant = element.querySelector?.(targetSelectorQuery) as HTMLElement | null
+              || element.querySelector?.('pre, pre > code') as HTMLElement | null;
             const candidate = standaloneElement || (standaloneDescendant ? getStandaloneCodeBlockElement(standaloneDescendant) : null);
 
             if (candidate && hasFunctionCallLikePattern(candidate.textContent || '')) {

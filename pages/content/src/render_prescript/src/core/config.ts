@@ -204,15 +204,39 @@ export const WEBSITE_CONFIGS: Array<{
         useCodeMirrorExtraction: true
       },
     },
+    {
+      urlPattern: 'notion.so',
+      config: {
+        // Notion renders code blocks as custom divs with monospace styling
+        // It does NOT use standard <pre> or <code> elements.
+        // Syntax highlighting is achieved via <span class="token"> nodes.
+        // We target the outer div container for automatic JSONL detection.
+        targetSelectors: [
+          'div[class*="notion-code-block"]',
+          'div.notion-selectable.notion-code-block',
+          '.notion-selectable.notion-code-block',
+        ],
+        // The streaming container is the same block-level element
+        streamingContainerSelectors: [
+          'div[class*="notion-code-block"]',
+          '.notion-code-block',
+        ],
+        // In Notion AI, user and assistant messages are typically wrapped in
+        // editable content roots or specific message containers.
+        function_result_selector: [
+          'div[data-content-editable-root] .whenContentEditable',
+          'div[data-content-editable-root]',
+          'div[class*="message"] div[class*="content"]',
+        ],
+        // Enable CodeMirror extraction if Notion uses it for code blocks
+        useCodeMirrorExtraction: true,
+        // Adjust throttle for Notion's streaming behavior
+        updateThrottle: 50,
+        // Explicitly enable debug logging to trace selector matches
+        debug: true,
+      },
+    },
     // Add more website-specific configurations as needed
-    // Example:
-    // {
-    //   urlPattern: 'example.com',
-    //   config: {
-    //     targetSelectors: ['.custom-selector'],
-    //     streamingContainerSelectors: ['.custom-container']
-    //   }
-    // }
   ];
 
 /**
@@ -247,3 +271,4 @@ export const CONFIG = getConfig();
 
 // Re-export the config interface and utility functions
 export type { FunctionCallRendererConfig };
+

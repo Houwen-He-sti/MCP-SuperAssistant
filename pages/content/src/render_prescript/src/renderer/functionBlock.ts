@@ -1,8 +1,8 @@
 import { createLogger } from '@extension/shared/lib/logger';
 import { CONFIG } from '../core/config';
 import type { ParamValueElement, ParsedFunctionCall } from '../core/types';
-import { generateContentSignature, getPreviousExecution, getPreviousExecutionLegacy } from '../mcpexecute/storage';
 import { canAutoExecute, reserveExecution } from '../mcpexecute/executionGuard';
+import { generateContentSignature, getPreviousExecution, getPreviousExecutionLegacy } from '../mcpexecute/storage';
 import { containsFunctionCalls, extractLanguageTag } from '../parser/index';
 import { extractJSONFunctionInfo, extractJSONParameters } from '../parser/jsonFunctionParser';
 import { applyThemeClass } from '../utils/themeDetector';
@@ -81,22 +81,33 @@ let rafScheduled = false;
 
 // Utility function to get automation state
 function getAutomationState() {
+  // For Notion: force autoExecute enabled (Notion has no sidebar toggle for this)
+  const isNotion = window.location.hostname.includes('notion.so');
+
   // First try the new store-based state (exposed by automation service)
   const automationState = (window as any).__mcpAutomationState;
   if (automationState) {
     return {
-      autoInsert: automationState.autoInsert || false,
-      autoSubmit: automationState.autoSubmit || false,
-      autoExecute: automationState.autoExecute || false,
+      autoInsert: automationState.autoInsert || isNotion,
+      autoSubmit: automationState.autoSubmit || isNotion,
+      autoExecute: automationState.autoExecute || isNotion,
     };
   }
 
   // Fallback to legacy toggle state
   const legacyState = (window as any).toggleState;
+  if (legacyState) {
+    return {
+      autoInsert: legacyState.autoInsert === true || isNotion,
+      autoSubmit: legacyState.autoSubmit === true || isNotion,
+      autoExecute: legacyState.autoExecute === true || isNotion,
+    };
+  }
+
   return {
-    autoInsert: legacyState?.autoInsert === true,
-    autoSubmit: legacyState?.autoSubmit === true,
-    autoExecute: legacyState?.autoExecute === true,
+    autoInsert: isNotion,
+    autoSubmit: isNotion,
+    autoExecute: isNotion,
   };
 }
 
@@ -1168,21 +1179,35 @@ const AutoExecutionUtils = {
   findReplacementBlock: (functionDetails: any): HTMLDivElement | null => {
     const potentialBlocks = document.querySelectorAll<HTMLDivElement>('.function-block');
     for (const block of potentialBlocks) {
+      // First try: check pre element text content (standard sites)
       const preElement = block.querySelector('pre');
-      if (!preElement?.textContent) continue;
+      if (preElement?.textContent) {
+        const match = REGEX_CACHE.invokeMatch.exec(preElement.textContent);
+        REGEX_CACHE.invokeMatch.lastIndex = 0;
 
-      const match = REGEX_CACHE.invokeMatch.exec(preElement.textContent);
-      REGEX_CACHE.invokeMatch.lastIndex = 0;
+        if (match && match[1] === functionDetails.functionName && match[2] === functionDetails.callId) {
+          const alreadyExecuted = getPreviousExecution(
+            functionDetails.functionName,
+            functionDetails.callId,
+            functionDetails.contentSignature,
+          );
+          if (!alreadyExecuted) {
+            logger.debug(`Auto-execute: Found replacement block via pre, attempting execution.`);
+            return block;
+          }
+        }
+      }
 
-      if (match && match[1] === functionDetails.functionName && match[2] === functionDetails.callId) {
+      // Second try: check block's textContent directly (for Notion and other non-pre sites)
+      const blockText = block.textContent || '';
+      if (blockText.includes(functionDetails.functionName) && blockText.includes(functionDetails.callId)) {
         const alreadyExecuted = getPreviousExecution(
           functionDetails.functionName,
           functionDetails.callId,
           functionDetails.contentSignature,
         );
-
         if (!alreadyExecuted) {
-          logger.debug(`Auto-execute: Found replacement block, attempting execution.`);
+          logger.debug(`Auto-execute: Found replacement block via textContent, attempting execution.`);
           return block;
         }
       }
@@ -1557,7 +1582,6 @@ export const renderFunctionCall = (block: HTMLPreElement, isProcessingRef: { cur
           logger.debug(`Auto-execution blocked by attribution guard for block ${blockId} (${functionName})`);
           return true;
         }
-
         executionTracker.markFunctionExecuted(callId, contentSignature, functionName);
         executionTracker.markBlockExecuted(blockId);
 
