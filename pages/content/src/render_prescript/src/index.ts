@@ -21,6 +21,7 @@ import {
 } from './observer/index';
 import { renderFunctionCall, renderedFunctionBlocks } from './renderer/index';
 import { createLogger } from '@extension/shared/lib/logger';
+import { initExecutionGuardListener } from './mcpexecute/executionGuard';
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';
 // import { initGrokComponents } from './websites_components/grok';
@@ -269,6 +270,9 @@ const initializeRenderer = () => {
 
   // Make sure stalled stream detection is explicitly started
   startStalledStreamDetection();
+
+  // Initialize execution guard event listener for state transitions
+  initExecutionGuardListener();
 
   // // Initialize website-specific components
   // // Check if we're on Perplexity website

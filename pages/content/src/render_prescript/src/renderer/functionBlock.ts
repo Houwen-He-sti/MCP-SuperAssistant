@@ -1145,7 +1145,9 @@ const AutoExecutionUtils = {
 
             logger.debug(`Auto-execute: Executing function ${functionDetails.functionName}`);
             executeButton.click();
-            executionGuardStore.markSucceeded(reservedKey);
+            // NOTE: Do NOT markSucceeded here — execution is async.
+            // The 'pending' state prevents re-entry. The actual succeeded/failed
+            // transition happens via the execution event listener (see below).
             executionTracker.cleanupBlock(blockId);
           } else {
             logger.debug(`Auto-execute: Execute button not found (attempt ${attempts}/${MAX_AUTO_EXECUTE_ATTEMPTS})`);

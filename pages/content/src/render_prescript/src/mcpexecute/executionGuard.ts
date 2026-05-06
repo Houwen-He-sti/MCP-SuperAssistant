@@ -108,13 +108,20 @@ class ExecutionGuardStore {
   }
 
   /**
+   * Get all records (for event listener access)
+   */
+  entries(): IterableIterator<[string, ExecutionRecord]> {
+    return this.records.entries();
+  }
+
+  /**
    * Clear all records (for testing)
    */
   clear(): void {
     this.records.clear();
   }
 
-  private normalizeUrl(url: string): string {
+  normalizeUrl(url: string): string {
     // Strip query params and hash for stable key
     try {
       const parsed = new URL(url);
@@ -197,4 +204,33 @@ export function reserveExecution(input: ExecutionKeyInput): string | null {
   const key = executionGuardStore.computeKey(input);
   const success = executionGuardStore.reserve(key);
   return success ? key : null;
+}
+
+// --- Execution Event Listener ---
+
+/**
+ * Initialize the guard's event listener to track execution completion.
+ * Listens for 'mcp:tool-execution-complete' events and transitions
+ * pending records to 'succeeded'.
+ * 
+ * Call this once during extension initialization.
+ */
+export function initExecutionGuardListener(): void {
+  document.addEventListener('mcp:tool-execution-complete', ((event: CustomEvent) => {
+    const detail = event.detail;
+    if (!detail?.functionName || !detail?.callId) return;
+
+    // Find matching pending record by functionName + callId
+    const prefix = `${executionGuardStore.normalizeUrl(window.location.href)}|${detail.functionName}|${detail.callId}|`;
+    
+    for (const [key, record] of executionGuardStore.entries()) {
+      if (key.startsWith(prefix) && record.status === 'pending') {
+        executionGuardStore.markSucceeded(key);
+        logger.debug(`Guard listener: marked succeeded for ${detail.functionName} (callId: ${detail.callId})`);
+        break;
+      }
+    }
+  }) as EventListener);
+
+  logger.debug('ExecutionGuard event listener initialized');
 }
