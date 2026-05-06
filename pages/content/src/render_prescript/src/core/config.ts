@@ -232,8 +232,6 @@ export const WEBSITE_CONFIGS: Array<{
         useCodeMirrorExtraction: true,
         // Adjust throttle for Notion's streaming behavior
         updateThrottle: 50,
-        // Explicitly enable debug logging to trace selector matches
-        debug: true,
       },
     },
     // Add more website-specific configurations as needed

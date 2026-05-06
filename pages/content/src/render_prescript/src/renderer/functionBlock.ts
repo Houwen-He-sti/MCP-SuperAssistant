@@ -80,17 +80,24 @@ const activeTimeouts = new Map<string, number>();
 let rafScheduled = false;
 
 // Utility function to get automation state
+function isNotionAIRoute(): boolean {
+  if (!window.location.hostname.includes('notion.so')) return false;
+  const path = window.location.pathname;
+  return path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
+}
+
 function getAutomationState() {
-  // For Notion: force autoExecute enabled (Notion has no sidebar toggle for this)
-  const isNotion = window.location.hostname.includes('notion.so');
+  // For Notion AI routes: force automation enabled (Notion has no sidebar toggle)
+  // Only applies to /ai, /chat, /agent/ paths — not regular Notion pages
+  const notionAI = isNotionAIRoute();
 
   // First try the new store-based state (exposed by automation service)
   const automationState = (window as any).__mcpAutomationState;
   if (automationState) {
     return {
-      autoInsert: automationState.autoInsert || isNotion,
-      autoSubmit: automationState.autoSubmit || isNotion,
-      autoExecute: automationState.autoExecute || isNotion,
+      autoInsert: automationState.autoInsert || notionAI,
+      autoSubmit: automationState.autoSubmit || notionAI,
+      autoExecute: automationState.autoExecute || notionAI,
     };
   }
 
@@ -98,16 +105,16 @@ function getAutomationState() {
   const legacyState = (window as any).toggleState;
   if (legacyState) {
     return {
-      autoInsert: legacyState.autoInsert === true || isNotion,
-      autoSubmit: legacyState.autoSubmit === true || isNotion,
-      autoExecute: legacyState.autoExecute === true || isNotion,
+      autoInsert: legacyState.autoInsert === true || notionAI,
+      autoSubmit: legacyState.autoSubmit === true || notionAI,
+      autoExecute: legacyState.autoExecute === true || notionAI,
     };
   }
 
   return {
-    autoInsert: isNotion,
-    autoSubmit: isNotion,
-    autoExecute: isNotion,
+    autoInsert: notionAI,
+    autoSubmit: notionAI,
+    autoExecute: notionAI,
   };
 }
 
@@ -1199,16 +1206,25 @@ const AutoExecutionUtils = {
       }
 
       // Second try: check block's textContent directly (for Notion and other non-pre sites)
+      // Must match functionName + callId + at least one parameter value to prevent mismatches
+      // when models reuse generic callIds (e.g., call_id="1") across different invocations
       const blockText = block.textContent || '';
       if (blockText.includes(functionDetails.functionName) && blockText.includes(functionDetails.callId)) {
-        const alreadyExecuted = getPreviousExecution(
-          functionDetails.functionName,
-          functionDetails.callId,
-          functionDetails.contentSignature,
-        );
-        if (!alreadyExecuted) {
-          logger.debug(`Auto-execute: Found replacement block via textContent, attempting execution.`);
-          return block;
+        // Additional validation: verify at least one param value appears in block text
+        const params = functionDetails.params || {};
+        const paramValues = Object.values(params).filter((v): v is string => typeof v === 'string' && v.length > 0);
+        const hasParamMatch = paramValues.length === 0 || paramValues.some(val => blockText.includes(val));
+
+        if (hasParamMatch) {
+          const alreadyExecuted = getPreviousExecution(
+            functionDetails.functionName,
+            functionDetails.callId,
+            functionDetails.contentSignature,
+          );
+          if (!alreadyExecuted) {
+            logger.debug(`Auto-execute: Found replacement block via textContent, attempting execution.`);
+            return block;
+          }
         }
       }
     }
