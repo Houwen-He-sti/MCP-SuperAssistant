@@ -2,6 +2,7 @@ import { createLogger } from '@extension/shared/lib/logger';
 import { CONFIG } from '../core/config';
 import type { ParamValueElement, ParsedFunctionCall } from '../core/types';
 import { generateContentSignature, getPreviousExecution, getPreviousExecutionLegacy } from '../mcpexecute/storage';
+import { canAutoExecute, reserveExecution, executionGuardStore } from '../mcpexecute/executionGuard';
 import { containsFunctionCalls, extractLanguageTag } from '../parser/index';
 import { extractJSONFunctionInfo, extractJSONParameters } from '../parser/jsonFunctionParser';
 import { applyThemeClass } from '../utils/themeDetector';
@@ -1129,8 +1130,22 @@ const AutoExecutionUtils = {
 
           const executeButton = currentBlock.querySelector<HTMLButtonElement>('.execute-button');
           if (executeButton) {
+            // Reserve-before-execute: prevent concurrent re-entry
+            const guardInput = {
+              functionName: functionDetails.functionName,
+              callId: functionDetails.callId,
+              params: functionDetails.params,
+            };
+            const reservedKey = reserveExecution(guardInput);
+            if (!reservedKey) {
+              logger.debug(`Auto-execute: Reservation blocked for ${functionDetails.functionName}, skipping.`);
+              executionTracker.cleanupBlock(blockId);
+              return;
+            }
+
             logger.debug(`Auto-execute: Executing function ${functionDetails.functionName}`);
             executeButton.click();
+            executionGuardStore.markSucceeded(reservedKey);
             executionTracker.cleanupBlock(blockId);
           } else {
             logger.debug(`Auto-execute: Execute button not found (attempt ${attempts}/${MAX_AUTO_EXECUTE_ATTEMPTS})`);
@@ -1521,7 +1536,7 @@ export const renderFunctionCall = (block: HTMLPreElement, isProcessingRef: { cur
         return true;
       }
 
-      // Setup auto-execution
+      // Setup auto-execution with attribution guard
       const automationState = getAutomationState();
       const autoExecuteEnabled = automationState.autoExecute;
       if (validatedCall?.isExecutable && contentSignature && !executionTracker.isFunctionExecuted(callId, contentSignature, functionName)) {
@@ -1532,6 +1547,13 @@ export const renderFunctionCall = (block: HTMLPreElement, isProcessingRef: { cur
 
         if (executionTracker.isBlockExecuted(blockId) === true) {
           logger.debug(`Auto-execution skipped: Block ${blockId} (${functionName}) has already been processed`);
+          return true;
+        }
+
+        // Attribution guard: check if block is in latest assistant message and not already reserved
+        const guardInput = { functionName, callId, params: completeParameters || {} };
+        if (!canAutoExecute(blockDiv, guardInput, true, true)) {
+          logger.debug(`Auto-execution blocked by attribution guard for block ${blockId} (${functionName})`);
           return true;
         }
 

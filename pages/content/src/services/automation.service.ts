@@ -97,6 +97,10 @@ export class AutomationService {
   private isInitialized = false;
   private eventListener: ((event: Event) => void) | null = null;
 
+  // Auto-submit serial queue to prevent concurrent submissions
+  private submitQueue: (() => Promise<void>)[] = [];
+  private isProcessingSubmit = false;
+
   // Private constructor for singleton pattern
   private constructor() {}
 
@@ -228,9 +232,9 @@ export class AutomationService {
         const insertSuccess = await this.handleAutoInsert(detail);
         
         // Only proceed with auto submit if auto insert was successful
-        // and auto submit is enabled
+        // and auto submit is enabled — queue for serial execution
         if (insertSuccess && automationState.autoSubmit) {
-          await this.handleAutoSubmit(detail);
+          this.enqueueAutoSubmit(detail);
         }
       } else {
         logger.debug('[AutomationService] Auto Insert disabled, skipping insert and submit actions');
@@ -476,6 +480,43 @@ export class AutomationService {
       logger.error('[AutomationService] Error during auto submit:', error);
       return false;
     }
+  }
+
+  /**
+   * Enqueue an auto-submit task for serial execution.
+   * Prevents multiple results from being submitted concurrently.
+   */
+  private enqueueAutoSubmit(detail: ToolExecutionCompleteDetail): void {
+    this.submitQueue.push(async () => {
+      await this.handleAutoSubmit(detail);
+    });
+    
+    if (!this.isProcessingSubmit) {
+      this.processSubmitQueue();
+    }
+  }
+
+  /**
+   * Process the submit queue serially — one at a time.
+   */
+  private async processSubmitQueue(): Promise<void> {
+    if (this.submitQueue.length === 0) {
+      this.isProcessingSubmit = false;
+      return;
+    }
+
+    this.isProcessingSubmit = true;
+    const task = this.submitQueue.shift()!;
+
+    try {
+      await task();
+    } catch (error) {
+      logger.error('[AutomationService] Submit queue task failed:', error);
+    }
+
+    // Wait for ChatGPT to be ready before processing next
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await this.processSubmitQueue();
   }
 
   /**
