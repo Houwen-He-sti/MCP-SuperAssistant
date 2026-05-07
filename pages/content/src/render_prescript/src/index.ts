@@ -31,9 +31,9 @@ if (!isNotion) {
   installStreamInterceptor();
 }
 
-// Phase 3: Initialize stream tool bridge (disabled by default).
+// Phase 3: Initialize stream tool bridge.
+// cutoffEnabled=true by default (Gate 1); execution disabled until Gate 3.
 // On Notion: subscribes via MAIN world bridge. On others: subscribes via isolated interceptor.
-// Enable via configureStreamToolBridge({ enabled: true }).
 initStreamToolBridge();
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';

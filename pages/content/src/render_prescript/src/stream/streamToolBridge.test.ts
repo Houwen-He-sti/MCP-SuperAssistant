@@ -14,13 +14,12 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   createStreamToolHandler,
-  type StreamToolBridgeConfig,
-  type StreamToolExecutionEvent,
-  type McpClientLike,
   type AdapterLike,
   type ExecutionGuardLike,
+  type McpClientLike,
   type StorageLike,
   type StreamEvent,
+  type StreamToolExecutionEvent
 } from './streamToolBridge.ts';
 
 // --- Mock infrastructure ---
@@ -730,6 +729,112 @@ describe('streamToolBridge', () => {
     const failEvent = events.find(e => e.status === 'failed' && e.phase === 'inject');
     assert.ok(failEvent, 'should emit failed event with phase=inject');
     assert.strictEqual(failEvent.errorCode, 'ADAPTER_MISSING');
+  });
+
+  // --- Phase 3 consensus additions (Opus + GPT PR #5) ---
+
+  test('22. cutoff mode (cancel vs drain-drop) does not affect execution behavior', async () => {
+    // streamToolBridge should behave identically regardless of how MAIN world handled the stream.
+    // cutoff mode is a transport concern; execution behavior must be independent.
+    const mockClient = createMockMcpClient({ callToolResult: 'tool-result' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    // Test with cancel mode
+    const mockGuard1 = createMockGuard({ reserveResult: 'key-cancel' });
+    const handler1 = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard1,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    const cancelEvent: StreamEvent = {
+      type: 'stream_cutoff',
+      streamId: 'stream-cancel',
+      identity: { name: 'echo', callId: 'call-cancel', arguments: '{"msg":"hello"}' },
+      mode: 'cancel',
+    } as StreamEvent & { mode: string };
+    await handler1(cancelEvent);
+
+    // Test with drain-drop mode (same identity but different streamId)
+    const mockGuard2 = createMockGuard({ reserveResult: 'key-drain' });
+    const events2: StreamToolExecutionEvent[] = [];
+    const handler2 = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard2,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events2.push(evt),
+    });
+
+    const drainEvent: StreamEvent = {
+      type: 'stream_cutoff',
+      streamId: 'stream-drain',
+      identity: { name: 'echo', callId: 'call-drain', arguments: '{"msg":"hello"}' },
+      mode: 'drain-drop',
+    } as StreamEvent & { mode: string };
+    await handler2(drainEvent);
+
+    // Both should succeed with same tool call behavior
+    const success1 = events.find(e => e.status === 'succeeded');
+    const success2 = events2.find(e => e.status === 'succeeded');
+    assert.ok(success1, 'cancel mode should succeed');
+    assert.ok(success2, 'drain-drop mode should succeed');
+    assert.strictEqual(mockGuard1._calls.markSucceeded.length, 1);
+    assert.strictEqual(mockGuard2._calls.markSucceeded.length, 1);
+  });
+
+  test('23. executionGuard lifecycle: reserve → execute → markSucceeded on success', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'lifecycle-key' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Verify full lifecycle
+    assert.strictEqual(mockGuard._calls.reserve.length, 1, 'should reserve once');
+    assert.strictEqual(mockGuard._calls.markSucceeded.length, 1, 'should mark succeeded');
+    assert.strictEqual(mockGuard._calls.markSucceeded[0], 'lifecycle-key');
+    assert.strictEqual(mockGuard._calls.markFailed.length, 0, 'should not mark failed');
+  });
+
+  test('24. executionGuard lifecycle: reserve → execute → markFailed on tool error', async () => {
+    const mockClient = createMockMcpClient({ callToolError: new Error('tool crashed') });
+    const mockGuard = createMockGuard({ reserveResult: 'fail-key' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Verify failure lifecycle
+    assert.strictEqual(mockGuard._calls.reserve.length, 1, 'should reserve once');
+    assert.strictEqual(mockGuard._calls.markSucceeded.length, 0, 'should not mark succeeded');
+    assert.strictEqual(mockGuard._calls.markFailed.length, 1, 'should mark failed');
+    assert.strictEqual(mockGuard._calls.markFailed[0].key, 'fail-key');
+    assert.ok(mockGuard._calls.markFailed[0].error!.includes('tool crashed'));
   });
 
 });
