@@ -9,8 +9,10 @@
  *
  * Security model:
  * - All messages from MAIN world are treated as UNTRUSTED OBSERVATIONS
- * - Validates: source, origin, channel, version, schema
- * - Does NOT make trust decisions — downstream tool bridge handles that
+ * - Bridge performs STRUCTURAL validation only — not authentication
+ * - Same-origin page scripts can forge compatible envelopes (source_id is not a credential)
+ * - Does NOT make trust decisions — downstream streamToolBridge owns execution policy
+ * - The bridge accepts observations, not authority
  *
  * @see interceptorMain.ts (MAIN world counterpart)
  * @see outputs/main-world-injection-gpt-review-response-v2.md
@@ -239,14 +241,20 @@ export function installMainWorldStreamBridge(): void {
 
 /**
  * Send cutoff configuration to the MAIN world interceptor.
+ * Uses monotonic seq to ensure MAIN world always accepts newer configs.
  */
+let configSeqCounter = 0;
+
 export function sendConfigToMainWorld(config: Partial<StreamCutoffConfig>): void {
   if (typeof window === 'undefined') return;
+
+  const seq = ++configSeqCounter;
 
   window.postMessage(
     {
       channel: CONFIG_CHANNEL,
       direction: CONFIG_DIRECTION,
+      seq,
       config: {
         cutoffEnabled: config.enabled,
         cutoffMode: config.mode,
@@ -257,7 +265,7 @@ export function sendConfigToMainWorld(config: Partial<StreamCutoffConfig>): void
     window.location.origin,
   );
 
-  logger.info('Config sent to MAIN world:', config);
+  logger.info('Config sent to MAIN world (seq=%d):', seq, config);
 }
 
 /**

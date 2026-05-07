@@ -15,8 +15,10 @@
  *
  * Security model:
  * - Events emitted are UNTRUSTED OBSERVATIONS, not trusted commands
- * - ISOLATED world bridge must validate everything
- * - Config received via postMessage is locked after first application
+ * - Same-origin page scripts can forge compatible postMessage events
+ * - ISOLATED world bridge performs structural validation only (not authentication)
+ * - The actual execution trust boundary is in streamToolBridge (downstream)
+ * - Config received via postMessage uses monotonic seq (newer seq always wins)
  *
  * @see plans/main-world-interceptor-injection.md
  * @see outputs/main-world-injection-gpt-review-response-v2.md
@@ -98,7 +100,7 @@ if ((window as any)[INSTALL_KEY]) {
 
     let streamCounter = 0;
     let bridgeReady = false;
-    let configLocked = false;
+    let configSeq = 0; // Monotonic sequence — only accept configs with higher seq
 
     const pendingEvents: StreamEventPayload[] = [];
     const MAX_PENDING_EVENTS = 100;
@@ -158,21 +160,23 @@ if ((window as any)[INSTALL_KEY]) {
             return;
         }
 
-        // Config message from ISOLATED world (locked after first application)
+        // Config message from ISOLATED world (monotonic seq — higher seq wins)
         if (
             data.channel === CONFIG_CHANNEL &&
-            data.direction === CONFIG_DIRECTION &&
-            !configLocked
+            data.direction === CONFIG_DIRECTION
         ) {
+            const incomingSeq = typeof data.seq === 'number' ? data.seq : 0;
+            if (incomingSeq < configSeq) return; // Stale config, ignore
+
             const cfg = data.config;
             if (cfg && typeof cfg === 'object') {
                 if (typeof cfg.cutoffEnabled === 'boolean') config.cutoffEnabled = cfg.cutoffEnabled;
                 if (cfg.cutoffMode === 'drain-drop' || cfg.cutoffMode === 'cancel') config.cutoffMode = cfg.cutoffMode;
                 if (typeof cfg.requireStructuredIdentity === 'boolean') config.requireStructuredIdentity = cfg.requireStructuredIdentity;
                 if (typeof cfg.maxDrainMs === 'number' && cfg.maxDrainMs > 0) config.maxDrainMs = cfg.maxDrainMs;
-                configLocked = true;
+                configSeq = incomingSeq + 1;
                 // eslint-disable-next-line no-console
-                console.log('[MCP-SA/MAIN] Config applied (locked):', config);
+                console.log('[MCP-SA/MAIN] Config applied (seq=%d):', configSeq, config);
             }
             return;
         }
@@ -350,6 +354,18 @@ if ((window as any)[INSTALL_KEY]) {
                     if (!functionCallDetected && value) {
                         const text = decoder.decode(value, { stream: true });
                         buffer += text;
+
+                        // Buffer cap: prevent unbounded growth when no newline arrives
+                        if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
+                            // Drop buffer content up to last newline, or truncate entirely
+                            const lastNl = buffer.lastIndexOf('\n');
+                            if (lastNl >= 0) {
+                                buffer = buffer.slice(lastNl + 1);
+                            } else {
+                                // No newline in oversized buffer — discard entirely
+                                buffer = '';
+                            }
+                        }
 
                         // Process complete NDJSON lines (handle chunk boundaries correctly)
                         const lines = buffer.split('\n');
