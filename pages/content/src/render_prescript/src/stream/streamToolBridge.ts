@@ -11,7 +11,7 @@
 // --- Interfaces ---
 
 export interface StreamToolBridgeConfig {
-  enabled: boolean;
+  enabled: boolean;           // allows MCP tool execution
   autoInsert: boolean;
   autoSubmit: boolean;
   toolTimeoutMs: number;

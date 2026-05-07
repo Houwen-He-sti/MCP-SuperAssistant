@@ -5,8 +5,10 @@
  * Called once during render_prescript initialization.
  */
 
+import { executionGuardStore, reserveExecution } from '../mcpexecute/executionGuard';
+import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/storage';
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
-import { onStreamEvent as onStreamEventBridge, installMainWorldStreamBridge, sendConfigToMainWorld } from './interceptorBridge';
+import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
 import {
   createStreamToolHandler,
   type AdapterLike,
@@ -14,8 +16,14 @@ import {
   type StreamToolBridgeConfig,
   type StreamToolExecutionEvent,
 } from './streamToolBridge';
-import { reserveExecution, executionGuardStore } from '../mcpexecute/executionGuard';
-import { storeExecutedFunction, generateContentSignature } from '../mcpexecute/storage';
+
+/**
+ * Full init config: extends handler config with cutoff activation flag.
+ * `cutoffEnabled` controls MAIN world stream_cutoff emission (independent of execution).
+ */
+export interface StreamToolBridgeInitConfig extends StreamToolBridgeConfig {
+  cutoffEnabled: boolean;
+}
 
 /**
  * Determine if we're on a Notion page.
@@ -27,14 +35,15 @@ function isNotionHost(): boolean {
 }
 
 // --- Default config ---
-const DEFAULT_CONFIG: StreamToolBridgeConfig = {
-  enabled: false, // disabled by default; enable via configureStreamToolBridge()
+const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
+  enabled: false,           // MCP tool execution — disabled until Gate 3
+  cutoffEnabled: true,      // Phase 3 Gate 1: send cutoffEnabled=true to MAIN world
   autoInsert: true,
-  autoSubmit: false,
+  autoSubmit: false,        // safety: human confirms before sending function_result
   toolTimeoutMs: 30_000,
 };
 
-let currentConfig: StreamToolBridgeConfig = { ...DEFAULT_CONFIG };
+let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG };
 let bridgeHandler: ((event: unknown) => Promise<void>) | null = null;
 let unsubscribe: (() => void) | null = null;
 
@@ -84,7 +93,7 @@ function resolveMcpClient(): McpClientLike | null {
  * Initialize the stream tool bridge and subscribe to stream events.
  * Safe to call multiple times — resubscribes with latest config.
  */
-export function initStreamToolBridge(config?: Partial<StreamToolBridgeConfig>): void {
+export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig>): void {
   if (config) {
     currentConfig = { ...currentConfig, ...config };
   }
@@ -120,9 +129,9 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeConfig>): 
   if (isNotionHost()) {
     // Install the MAIN world bridge listener if not already done
     installMainWorldStreamBridge();
-    // Send current cutoff config to MAIN world
+    // Send cutoff config to MAIN world (independent of execution enabled)
     sendConfigToMainWorld({
-      enabled: currentConfig.enabled,
+      enabled: currentConfig.cutoffEnabled,
       mode: undefined, // cutoff mode managed by bridge config, not tool bridge
     });
     unsubscribe = onStreamEventBridge(bridgeHandler);
@@ -134,7 +143,7 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeConfig>): 
 /**
  * Update bridge configuration at runtime.
  */
-export function configureStreamToolBridge(config: Partial<StreamToolBridgeConfig>): void {
+export function configureStreamToolBridge(config: Partial<StreamToolBridgeInitConfig>): void {
   currentConfig = { ...currentConfig, ...config };
   // Re-initialize with new config
   initStreamToolBridge();
