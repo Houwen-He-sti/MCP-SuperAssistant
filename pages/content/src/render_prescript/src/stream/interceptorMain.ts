@@ -100,7 +100,7 @@ if ((window as any)[INSTALL_KEY]) {
 
     let streamCounter = 0;
     let bridgeReady = false;
-    let configSeq = 0; // Monotonic sequence — only accept configs with higher seq
+    let lastAppliedConfigSeq = 0; // Only accept configs with seq > lastAppliedConfigSeq
 
     const pendingEvents: StreamEventPayload[] = [];
     const MAX_PENDING_EVENTS = 100;
@@ -160,13 +160,13 @@ if ((window as any)[INSTALL_KEY]) {
             return;
         }
 
-        // Config message from ISOLATED world (monotonic seq — higher seq wins)
+        // Config message from ISOLATED world (monotonic seq — strictly increasing)
         if (
             data.channel === CONFIG_CHANNEL &&
             data.direction === CONFIG_DIRECTION
         ) {
-            const incomingSeq = typeof data.seq === 'number' ? data.seq : 0;
-            if (incomingSeq < configSeq) return; // Stale config, ignore
+            const incomingSeq = data.seq;
+            if (!Number.isSafeInteger(incomingSeq) || incomingSeq <= lastAppliedConfigSeq) return;
 
             const cfg = data.config;
             if (cfg && typeof cfg === 'object') {
@@ -174,9 +174,9 @@ if ((window as any)[INSTALL_KEY]) {
                 if (cfg.cutoffMode === 'drain-drop' || cfg.cutoffMode === 'cancel') config.cutoffMode = cfg.cutoffMode;
                 if (typeof cfg.requireStructuredIdentity === 'boolean') config.requireStructuredIdentity = cfg.requireStructuredIdentity;
                 if (typeof cfg.maxDrainMs === 'number' && cfg.maxDrainMs > 0) config.maxDrainMs = cfg.maxDrainMs;
-                configSeq = incomingSeq + 1;
+                lastAppliedConfigSeq = incomingSeq;
                 // eslint-disable-next-line no-console
-                console.log('[MCP-SA/MAIN] Config applied (seq=%d):', configSeq, config);
+                console.log('[MCP-SA/MAIN] Config applied (seq=%d):', lastAppliedConfigSeq, config);
             }
             return;
         }
@@ -355,21 +355,17 @@ if ((window as any)[INSTALL_KEY]) {
                         const text = decoder.decode(value, { stream: true });
                         buffer += text;
 
-                        // Buffer cap: prevent unbounded growth when no newline arrives
-                        if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
-                            // Drop buffer content up to last newline, or truncate entirely
-                            const lastNl = buffer.lastIndexOf('\n');
-                            if (lastNl >= 0) {
-                                buffer = buffer.slice(lastNl + 1);
-                            } else {
-                                // No newline in oversized buffer — discard entirely
-                                buffer = '';
-                            }
-                        }
-
                         // Process complete NDJSON lines (handle chunk boundaries correctly)
                         const lines = buffer.split('\n');
                         buffer = lines.pop() ?? ''; // Keep incomplete line in buffer
+
+                        // Buffer cap: only cap the INCOMPLETE tail after processing complete lines
+                        // This ensures we never miss function_call in complete lines
+                        if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
+                            // eslint-disable-next-line no-console
+                            console.warn('[MCP-SA/MAIN] Dropping oversized partial NDJSON line (%d chars)', buffer.length);
+                            buffer = '';
+                        }
 
                         for (const line of lines) {
                             const trimmed = line.trim();
