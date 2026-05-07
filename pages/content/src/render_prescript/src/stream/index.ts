@@ -3,11 +3,22 @@
  *
  * Phase 1: Passive observer (detect function_call, emit events)
  * Phase 2: Function-call cutoff (close frontend, drain background)
+ * Phase 3: Stream → Tool execution bridge
  */
 
 export { configureCutoff, installStreamInterceptor, isStreamInterceptorActive, onStreamEvent } from './interceptor';
 export { detectFunctionCall, extractFunctionCallIdentity, extractTextFromChunk, tryParseNDJSON } from './parser';
+export { createStreamToolHandler } from './streamToolBridge';
 export type { FunctionCallIdentity } from './parser';
+export type {
+    AdapterLike,
+    ExecutionGuardLike,
+    McpClientLike,
+    StorageLike,
+    StreamToolBridgeConfig,
+    StreamToolBridgeDeps,
+    StreamToolExecutionEvent,
+} from './streamToolBridge';
 export type {
     StreamCutoffConfig,
     StreamCutoffEvent,
