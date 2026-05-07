@@ -412,6 +412,9 @@ if (typeof window !== 'undefined') {
     (window as any).__DEBUG_JSON_PARSER = false;
     logger.debug('JSON parser debug logging disabled.');
   };
+
+  // Expose Phase 3 bridge control for runtime activation
+  (window as any).configureStreamToolBridge = configureStreamToolBridge;
 }
 
 // --- Exports for potential module usage ---
