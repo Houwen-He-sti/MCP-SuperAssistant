@@ -19,11 +19,15 @@ import {
   updateStalledStreamTimeoutConfig
 } from './observer/index';
 import { styles } from './renderer/styles';
-import { installStreamInterceptor, onStreamEvent } from './stream';
+import { initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
 
 // Install Notion AI stream interceptor IMMEDIATELY (before any bundle caches fetch).
 // Phase 1: passive observer only — logs function_call detection to console.
 installStreamInterceptor();
+
+// Phase 3: Initialize stream tool bridge (disabled by default).
+// Subscribes to stream events; enable via configureStreamToolBridge({ enabled: true }).
+initStreamToolBridge();
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';
 // import { initGrokComponents } from './websites_components/grok';
@@ -415,6 +419,8 @@ export {
   CONFIG, checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, configure as configureFunctionCallRenderer, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles,
   // Stream interceptor (Phase 1)
   onStreamEvent,
+  // Stream tool bridge (Phase 3)
+  initStreamToolBridge,
 };
 
 export type { FunctionCallRendererConfig };

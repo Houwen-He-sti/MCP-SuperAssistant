@@ -9,6 +9,7 @@
 export { configureCutoff, installStreamInterceptor, isStreamInterceptorActive, onStreamEvent } from './interceptor';
 export { detectFunctionCall, extractFunctionCallIdentity, extractTextFromChunk, tryParseNDJSON } from './parser';
 export { createStreamToolHandler } from './streamToolBridge';
+export { configureStreamToolBridge, initStreamToolBridge } from './streamToolBridgeInit';
 export type { FunctionCallIdentity } from './parser';
 export type {
     AdapterLike,

@@ -706,4 +706,30 @@ describe('streamToolBridge', () => {
     assert.ok(failEvent.error!.includes('Network timeout'));
   });
 
+  // --- NEW: P1 adapter() returns null ---
+  test('21. adapter returns null — emit failed with ADAPTER_MISSING', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'result' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-an' });
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: mockClient,
+      guard: mockGuard,
+      adapter: () => null, // no adapter available
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Tool executed and succeeded in guard
+    assert.strictEqual(mockGuard._calls.markSucceeded.length, 1);
+
+    const failEvent = events.find(e => e.status === 'failed' && e.phase === 'inject');
+    assert.ok(failEvent, 'should emit failed event with phase=inject');
+    assert.strictEqual(failEvent.errorCode, 'ADAPTER_MISSING');
+  });
+
 });

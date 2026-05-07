@@ -172,18 +172,21 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     let result: unknown;
     let timedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout>;
 
     try {
       result = await Promise.race([
         mcpClient.callTool(identity.name, parsedArgs),
         new Promise<never>((_, reject) => {
-          setTimeout(() => {
+          timeoutHandle = setTimeout(() => {
             timedOut = true;
             expiredExecutions.add(executionId);
             reject(new Error('Tool execution timeout'));
           }, config.toolTimeoutMs);
         }),
       ]);
+      // P1 fix: clear timeout on success to prevent timer leak
+      clearTimeout(timeoutHandle!);
     } catch (e) {
       if (expiredExecutions.has(executionId)) {
         guard.executionGuardStore.markFailed(reservedKey, 'timeout');
@@ -220,53 +223,62 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Step 9: DOM injection (with fail-closed protection)
     if (config.autoInsert) {
       const currentAdapter = adapter();
-      if (currentAdapter) {
-        // P0-3 fix: fail-closed — if getInputContent is not a function, we cannot
-        // reliably inspect whether user has a draft. Skip insert to avoid overwriting.
-        if (typeof currentAdapter.getInputContent !== 'function') {
-          emit(streamId, identity, 'succeeded', {
-            result,
-            durationMs,
-            error: 'Cannot inspect input content — insert skipped (fail-closed)',
-            errorCode: 'INSERT_SKIPPED_NO_INSPECT',
-          });
-          return;
-        }
+      if (!currentAdapter) {
+        // P1 fix: adapter missing is a structured failure
+        emit(streamId, identity, 'failed', {
+          phase: 'inject',
+          error: 'No adapter available for DOM injection',
+          errorCode: 'ADAPTER_MISSING',
+          durationMs,
+        });
+        return;
+      }
 
-        const existingContent = currentAdapter.getInputContent();
-        if (existingContent) {
-          // User has draft — skip insert
-          emit(streamId, identity, 'succeeded', { result, durationMs });
-          return;
-        }
+      // P0-3 fix: fail-closed — if getInputContent is not a function, we cannot
+      // reliably inspect whether user has a draft. Skip insert to avoid overwriting.
+      if (typeof currentAdapter.getInputContent !== 'function') {
+        emit(streamId, identity, 'succeeded', {
+          result,
+          durationMs,
+          error: 'Cannot inspect input content — insert skipped (fail-closed)',
+          errorCode: 'INSERT_SKIPPED_NO_INSPECT',
+        });
+        return;
+      }
 
-        // P0-4 fix: try/catch around insert with structured error
+      const existingContent = currentAdapter.getInputContent();
+      if (existingContent) {
+        // User has draft — skip insert
+        emit(streamId, identity, 'succeeded', { result, durationMs });
+        return;
+      }
+
+      // P0-4 fix: try/catch around insert with structured error
+      try {
+        const formattedResult = `<function_result call_id="${callId}">\n${typeof result === 'string' ? result : JSON.stringify(result)}\n</function_result>`;
+        await currentAdapter.insertText(formattedResult);
+      } catch (e) {
+        emit(streamId, identity, 'failed', {
+          phase: 'inject',
+          error: (e as Error).message,
+          errorCode: 'INSERT_FAILED',
+          durationMs: Date.now() - startTime,
+        });
+        return;
+      }
+
+      // Step 10: Optional auto-submit (P0-4 fix: try/catch)
+      if (config.autoSubmit && typeof currentAdapter.submitForm === 'function') {
         try {
-          const formattedResult = `<function_result call_id="${callId}">\n${typeof result === 'string' ? result : JSON.stringify(result)}\n</function_result>`;
-          await currentAdapter.insertText(formattedResult);
+          await currentAdapter.submitForm();
         } catch (e) {
           emit(streamId, identity, 'failed', {
-            phase: 'inject',
+            phase: 'submit',
             error: (e as Error).message,
-            errorCode: 'INSERT_FAILED',
+            errorCode: 'SUBMIT_FAILED',
             durationMs: Date.now() - startTime,
           });
           return;
-        }
-
-        // Step 10: Optional auto-submit (P0-4 fix: try/catch)
-        if (config.autoSubmit && typeof currentAdapter.submitForm === 'function') {
-          try {
-            await currentAdapter.submitForm();
-          } catch (e) {
-            emit(streamId, identity, 'failed', {
-              phase: 'submit',
-              error: (e as Error).message,
-              errorCode: 'SUBMIT_FAILED',
-              durationMs: Date.now() - startTime,
-            });
-            return;
-          }
         }
       }
     }
