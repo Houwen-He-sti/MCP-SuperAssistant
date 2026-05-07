@@ -9,9 +9,12 @@ import { onStreamEvent } from './interceptor';
 import {
   createStreamToolHandler,
   type AdapterLike,
+  type McpClientLike,
   type StreamToolBridgeConfig,
   type StreamToolExecutionEvent,
 } from './streamToolBridge';
+import { reserveExecution, executionGuardStore } from '../mcpexecute/executionGuard';
+import { storeExecutedFunction, generateContentSignature } from '../mcpexecute/storage';
 
 // --- Default config ---
 const DEFAULT_CONFIG: StreamToolBridgeConfig = {
@@ -51,31 +54,10 @@ function resolveCurrentAdapter(): AdapterLike | null {
 }
 
 /**
- * Resolve real executionGuard from MAIN-world globals.
+ * Resolve mcpClient from MAIN-world global (lazy per-event).
+ * window.mcpClient is set by content/src/index.ts during initialization.
  */
-function resolveGuard() {
-  const win = window as Record<string, unknown>;
-  const guard = win.executionGuard as {
-    reserveExecution?: (input: { functionName: string; callId: string; params: Record<string, unknown> }) => string | null;
-    executionGuardStore?: {
-      markSucceeded: (key: string) => void;
-      markFailed: (key: string, error?: string) => void;
-    };
-  } | undefined;
-
-  if (guard?.reserveExecution && guard?.executionGuardStore) {
-    return guard as {
-      reserveExecution: (input: { functionName: string; callId: string; params: Record<string, unknown> }) => string | null;
-      executionGuardStore: { markSucceeded: (key: string) => void; markFailed: (key: string, error?: string) => void };
-    };
-  }
-  return null;
-}
-
-/**
- * Resolve real mcpClient from MAIN-world globals.
- */
-function resolveMcpClient() {
+function resolveMcpClient(): McpClientLike | null {
   const win = window as Record<string, unknown>;
   const client = win.mcpClient as {
     callTool?: (name: string, params: Record<string, unknown>) => Promise<unknown>;
@@ -83,26 +65,7 @@ function resolveMcpClient() {
   } | undefined;
 
   if (client && typeof client.callTool === 'function' && typeof client.isReady === 'function') {
-    return client as { callTool: (name: string, params: Record<string, unknown>) => Promise<unknown>; isReady: () => boolean };
-  }
-  return null;
-}
-
-/**
- * Resolve real storage from MAIN-world globals.
- */
-function resolveStorage() {
-  const win = window as Record<string, unknown>;
-  const storage = win.executionStorage as {
-    storeExecutedFunction?: (name: string, callId: string, params: Record<string, unknown>, sig: string) => void;
-    generateContentSignature?: (name: string, params: Record<string, unknown>) => string;
-  } | undefined;
-
-  if (storage && typeof storage.storeExecutedFunction === 'function' && typeof storage.generateContentSignature === 'function') {
-    return storage as {
-      storeExecutedFunction: (name: string, callId: string, params: Record<string, unknown>, sig: string) => void;
-      generateContentSignature: (name: string, params: Record<string, unknown>) => string;
-    };
+    return client as McpClientLike;
   }
   return null;
 }
@@ -122,26 +85,19 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeConfig>): 
     unsubscribe = null;
   }
 
-  // Create handler with lazy dependency resolution (dependencies may not be available at init time)
+  // Create handler with direct module imports for guard/storage,
+  // lazy resolution for mcpClient and adapter (may not be available at init time)
   bridgeHandler = createStreamToolHandler({
     config: currentConfig,
-    mcpClient: resolveMcpClient(),
-    guard: resolveGuard() || {
-      reserveExecution: () => null,
-      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    mcpClient: resolveMcpClient,
+    guard: {
+      reserveExecution,
+      executionGuardStore,
     },
     adapter: resolveCurrentAdapter,
-    storage: resolveStorage() || {
-      storeExecutedFunction: () => {},
-      generateContentSignature: (name, params) => {
-        const content = JSON.stringify({ name, params: Object.keys(params).sort().reduce((o, k) => ({ ...o, [k]: params[k] }), {}) });
-        let hash = 0;
-        for (let i = 0; i < content.length; i++) {
-          hash = (hash << 5) - hash + content.charCodeAt(i);
-          hash = hash & hash;
-        }
-        return (hash >>> 0).toString(16);
-      },
+    storage: {
+      storeExecutedFunction,
+      generateContentSignature,
     },
     onEvent: (event: StreamToolExecutionEvent) => {
       // Log bridge events to console for observability

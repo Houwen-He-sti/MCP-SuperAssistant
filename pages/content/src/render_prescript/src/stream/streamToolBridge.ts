@@ -61,7 +61,7 @@ export interface StorageLike {
 
 export interface StreamToolBridgeDeps {
   config: StreamToolBridgeConfig;
-  mcpClient: McpClientLike | null;
+  mcpClient: () => McpClientLike | null;
   guard: ExecutionGuardLike;
   adapter: () => AdapterLike | null;
   storage: StorageLike;
@@ -77,7 +77,7 @@ export interface StreamEvent {
 // --- Implementation ---
 
 export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
-  const { config, mcpClient, guard, adapter, storage, onEvent } = deps;
+  const { config, mcpClient: resolveMcpClient, guard, adapter, storage, onEvent } = deps;
 
   let executionCounter = 0;
   const expiredExecutions = new Set<number>();
@@ -144,7 +144,8 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       return;
     }
 
-    // Step 5: Check mcpClient availability
+    // Step 5: Check mcpClient availability (lazy per-event resolution)
+    const mcpClient = resolveMcpClient();
     if (!mcpClient) {
       guard.executionGuardStore.markFailed(reservedKey, 'mcpClient not available');
       emit(streamId, identity, 'failed', {
@@ -188,6 +189,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       // P1 fix: clear timeout on success to prevent timer leak
       clearTimeout(timeoutHandle!);
     } catch (e) {
+      clearTimeout(timeoutHandle!);
       if (expiredExecutions.has(executionId)) {
         guard.executionGuardStore.markFailed(reservedKey, 'timeout');
         emit(streamId, identity, 'failed', {

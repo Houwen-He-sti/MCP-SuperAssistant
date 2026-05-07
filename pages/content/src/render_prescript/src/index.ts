@@ -19,7 +19,7 @@ import {
   updateStalledStreamTimeoutConfig
 } from './observer/index';
 import { styles } from './renderer/styles';
-import { initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
+import { configureStreamToolBridge, initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
 
 // Install Notion AI stream interceptor IMMEDIATELY (before any bundle caches fetch).
 // Phase 1: passive observer only — logs function_call detection to console.
@@ -421,6 +421,7 @@ export {
   onStreamEvent,
   // Stream tool bridge (Phase 3)
   initStreamToolBridge,
+  configureStreamToolBridge,
 };
 
 export type { FunctionCallRendererConfig };

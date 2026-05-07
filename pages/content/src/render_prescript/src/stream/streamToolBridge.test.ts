@@ -164,7 +164,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: false, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -186,7 +186,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -234,7 +234,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -259,7 +259,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -284,7 +284,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -310,7 +310,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -334,7 +334,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: null,
+      mcpClient: () => null,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -359,7 +359,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -385,7 +385,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 50 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -413,7 +413,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 20 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -439,7 +439,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -470,7 +470,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -495,7 +495,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -525,7 +525,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: true, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -546,7 +546,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
@@ -576,7 +576,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -606,7 +606,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -634,7 +634,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -666,7 +666,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -691,7 +691,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: true, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
@@ -715,7 +715,7 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
     const handler = createStreamToolHandler({
       config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
-      mcpClient: mockClient,
+      mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => null, // no adapter available
       storage: mockStorage,
