@@ -1,20 +1,23 @@
 /**
- * Notion AI Stream Interceptor — Phase 1: Passive NDJSON Observer
+ * Notion AI Stream Interceptor — Phase 1 + Phase 2
+ *
+ * Phase 1: Passive NDJSON observer (detect function_call, emit events)
+ * Phase 2: Function-call cutoff (close frontend stream, drain background)
  *
  * Intercepts fetch requests to runInferenceTranscript, wraps the ReadableStream
- * with a passthrough observer that detects function_call signals in NDJSON chunks.
- *
- * Phase 1 is purely observational — it does NOT modify, pause, or abort the stream.
- * It emits events via a listener callback when function_call is detected.
+ * with an observer that detects function_call signals in NDJSON chunks.
+ * When cutoff is enabled and a structured function_call identity is found,
+ * the frontend stream is closed and remaining chunks are drained in the background.
  *
  * References:
  * - Plan: plans/stream-pause-inject.md (PR #23)
+ * - Phase 2 plan: plans/stream-intercept-phase2.md (PR #27)
  * - Evidence: scripts/temp/phase0-final-evidence.md
  */
 
 import { createLogger } from '@extension/shared/lib/logger';
 import { detectFunctionCall, extractFunctionCallIdentity } from './parser';
-import type { StreamEvent, StreamEventListener } from './types';
+import type { StreamCutoffConfig, StreamEvent, StreamEventListener } from './types';
 
 const logger = createLogger('StreamInterceptor');
 
@@ -29,6 +32,25 @@ let installed = false;
 
 /** Counter for generating unique stream IDs */
 let streamCounter = 0;
+
+/** Default cutoff configuration (Phase 2 disabled by default for safety) */
+const DEFAULT_CUTOFF_CONFIG: StreamCutoffConfig = {
+    enabled: false,
+    mode: 'drain-drop',
+    requireStructuredIdentity: true,
+    maxDrainMs: 30000,
+};
+
+/** Active cutoff configuration */
+let cutoffConfig: StreamCutoffConfig = { ...DEFAULT_CUTOFF_CONFIG };
+
+/**
+ * Configure the cutoff behavior. Call before installStreamInterceptor().
+ */
+export function configureCutoff(config: Partial<StreamCutoffConfig>): void {
+    cutoffConfig = { ...DEFAULT_CUTOFF_CONFIG, ...config };
+    logger.info('Cutoff configured:', cutoffConfig);
+}
 
 /**
  * Register a listener for stream events.
@@ -52,8 +74,63 @@ function emit(event: StreamEvent): void {
 }
 
 /**
- * Create an observer TransformStream that passes through all chunks unchanged
- * while scanning for function_call signals in the NDJSON text.
+ * Drain the upstream reader in the background, discarding all chunks.
+ * Used in drain-drop mode after closing the frontend stream.
+ *
+ * Tracks statistics (dropped chunks/bytes) and emits stream_drain_complete.
+ * Respects maxDrainMs watchdog — force-cancels if drain takes too long.
+ */
+async function drainBackground(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    maxDrainMs: number,
+    streamId: string,
+): Promise<void> {
+    let droppedChunks = 0;
+    let droppedBytes = 0;
+    const drainStart = performance.now();
+    let timedOut = false;
+
+    // Watchdog timer
+    const timeoutId = setTimeout(() => {
+        timedOut = true;
+        reader.cancel('drain watchdog timeout').catch(() => {});
+    }, maxDrainMs);
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            droppedChunks++;
+            droppedBytes += value?.byteLength ?? 0;
+        }
+    } catch {
+        // Reader was cancelled (watchdog or external), that's expected
+    } finally {
+        clearTimeout(timeoutId);
+    }
+
+    const drainDurationMs = performance.now() - drainStart;
+    logger.info(
+        `[${streamId}] Drain complete: ${droppedChunks} chunks, ${droppedBytes} bytes, ` +
+        `${drainDurationMs.toFixed(0)}ms${timedOut ? ' (timed out)' : ''}`,
+    );
+
+    emit({
+        type: 'stream_drain_complete',
+        streamId,
+        droppedChunks,
+        droppedBytes,
+        drainDurationMs,
+        timedOut,
+    });
+}
+
+/**
+ * Create an observer stream that detects function_call signals in NDJSON text.
+ *
+ * Phase 1 (cutoff disabled): passes through all chunks unchanged.
+ * Phase 2 (cutoff enabled): after detecting a function_call with structured identity,
+ * forwards the trigger chunk, closes the frontend stream, and drains background.
  *
  * Uses pull-based semantics to preserve backpressure from downstream consumer.
  * cancel() is propagated to the original reader.
@@ -88,9 +165,19 @@ function createObserverStream(
                     if (remaining) {
                         buffer += remaining;
                     }
-                    // Process any remaining buffer
-                    if (buffer.trim().length > 0) {
-                        processLine(buffer.trim(), streamId, startTime, chunkIndex);
+                    // Process any remaining buffer for function_call detection
+                    const lastLine = buffer.trim();
+                    if (lastLine.length > 0 && !functionCallDetected && detectFunctionCall(lastLine)) {
+                        const elapsed = performance.now() - startTime;
+                        const identity = extractFunctionCallIdentity(lastLine);
+                        emit({
+                            type: 'function_call',
+                            rawLine: lastLine,
+                            identity,
+                            chunkIndex,
+                            elapsedMs: elapsed,
+                            streamId,
+                        });
                     }
                     emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                     controller.close();
@@ -99,7 +186,10 @@ function createObserverStream(
 
                 chunkIndex++;
 
-                // Decode and scan for function_call (passive observation)
+                // Decode and scan for function_call
+                let shouldCutoff = false;
+                let cutoffIdentity = null;
+
                 if (!functionCallDetected && value) {
                     const text = decoder.decode(value, { stream: true });
                     buffer += text;
@@ -112,14 +202,88 @@ function createObserverStream(
                     for (const line of lines) {
                         const trimmed = line.trim();
                         if (trimmed.length === 0) continue;
-                        if (processLine(trimmed, streamId, startTime, chunkIndex)) {
+
+                        if (detectFunctionCall(trimmed)) {
+                            const elapsed = performance.now() - startTime;
+                            const identity = extractFunctionCallIdentity(trimmed);
+
+                            logger.info(
+                                `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms` +
+                                (identity?.name ? ` — ${identity.name}` : ''),
+                            );
+
+                            emit({
+                                type: 'function_call',
+                                rawLine: trimmed,
+                                identity,
+                                chunkIndex,
+                                elapsedMs: elapsed,
+                                streamId,
+                            });
+
                             functionCallDetected = true;
+
+                            // Phase 2: check if cutoff should trigger
+                            if (cutoffConfig.enabled) {
+                                const hasStructuredIdentity = identity !== null && identity.name !== null;
+                                if (!cutoffConfig.requireStructuredIdentity || hasStructuredIdentity) {
+                                    shouldCutoff = true;
+                                    cutoffIdentity = identity;
+                                } else {
+                                    logger.info(
+                                        `[${streamId}] Cutoff skipped: identity gate not met (requireStructuredIdentity=true)`,
+                                    );
+                                }
+                            }
                             break;
                         }
                     }
                 }
 
-                // Pass through unchanged (Phase 1: no modification)
+                // Phase 2: execute cutoff
+                if (shouldCutoff) {
+                    const elapsed = performance.now() - startTime;
+
+                    if (cutoffConfig.mode === 'cancel') {
+                        // Cancel mode: forward trigger chunk, cancel reader, close stream
+                        controller.enqueue(value);
+                        emit({
+                            type: 'stream_cutoff',
+                            streamId,
+                            cutoffChunkIndex: chunkIndex,
+                            elapsedMs: elapsed,
+                            identity: cutoffIdentity,
+                            reason: 'function_call_detected',
+                            forwardedTriggerChunk: true,
+                            mode: 'cancel',
+                        });
+                        await reader.cancel('function_call cutoff');
+                        controller.close();
+                        emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
+                        return;
+                    }
+
+                    // Drain-drop mode: forward trigger chunk, close frontend, drain background
+                    controller.enqueue(value);
+                    emit({
+                        type: 'stream_cutoff',
+                        streamId,
+                        cutoffChunkIndex: chunkIndex,
+                        elapsedMs: elapsed,
+                        identity: cutoffIdentity,
+                        reason: 'function_call_detected',
+                        forwardedTriggerChunk: true,
+                        mode: 'drain-drop',
+                    });
+                    controller.close();
+                    // Background drain — fire-and-forget (errors logged inside)
+                    drainBackground(reader, cutoffConfig.maxDrainMs, streamId).catch((err) => {
+                        logger.error(`[${streamId}] Background drain error:`, err);
+                    });
+                    return;
+                }
+
+                // Normal passthrough
                 controller.enqueue(value);
             } catch (err) {
                 emit({ type: 'stream_error', streamId, url });
@@ -132,38 +296,6 @@ function createObserverStream(
             return reader.cancel(reason);
         },
     });
-}
-
-/**
- * Process a single NDJSON line, check for function_call.
- * Returns true if function_call was detected.
- */
-function processLine(
-    line: string,
-    streamId: string,
-    startTime: number,
-    chunkIndex: number,
-): boolean {
-    if (detectFunctionCall(line)) {
-        const elapsed = performance.now() - startTime;
-        const identity = extractFunctionCallIdentity(line);
-
-        logger.info(
-            `[${streamId}] function_call detected at chunk #${chunkIndex}, ${elapsed.toFixed(0)}ms` +
-            (identity?.name ? ` — ${identity.name}` : ''),
-        );
-
-        emit({
-            type: 'function_call',
-            rawLine: line,
-            identity,
-            chunkIndex,
-            elapsedMs: elapsed,
-            streamId,
-        });
-        return true;
-    }
-    return false;
 }
 
 /**
@@ -228,7 +360,9 @@ export function installStreamInterceptor(): void {
     };
 
     installed = true;
-    logger.info('Stream interceptor installed (Phase 1: passive observer)');
+    logger.info(
+        `Stream interceptor installed (cutoff ${cutoffConfig.enabled ? 'enabled' : 'disabled'}, mode=${cutoffConfig.mode})`,
+    );
 }
 
 /**
