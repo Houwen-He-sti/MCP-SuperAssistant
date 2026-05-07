@@ -5,7 +5,8 @@
  * Called once during render_prescript initialization.
  */
 
-import { onStreamEvent } from './interceptor';
+import { onStreamEvent as onStreamEventIsolated } from './interceptor';
+import { onStreamEvent as onStreamEventBridge, installMainWorldStreamBridge, sendConfigToMainWorld } from './interceptorBridge';
 import {
   createStreamToolHandler,
   type AdapterLike,
@@ -15,6 +16,15 @@ import {
 } from './streamToolBridge';
 import { reserveExecution, executionGuardStore } from '../mcpexecute/executionGuard';
 import { storeExecutedFunction, generateContentSignature } from '../mcpexecute/storage';
+
+/**
+ * Determine if we're on a Notion page.
+ * On Notion, stream events come from MAIN world via the bridge.
+ * On other providers, they come from the ISOLATED world interceptor.
+ */
+function isNotionHost(): boolean {
+  return typeof window !== 'undefined' && window.location.hostname.includes('notion.so');
+}
 
 // --- Default config ---
 const DEFAULT_CONFIG: StreamToolBridgeConfig = {
@@ -106,8 +116,19 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeConfig>): 
     },
   });
 
-  // Subscribe to stream events
-  unsubscribe = onStreamEvent(bridgeHandler);
+  // Subscribe to stream events — use bridge for Notion, isolated interceptor for others
+  if (isNotionHost()) {
+    // Install the MAIN world bridge listener if not already done
+    installMainWorldStreamBridge();
+    // Send current cutoff config to MAIN world
+    sendConfigToMainWorld({
+      enabled: currentConfig.enabled,
+      mode: undefined, // cutoff mode managed by bridge config, not tool bridge
+    });
+    unsubscribe = onStreamEventBridge(bridgeHandler);
+  } else {
+    unsubscribe = onStreamEventIsolated(bridgeHandler);
+  }
 }
 
 /**

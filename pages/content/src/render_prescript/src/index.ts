@@ -21,12 +21,19 @@ import {
 import { styles } from './renderer/styles';
 import { configureStreamToolBridge, initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
 
-// Install Notion AI stream interceptor IMMEDIATELY (before any bundle caches fetch).
-// Phase 1: passive observer only — logs function_call detection to console.
-installStreamInterceptor();
+// Install Notion AI stream interceptor:
+// - On Notion: SKIP the isolated world interceptor (can't intercept MAIN world fetch).
+//   The MAIN world interceptor (separate content script) handles interception.
+//   The bridge in initStreamToolBridge() will listen for MAIN world events.
+// - On other providers: use the isolated world interceptor as before.
+const isNotion = typeof window !== 'undefined' && window.location.hostname.includes('notion.so');
+if (!isNotion) {
+  installStreamInterceptor();
+}
 
 // Phase 3: Initialize stream tool bridge (disabled by default).
-// Subscribes to stream events; enable via configureStreamToolBridge({ enabled: true }).
+// On Notion: subscribes via MAIN world bridge. On others: subscribes via isolated interceptor.
+// Enable via configureStreamToolBridge({ enabled: true }).
 initStreamToolBridge();
 // Import the website-specific components
 // import { initPerplexityComponents } from './websites_components/perplexity';
@@ -412,16 +419,18 @@ if (typeof window !== 'undefined') {
     (window as any).__DEBUG_JSON_PARSER = false;
     logger.debug('JSON parser debug logging disabled.');
   };
+
+  // Expose Phase 3 bridge control for runtime activation
+  (window as any).configureStreamToolBridge = configureStreamToolBridge;
 }
 
 // --- Exports for potential module usage ---
 export {
-  CONFIG, checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, configure as configureFunctionCallRenderer, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles,
-  // Stream interceptor (Phase 1)
-  onStreamEvent,
+  checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, CONFIG, configure as configureFunctionCallRenderer, configureStreamToolBridge, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate, initializeRenderer as initialize,
   // Stream tool bridge (Phase 3)
   initStreamToolBridge,
-  configureStreamToolBridge,
+  // Stream interceptor (Phase 1)
+  onStreamEvent, processFunctionCalls, processFunctionResults, startDirectMonitoring, startFunctionResultMonitoring, stopDirectMonitoring, stopFunctionResultMonitoring, styles
 };
 
 export type { FunctionCallRendererConfig };
