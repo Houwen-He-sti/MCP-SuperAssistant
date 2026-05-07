@@ -170,6 +170,13 @@ const manifest = {
       js: ['content/index.iife.js'],
       run_at: 'document_idle',
     },
+    // MAIN world stream interceptor for Notion AI (patches fetch before Notion caches it)
+    {
+      matches: ['*://*.notion.so/*'],
+      js: ['content/stream-interceptor-main.iife.js'],
+      run_at: 'document_start',
+      world: 'MAIN',
+    },
 
   ],
   // devtools_page: 'devtools/index.html',
