@@ -129,14 +129,18 @@ function createObserverStream(originalBody, streamId, url, cutoffConfig, emitFn)
                                 streamId,
                             });
 
-                            functionCallDetected = true;
-
                             if (cutoffConfig.enabled) {
                                 const hasStructuredIdentity = identity !== null && identity.name !== null;
                                 if (!cutoffConfig.requireStructuredIdentity || hasStructuredIdentity) {
+                                    functionCallDetected = true;
                                     shouldCutoff = true;
                                     cutoffIdentity = identity;
+                                } else {
+                                    // Identity gate failed — keep scanning
+                                    continue;
                                 }
+                            } else {
+                                functionCallDetected = true;
                             }
                             break;
                         }
@@ -177,8 +181,9 @@ function createObserverStream(originalBody, streamId, url, cutoffConfig, emitFn)
                         mode: 'drain-drop',
                     });
                     controller.close();
+                    emitFn({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                     // Background drain
-                    drainBackground(reader, cutoffConfig.maxDrainMs, streamId, emitFn).catch(() => {});
+                    drainBackground(reader, cutoffConfig.maxDrainMs, streamId, emitFn).catch(() => { });
                     return;
                 }
 
@@ -203,7 +208,7 @@ async function drainBackground(reader, maxDrainMs, streamId, emitFn) {
 
     const timeoutId = setTimeout(() => {
         timedOut = true;
-        reader.cancel('drain watchdog timeout').catch(() => {});
+        reader.cancel('drain watchdog timeout').catch(() => { });
     }, maxDrainMs);
 
     try {
@@ -365,6 +370,9 @@ console.log('\nTest 3: Drain-drop mode — cutoff triggered, hallucination dropp
     assertEq(cutoffEvent?.reason, 'function_call_detected', 'Reason is function_call_detected');
     assert(cutoffEvent?.forwardedTriggerChunk === true, 'forwardedTriggerChunk is true');
     assertEq(cutoffEvent?.identity?.name, 'mcp__search', 'Identity name is mcp__search');
+
+    // stream_end should be emitted after cutoff (P0-1 fix)
+    assert(events.some(e => e.type === 'stream_end'), 'stream_end emitted after drain-drop cutoff');
 
     // Wait for background drain to complete
     await delay(100);
@@ -539,6 +547,73 @@ console.log('\nTest 10: function_call in trailing buffer at stream end');
 
     assertEq(output.length, 1, '1 chunk forwarded');
     assert(events.some(e => e.type === 'function_call'), 'function_call event emitted from trailing buffer');
+}
+
+// Test 11: Regression — identity gate fail then valid structured function_call triggers cutoff
+console.log('\nTest 11: Identity gate fail → later valid function_call → cutoff triggers');
+{
+    const events = [];
+    const lines = [
+        '{"type":"text","value":"Before"}',
+        '{"type":"function_call","name":null}',   // keyword match, identity gate fails (name not string)
+        '{"type":"text","value":"Middle"}',
+        '{"type":"function_call","name":"mcp__valid_tool","id":"c7","arguments":"{}"}',   // valid structured identity
+        '{"type":"text","value":"hallucination after valid"}',
+    ];
+    const chunks = makeChunks(lines);
+    const source = makeReadableStream(chunks);
+    const config = { enabled: true, mode: 'drain-drop', requireStructuredIdentity: true, maxDrainMs: 5000 };
+    const observed = createObserverStream(source, 'test-11', '/api', config, e => events.push(e));
+    const output = await readAll(observed);
+
+    // Before, null-identity, Middle all pass through; trigger chunk (valid) forwarded; hallucination dropped
+    // Chunks: 1=Before, 2=null-identity, 3=Middle, 4=valid-trigger → cutoff after 4
+    assertEq(output.length, 4, '4 chunks forwarded (before + null-identity + middle + trigger)');
+    assert(output[3].includes('mcp__valid_tool'), 'Last forwarded chunk is the valid trigger');
+
+    const fcEvents = events.filter(e => e.type === 'function_call');
+    assertEq(fcEvents.length, 2, '2 function_call events emitted (null identity + valid)');
+    assertEq(fcEvents[0].identity?.name, null, 'First function_call has null name');
+    assertEq(fcEvents[1].identity?.name, 'mcp__valid_tool', 'Second function_call has valid name');
+
+    const cutoffEvent = events.find(e => e.type === 'stream_cutoff');
+    assert(cutoffEvent !== undefined, 'Cutoff triggered on second (valid) function_call');
+    assertEq(cutoffEvent?.identity?.name, 'mcp__valid_tool', 'Cutoff identity matches valid tool');
+
+    // stream_end should be emitted (P0-1 fix)
+    const streamEndAfterCutoff = events.filter(e => e.type === 'stream_end');
+    assertEq(streamEndAfterCutoff.length, 1, 'stream_end emitted after cutoff');
+
+    await delay(100);
+    const drainEvent = events.find(e => e.type === 'stream_drain_complete');
+    assert(drainEvent !== undefined, 'Drain completed');
+    assertEq(drainEvent?.droppedChunks, 1, '1 hallucination chunk dropped');
+}
+
+// Test 12: Drain-drop emits stream_end (P0-1 regression)
+console.log('\nTest 12: Drain-drop mode emits stream_end before drain_complete');
+{
+    const events = [];
+    const lines = [
+        '{"type":"function_call","name":"tool","id":"c8","arguments":"{}"}',
+        '{"type":"text","value":"dropped"}',
+    ];
+    const chunks = makeChunks(lines);
+    const source = makeReadableStream(chunks);
+    const config = { enabled: true, mode: 'drain-drop', requireStructuredIdentity: true, maxDrainMs: 5000 };
+    const observed = createObserverStream(source, 'test-12', '/api', config, e => events.push(e));
+    await readAll(observed);
+
+    await delay(100);
+    const eventTypes = events.map(e => e.type);
+    assert(eventTypes.includes('stream_cutoff'), 'stream_cutoff emitted');
+    assert(eventTypes.includes('stream_end'), 'stream_end emitted');
+    assert(eventTypes.includes('stream_drain_complete'), 'stream_drain_complete emitted');
+
+    // stream_end should come before stream_drain_complete
+    const endIdx = eventTypes.indexOf('stream_end');
+    const drainIdx = eventTypes.indexOf('stream_drain_complete');
+    assert(endIdx < drainIdx, 'stream_end emitted BEFORE stream_drain_complete');
 }
 
 // === Summary ===

@@ -53,11 +53,11 @@ export interface StreamDrainCompleteEvent {
 
 /** Event emitted for stream lifecycle */
 export interface StreamLifecycleEvent {
-    type: 'stream_start' | 'stream_end' | 'stream_error';
-    streamId: string;
-    url: string;
-    /** Total chunks received (for stream_end) */
-    totalChunks?: number;
+  type: 'stream_start' | 'stream_end' | 'stream_error';
+  streamId: string;
+  url: string;
+  /** Total chunks received (for stream_end) */
+  totalChunks?: number;
 }
 
 /** Configuration for Phase 2 stream cutoff */

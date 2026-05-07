@@ -15,6 +15,6 @@ export type {
     StreamEvent,
     StreamEventListener,
     StreamFunctionCallEvent,
-    StreamLifecycleEvent,
+    StreamLifecycleEvent
 } from './types';
 

@@ -48,7 +48,7 @@ let cutoffConfig: StreamCutoffConfig = { ...DEFAULT_CUTOFF_CONFIG };
  * Configure the cutoff behavior. Call before installStreamInterceptor().
  */
 export function configureCutoff(config: Partial<StreamCutoffConfig>): void {
-    cutoffConfig = { ...DEFAULT_CUTOFF_CONFIG, ...config };
+    cutoffConfig = { ...cutoffConfig, ...config };
     logger.info('Cutoff configured:', cutoffConfig);
 }
 
@@ -93,7 +93,7 @@ async function drainBackground(
     // Watchdog timer
     const timeoutId = setTimeout(() => {
         timedOut = true;
-        reader.cancel('drain watchdog timeout').catch(() => {});
+        reader.cancel('drain watchdog timeout').catch(() => { });
     }, maxDrainMs);
 
     try {
@@ -221,19 +221,24 @@ function createObserverStream(
                                 streamId,
                             });
 
-                            functionCallDetected = true;
-
                             // Phase 2: check if cutoff should trigger
                             if (cutoffConfig.enabled) {
                                 const hasStructuredIdentity = identity !== null && identity.name !== null;
                                 if (!cutoffConfig.requireStructuredIdentity || hasStructuredIdentity) {
+                                    functionCallDetected = true;
                                     shouldCutoff = true;
                                     cutoffIdentity = identity;
                                 } else {
+                                    // Identity gate failed — do NOT set functionCallDetected
+                                    // so future chunks can still trigger cutoff if a valid
+                                    // structured function_call arrives later.
                                     logger.info(
                                         `[${streamId}] Cutoff skipped: identity gate not met (requireStructuredIdentity=true)`,
                                     );
+                                    continue;
                                 }
+                            } else {
+                                functionCallDetected = true;
                             }
                             break;
                         }
@@ -276,6 +281,7 @@ function createObserverStream(
                         mode: 'drain-drop',
                     });
                     controller.close();
+                    emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                     // Background drain — fire-and-forget (errors logged inside)
                     drainBackground(reader, cutoffConfig.maxDrainMs, streamId).catch((err) => {
                         logger.error(`[${streamId}] Background drain error:`, err);
