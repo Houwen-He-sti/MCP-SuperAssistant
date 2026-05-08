@@ -229,7 +229,9 @@ describe('streamToolBridge', () => {
 
     // Verify adapter.insertText called with formatted result
     assert.strictEqual(mockAdapter._calls.insertText.length, 1);
-    assert.ok(mockAdapter._calls.insertText[0].includes('<function_result call_id="call_abc123" name="mcp__web_search" status="ok">'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('<function_results>'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('call_id="call_abc123"'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="success"'));
     assert.ok(mockAdapter._calls.insertText[0].includes('search results'));
 
     // Verify succeeded event emitted
@@ -493,8 +495,9 @@ describe('streamToolBridge', () => {
 
     assert.strictEqual(mockAdapter._calls.insertText.length, 1);
     const inserted = mockAdapter._calls.insertText[0];
-    assert.ok(inserted.startsWith('<function_result call_id="call_abc123" name="mcp__web_search" status="ok">'));
-    assert.ok(inserted.endsWith('</function_result>'));
+    assert.ok(inserted.startsWith('<function_results>'));
+    assert.ok(inserted.endsWith('</function_results>'));
+    assert.ok(inserted.includes('status="success"'));
     assert.strictEqual(mockAdapter._calls.submitForm.length, 0, 'submitForm should NOT be called');
   });
 

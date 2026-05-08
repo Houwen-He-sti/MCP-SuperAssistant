@@ -361,7 +361,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
         const formattedResult = formatFunctionResult({
           callId,
           name: identity.name!,
-          status: 'ok',
+          status: 'success',
           result,
         });
         const insertOk = await currentAdapter.insertText(formattedResult);

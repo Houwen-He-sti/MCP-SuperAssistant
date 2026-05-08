@@ -1,7 +1,8 @@
 /**
- * Unit tests for functionResultFormatter.ts (P0-2)
+ * Unit tests for functionResultFormatter.ts (P0-2, Gate 4)
  *
- * Tests the function_result formatting logic extracted from streamToolBridge.ts.
+ * Tests the function_result formatting logic.
+ * Gate 4: Updated to protocol spec format with CDATA wrapper + status='success'.
  *
  * Run: node --test --experimental-strip-types functionResultFormatter.test.ts
  * (from render_prescript/src/stream/ directory)
@@ -13,89 +14,93 @@ import { formatFunctionResult } from './functionResultFormatter.ts';
 
 describe('functionResultFormatter', () => {
 
-  test('1. success with object result → XML with JSON body', () => {
+  test('1. success with object result → protocol format with CDATA', () => {
     const output = formatFunctionResult({
       callId: 'call_abc123',
       name: 'echo',
-      status: 'ok',
+      status: 'success',
       result: { message: 'hello' },
     });
-    assert.strictEqual(output,
-      '<function_result call_id="call_abc123" name="echo" status="ok">\n{"message":"hello"}\n</function_result>'
-    );
+    assert.ok(output.startsWith('<function_results>'));
+    assert.ok(output.endsWith('</function_results>'));
+    assert.ok(output.includes('call_id="call_abc123"'));
+    assert.ok(output.includes('name="echo"'));
+    assert.ok(output.includes('status="success"'));
+    assert.ok(output.includes('<![CDATA['));
+    assert.ok(output.includes('{"message":"hello"}'));
   });
 
-  test('2. success with string result → XML with raw string body', () => {
+  test('2. success with string result → CDATA with raw string', () => {
     const output = formatFunctionResult({
       callId: 'c1',
       name: 'web_search',
-      status: 'ok',
+      status: 'success',
       result: 'Search results here',
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c1" name="web_search" status="ok">\nSearch results here\n</function_result>'
-    );
+    assert.ok(output.includes('<content type="application/json"><![CDATA['));
+    assert.ok(output.includes('Search results here'));
+    assert.ok(output.includes(']]></content>'));
   });
 
-  test('3. error status → XML with status="error"', () => {
+  test('3. error status → error element with CDATA', () => {
     const output = formatFunctionResult({
       callId: 'c2',
       name: 'file_read',
       status: 'error',
       result: { error: 'File not found' },
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c2" name="file_read" status="error">\n{"error":"File not found"}\n</function_result>'
-    );
+    assert.ok(output.includes('status="error"'));
+    assert.ok(output.includes('<error type="ToolExecutionError"><![CDATA['));
+    assert.ok(output.includes('{"error":"File not found"}'));
+    assert.ok(output.includes(']]></error>'));
+    // Should NOT have <content> for error
+    assert.ok(!output.includes('<content'));
   });
 
-  test('4. result is null → JSON "null" in body', () => {
+  test('4. result is null → JSON "null" in CDATA', () => {
     const output = formatFunctionResult({
       callId: 'c3',
       name: 'void_tool',
-      status: 'ok',
+      status: 'success',
       result: null,
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c3" name="void_tool" status="ok">\nnull\n</function_result>'
-    );
+    assert.ok(output.includes('null'));
+    assert.ok(output.includes('status="success"'));
   });
 
-  test('5. result is number → JSON number in body', () => {
+  test('5. result is number → JSON number in CDATA', () => {
     const output = formatFunctionResult({
       callId: 'c4',
       name: 'calc',
-      status: 'ok',
+      status: 'success',
       result: 42,
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c4" name="calc" status="ok">\n42\n</function_result>'
-    );
+    assert.ok(output.includes('42'));
   });
 
   test('6. callId with special chars → attributes properly escaped', () => {
     const output = formatFunctionResult({
       callId: 'call"with<special>&chars',
       name: 'tool"name',
-      status: 'ok',
+      status: 'success',
       result: 'ok',
     });
-    // Attributes should be XML-safe
     assert.ok(output.includes('call_id="call&quot;with&lt;special&gt;&amp;chars"'));
     assert.ok(output.includes('name="tool&quot;name"'));
   });
 
-  test('7. result string containing </function_result> → escaped to prevent tag injection', () => {
+  test('7. result string containing ]]> → CDATA properly escaped', () => {
     const output = formatFunctionResult({
       callId: 'c5',
       name: 'echo',
-      status: 'ok',
-      result: 'payload</function_result><injected>',
+      status: 'success',
+      result: 'payload]]>injected',
     });
-    // The closing tag in content should not prematurely close the XML
-    assert.ok(!output.includes('</function_result><injected>'));
-    // Content should be escaped
-    assert.ok(output.includes('&lt;/function_result&gt;'));
+    // The ]]> in content should be split for valid CDATA
+    assert.ok(!output.includes('payload]]>injected'));
+    // Verify overall structure is valid
+    assert.ok(output.startsWith('<function_results>'));
+    assert.ok(output.endsWith('</function_results>'));
   });
 
   test('8. large result → truncated with marker', () => {
@@ -103,39 +108,35 @@ describe('functionResultFormatter', () => {
     const output = formatFunctionResult({
       callId: 'c6',
       name: 'big_tool',
-      status: 'ok',
+      status: 'success',
       result: largeResult,
     });
-    // Should be truncated
     assert.ok(output.length < 100_000);
     assert.ok(output.includes('[truncated]'));
-    // Should still have proper XML structure
-    assert.ok(output.startsWith('<function_result'));
-    assert.ok(output.endsWith('</function_result>'));
+    assert.ok(output.startsWith('<function_results>'));
+    assert.ok(output.endsWith('</function_results>'));
   });
 
-  test('9. empty string result → XML with empty body', () => {
+  test('9. empty string result → CDATA with empty body', () => {
     const output = formatFunctionResult({
       callId: 'c7',
       name: 'empty',
-      status: 'ok',
+      status: 'success',
       result: '',
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c7" name="empty" status="ok">\n\n</function_result>'
-    );
+    assert.ok(output.includes('<![CDATA['));
+    assert.ok(output.includes('status="success"'));
   });
 
-  test('10. nested object result → properly serialized JSON', () => {
+  test('10. nested object result → properly serialized JSON in CDATA', () => {
     const output = formatFunctionResult({
       callId: 'c8',
       name: 'deep',
-      status: 'ok',
+      status: 'success',
       result: { a: { b: { c: [1, 2, 3] } } },
     });
-    assert.strictEqual(output,
-      '<function_result call_id="c8" name="deep" status="ok">\n{"a":{"b":{"c":[1,2,3]}}}\n</function_result>'
-    );
+    assert.ok(output.includes('{"a":{"b":{"c":[1,2,3]}}}'));
+    assert.ok(output.includes('<![CDATA['));
   });
 
 });
