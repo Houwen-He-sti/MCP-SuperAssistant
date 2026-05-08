@@ -254,6 +254,155 @@ if ((window as any)[INSTALL_KEY]) {
     }
 
     // ============================================================================
+    // Notion Patch Format — cross-patch accumulator for JSONL function calls
+    //
+    // Notion streams function_call as proprietary JSONL embedded in text content
+    // patches (type:"patch", o:"x"), split across multiple NDJSON lines:
+    //   {"type":"function_call_start","name":"...","call_id":"..."}
+    //   {"type":"parameter","key":"...","value":"..."}
+    //   {"type":"function_call_end","call_id":"..."}
+    // ============================================================================
+
+    /** Extract text content from a Notion patch line (o:"x" extend operations on content paths) */
+    function extractPatchTextContent(line: string): string | null {
+        try {
+            const obj = JSON.parse(line);
+            if (obj?.type !== 'patch' || !Array.isArray(obj.v)) return null;
+
+            let text = '';
+            for (const op of obj.v) {
+                if (op.o === 'x' && typeof op.v === 'string' && typeof op.p === 'string' && op.p.endsWith('/content')) {
+                    text += op.v;
+                }
+            }
+            return text || null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Parse a complete JSONL block to extract function call identity */
+    function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentity | null {
+        const lines = text.split('\n');
+        let name: string | null = null;
+        let callId: string | null = null;
+        const args: Record<string, string> = {};
+
+        for (const rawLine of lines) {
+            const trimmed = rawLine.trim();
+            if (!trimmed.startsWith('{')) continue;
+            try {
+                const obj = JSON.parse(trimmed);
+                if (obj.type === 'function_call_start') {
+                    name = typeof obj.name === 'string' ? obj.name : null;
+                    callId = typeof obj.call_id === 'string' ? obj.call_id : null;
+                } else if (obj.type === 'parameter' && typeof obj.key === 'string') {
+                    args[obj.key] = typeof obj.value === 'string' ? obj.value : JSON.stringify(obj.value);
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        if (!name) return null;
+
+        return {
+            name,
+            callId,
+            arguments: Object.keys(args).length > 0 ? JSON.stringify(args) : null,
+        };
+    }
+
+    interface ScanResult {
+        /** Whether a function_call was fully detected (identity resolved or unrecoverable) */
+        detected: boolean;
+        /** Extracted identity (null if format unrecognized) */
+        identity: FunctionCallIdentity | null;
+        /** The NDJSON line that first triggered detection */
+        rawLine: string;
+        /** Whether the scanner is still accumulating cross-patch data */
+        accumulating: boolean;
+    }
+
+    /**
+     * Create a stateful function_call scanner that handles both standard JSON
+     * formats and Notion's cross-patch JSONL format.
+     *
+     * Usage: call processLine() for each trimmed NDJSON line. Check result:
+     * - accumulating=true: scanner needs more lines, don't emit yet
+     * - detected=true: function_call fully resolved, emit event
+     * - detected=false && !accumulating: line is not a function_call
+     */
+    function createFunctionCallScanner() {
+        let patchContentBuffer = '';
+        let isAccumulating = false;
+        let firstDetectionLine = '';
+
+        function processLine(trimmedLine: string): ScanResult {
+            // If accumulating patch content for a cross-patch function_call
+            if (isAccumulating) {
+                const patchText = extractPatchTextContent(trimmedLine);
+                if (patchText !== null) {
+                    patchContentBuffer += patchText;
+                    if (patchContentBuffer.includes('function_call_end')) {
+                        const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
+                        const rawLine = firstDetectionLine;
+                        reset();
+                        return { detected: true, identity, rawLine, accumulating: false };
+                    }
+                    // Still accumulating — need more patches
+                    return { detected: false, identity: null, rawLine: '', accumulating: true };
+                }
+                // Non-patch line while accumulating — abort accumulation, try best-effort
+                const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
+                const rawLine = firstDetectionLine;
+                reset();
+                if (identity !== null) {
+                    return { detected: true, identity, rawLine, accumulating: false };
+                }
+                // Fall through to normal detection on current line
+            }
+
+            if (!detectFunctionCall(trimmedLine)) {
+                return { detected: false, identity: null, rawLine: '', accumulating: false };
+            }
+
+            // Try standard extraction first (ChatGPT, etc.)
+            const identity = extractFunctionCallIdentity(trimmedLine);
+            if (identity !== null) {
+                return { detected: true, identity, rawLine: trimmedLine, accumulating: false };
+            }
+
+            // Try Notion patch format
+            const patchText = extractPatchTextContent(trimmedLine);
+            if (patchText !== null && patchText.includes('function_call_start')) {
+                patchContentBuffer = patchText;
+                firstDetectionLine = trimmedLine;
+                if (patchText.includes('function_call_end')) {
+                    // Complete in one line
+                    const patchIdentity = extractIdentityFromJsonlBlock(patchContentBuffer);
+                    reset();
+                    return { detected: true, identity: patchIdentity, rawLine: trimmedLine, accumulating: false };
+                }
+                // Need to accumulate more patches
+                isAccumulating = true;
+                return { detected: false, identity: null, rawLine: '', accumulating: true };
+            }
+
+            // Unknown format — emit with null identity (legacy behavior)
+            return { detected: true, identity: null, rawLine: trimmedLine, accumulating: false };
+        }
+
+        function reset() {
+            patchContentBuffer = '';
+            isAccumulating = false;
+            firstDetectionLine = '';
+        }
+
+        return { processLine };
+    }
+
+    // ============================================================================
     // Background Drain (Phase 2)
     // ============================================================================
 
@@ -297,10 +446,131 @@ if ((window as any)[INSTALL_KEY]) {
     }
 
     // ============================================================================
-    // Observer Stream (wraps original response body)
+    // Background Observer (reads stream independently — always completes)
+    // Returns a consumer ReadableStream that receives the same chunks via push.
+    // If consumer stops reading or cancels, we continue reading for event emission.
     // ============================================================================
 
-    function createObserverStream(
+    function createObservedStreamWithBackground(
+        originalBody: ReadableStream<Uint8Array>,
+        streamId: string,
+        url: string,
+    ): ReadableStream<Uint8Array> {
+        const decoder = new TextDecoder();
+        const originalReader = originalBody.getReader();
+        let chunkIndex = 0;
+        let functionCallDetected = false;
+        const startTime = performance.now();
+        let buffer = '';
+        let consumerActive = true;
+        let streamController: ReadableStreamDefaultController<Uint8Array>;
+        const scanner = createFunctionCallScanner();
+
+        // Consumer-facing stream (push-based: we enqueue from our background loop)
+        const consumerStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+                streamController = controller;
+            },
+            cancel() {
+                // Consumer abandoned — we keep reading in background for events
+                consumerActive = false;
+            },
+        });
+
+        // Background loop: reads original body to completion, emits events,
+        // and pushes chunks to consumer (if still active)
+        (async () => {
+            try {
+                while (true) {
+                    const { done, value } = await originalReader.read();
+
+                    if (done) {
+                        const remaining = decoder.decode();
+                        if (remaining) buffer += remaining;
+
+                        const lastLine = buffer.trim();
+                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
+                            const result = scanner.processLine(lastLine);
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+                            }
+                        }
+                        emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
+                        if (consumerActive) {
+                            try { streamController.close(); } catch { /* already closed */ }
+                        }
+                        return;
+                    }
+
+                    chunkIndex++;
+
+                    // Push to consumer (best-effort — if they cancelled, we still continue)
+                    if (consumerActive) {
+                        try { streamController.enqueue(value); } catch { consumerActive = false; }
+                    }
+
+                    // Scan for function_call (scanner handles cross-patch accumulation)
+                    if (!functionCallDetected && value) {
+                        const text = decoder.decode(value, { stream: true });
+                        buffer += text;
+
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() ?? '';
+
+                        if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
+                            buffer = '';
+                        }
+
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (trimmed.length === 0) continue;
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
+
+                            const result = scanner.processLine(trimmed);
+                            if (result.accumulating) continue; // Need more patches
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+
+                                functionCallDetected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch {
+                emit({ type: 'stream_error', streamId, url });
+                if (consumerActive) {
+                    try { streamController.close(); } catch { /* ignore */ }
+                }
+            }
+        })();
+
+        return consumerStream;
+    }
+
+    // ============================================================================
+    // Observer Stream with Cutoff (wraps response body — consumer drives reading)
+    // Used when cutoffEnabled=true to allow closing the consumer stream on function_call.
+    // ============================================================================
+
+    function createObserverStreamWithCutoff(
         originalBody: ReadableStream<Uint8Array>,
         streamId: string,
         url: string,
@@ -311,6 +581,7 @@ if ((window as any)[INSTALL_KEY]) {
         const startTime = performance.now();
         let buffer = '';
         let reader: ReadableStreamDefaultReader<Uint8Array>;
+        const scanner = createFunctionCallScanner();
 
         return new ReadableStream<Uint8Array>({
             start() {
@@ -322,23 +593,23 @@ if ((window as any)[INSTALL_KEY]) {
                     const { done, value } = await reader.read();
 
                     if (done) {
-                        // Flush decoder
                         const remaining = decoder.decode();
                         if (remaining) buffer += remaining;
 
-                        // Process remaining buffer
                         const lastLine = buffer.trim();
-                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected && detectFunctionCall(lastLine)) {
-                            const elapsed = performance.now() - startTime;
-                            const identity = extractFunctionCallIdentity(lastLine);
-                            emit({
-                                type: 'function_call',
-                                rawLine: lastLine.slice(0, MAX_RAW_LINE_LENGTH),
-                                identity,
-                                chunkIndex,
-                                elapsedMs: elapsed,
-                                streamId,
-                            });
+                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
+                            const result = scanner.processLine(lastLine);
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+                            }
                         }
                         emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                         controller.close();
@@ -347,7 +618,6 @@ if ((window as any)[INSTALL_KEY]) {
 
                     chunkIndex++;
 
-                    // Decode and scan for function_call
                     let shouldCutoff = false;
                     let cutoffIdentity: FunctionCallIdentity | null = null;
 
@@ -355,12 +625,9 @@ if ((window as any)[INSTALL_KEY]) {
                         const text = decoder.decode(value, { stream: true });
                         buffer += text;
 
-                        // Process complete NDJSON lines (handle chunk boundaries correctly)
                         const lines = buffer.split('\n');
-                        buffer = lines.pop() ?? ''; // Keep incomplete line in buffer
+                        buffer = lines.pop() ?? '';
 
-                        // Buffer cap: only cap the INCOMPLETE tail after processing complete lines
-                        // This ensures we never miss function_call in complete lines
                         if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
                             // eslint-disable-next-line no-console
                             console.warn('[MCP-SA/MAIN] Dropping oversized partial NDJSON line (%d chars)', buffer.length);
@@ -370,39 +637,34 @@ if ((window as any)[INSTALL_KEY]) {
                         for (const line of lines) {
                             const trimmed = line.trim();
                             if (trimmed.length === 0) continue;
-                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue; // Skip oversized lines
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
-                            if (detectFunctionCall(trimmed)) {
+                            const result = scanner.processLine(trimmed);
+                            if (result.accumulating) continue; // Need more patches
+
+                            if (result.detected) {
                                 const elapsed = performance.now() - startTime;
-                                const identity = extractFunctionCallIdentity(trimmed);
 
                                 emit({
                                     type: 'function_call',
-                                    rawLine: trimmed.slice(0, MAX_RAW_LINE_LENGTH),
-                                    identity,
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
                                     chunkIndex,
                                     elapsedMs: elapsed,
                                     streamId,
                                 });
 
-                                // Check if cutoff should trigger
-                                if (config.cutoffEnabled) {
-                                    const hasStructuredIdentity = identity !== null && identity.name !== null;
-                                    if (!config.requireStructuredIdentity || hasStructuredIdentity) {
-                                        functionCallDetected = true;
-                                        shouldCutoff = true;
-                                        cutoffIdentity = identity;
-                                    }
-                                    // else: identity gate not met, continue scanning
-                                } else {
+                                const hasStructuredIdentity = result.identity !== null && result.identity.name !== null;
+                                if (!config.requireStructuredIdentity || hasStructuredIdentity) {
                                     functionCallDetected = true;
+                                    shouldCutoff = true;
+                                    cutoffIdentity = result.identity;
                                 }
                                 break;
                             }
                         }
                     }
 
-                    // Phase 2: execute cutoff
                     if (shouldCutoff) {
                         const elapsed = performance.now() - startTime;
 
@@ -424,7 +686,7 @@ if ((window as any)[INSTALL_KEY]) {
                             return;
                         }
 
-                        // Drain-drop mode: forward trigger chunk, close frontend, drain background
+                        // Drain-drop mode
                         controller.enqueue(value);
                         emit({
                             type: 'stream_cutoff',
@@ -438,12 +700,10 @@ if ((window as any)[INSTALL_KEY]) {
                         });
                         controller.close();
                         emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
-                        // Background drain — fire-and-forget
                         drainBackground(reader, config.maxDrainMs, streamId).catch(() => { });
                         return;
                     }
 
-                    // Normal passthrough
                     controller.enqueue(value);
                 } catch (err) {
                     emit({ type: 'stream_error', streamId, url });
@@ -452,6 +712,8 @@ if ((window as any)[INSTALL_KEY]) {
             },
 
             cancel(reason) {
+                // Consumer abandoned the stream — emit stream_end so lifecycle is complete
+                emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex, cancelled: true });
                 return reader.cancel(reason);
             },
         });
@@ -507,12 +769,25 @@ if ((window as any)[INSTALL_KEY]) {
             // Emit stream_start only after confirming we will wrap
             emit({ type: 'stream_start', streamId, url: targetUrl.href });
 
-            // Wrap the body with our observer
-            const observedBody = createObserverStream(response.body, streamId, targetUrl.href);
+            if (config.cutoffEnabled) {
+                // Cutoff path: wrap body with observer stream that can close consumer on function_call
+                const observedBody = createObserverStreamWithCutoff(response.body, streamId, targetUrl.href);
+                const headers = new Headers(response.headers);
+                return new Response(observedBody, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers,
+                });
+            }
+
+            // Non-cutoff path: background reader that always completes.
+            // Consumer gets a push-based stream. If consumer abandons (e.g., SPA navigation),
+            // we continue reading for event emission (stream_end always fires).
+            const consumerBody = createObservedStreamWithBackground(response.body, streamId, targetUrl.href);
 
             // Reconstruct Response preserving metadata
             const headers = new Headers(response.headers);
-            return new Response(observedBody, {
+            return new Response(consumerBody, {
                 status: response.status,
                 statusText: response.statusText,
                 headers,
