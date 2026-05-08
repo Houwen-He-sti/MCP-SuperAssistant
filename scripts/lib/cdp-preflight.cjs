@@ -9,7 +9,7 @@
  *   const { resolveExtensionId, ensureAgentPage, preflight } = require('./lib/cdp-preflight.cjs');
  *
  *   // Option A: full preflight (resolves extension + ensures agent page)
- *   const { extensionId, tab, wsUrl } = await preflight();
+ *   const { extensionId, extensionName, extensionWsUrl, tab, navigated } = await preflight();
  *
  *   // Option B: individual checks
  *   const id = await resolveExtensionId('MCP SuperAssistant');
@@ -19,8 +19,8 @@
 const http = require('http');
 const WebSocket = require('ws');
 
-const CDP_PORT = 9222;
-const AGENT_URL = 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
+const CDP_PORT = process.env.CDP_PORT || 9222;
+const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
 
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 

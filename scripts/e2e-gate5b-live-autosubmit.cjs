@@ -442,6 +442,9 @@ async function runE2E(sentinel, evidence) {
             console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: events=${events.length}, sentinel=${sentinelCount}`);
         }
 
+        // Store latest events for evidence (MUST be before break)
+        evidence.events = events;
+
         // PASS condition: full bridge pipeline worked (tool executed + result injected + form submitted)
         // Sentinel echo by AI is bonus evidence, not a gating criterion — AI behavior is not our system.
         if (toolExecuted && resultInserted && formSubmitted) {
@@ -455,9 +458,6 @@ async function runE2E(sentinel, evidence) {
             }
             break;
         }
-
-        // Store latest events for evidence
-        evidence.events = events;
     }
 
     evidence.submitMethod = submitMethod;
@@ -545,6 +545,12 @@ async function writeEvidence(evidence) {
 }
 
 function generateMarkdownReport(ev) {
+    // Derive step statuses from events array (now correctly populated)
+    const hasCallTool = ev.events.some(e => e.type === 'callTool');
+    const hasInsertText = ev.events.some(e => e.type === 'insertText');
+    const callToolName = ev.events.find(e => e.type === 'callTool')?.name || '';
+    const insertTextLen = ev.events.find(e => e.type === 'insertText')?.textLen || 0;
+
     const lines = [
         `# Gate 5b Live E2E Evidence — ${ev.timestamp}`,
         '',
@@ -556,8 +562,8 @@ function generateMarkdownReport(ev) {
         `| ISOLATED world | ${ev.preflightInfo ? '✅' : '❌'} |`,
         `| mcpClient ready | ${ev.preflightInfo?.mcpClientReady ? '✅' : '❌'} |`,
         `| Bridge config | ${ev.bridgeConfig ? '✅ autoInsert=' + ev.bridgeConfig.autoInsert + ' autoSubmit=' + ev.bridgeConfig.autoSubmit : '❌'} |`,
-        `| Tool executed | ${ev.events.some(e => e.type === 'callTool') ? '✅ ' + (ev.events.find(e => e.type === 'callTool')?.name || '') : '❌'} |`,
-        `| Result injected | ${ev.events.some(e => e.type === 'insertText') ? '✅ ' + (ev.events.find(e => e.type === 'insertText')?.textLen || 0) + ' chars' : '❌'} |`,
+        `| Tool executed | ${hasCallTool ? '✅ ' + callToolName : '❌'} |`,
+        `| Result injected | ${hasInsertText ? '✅ ' + insertTextLen + ' chars' : '❌'} |`,
         `| Submit method | ${ev.submitMethod} |`,
         `| AI consumed | ${ev.sentinelAfter >= 2 ? '✅' : '❌'} sentinel ${ev.sentinelBefore} → ${ev.sentinelAfter} |`,
         '',
