@@ -35,7 +35,7 @@ export interface StreamToolExecutionEvent {
   streamId: string;
   identity: FunctionCallIdentityLike;
   status: 'reserved' | 'executing' | 'succeeded' | 'failed' | 'duplicate';
-  phase?: 'identity' | 'parse' | 'reserve' | 'mcp_client' | 'tool_call' | 'inject' | 'submit';
+  phase?: 'identity' | 'parse' | 'reserve' | 'mcp_client' | 'tool_call' | 'inject' | 'submit' | 'error_inject';
   result?: unknown;
   error?: string;
   errorCode?: string;
@@ -196,7 +196,12 @@ export async function injectResultIfSafe(params: InjectResultParams): Promise<In
     return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
   }
 
-  const existingContent = currentAdapter.getInputContent();
+  let existingContent: string | null;
+  try {
+    existingContent = currentAdapter.getInputContent();
+  } catch {
+    return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
+  }
   if (existingContent === null) {
     return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
   }

@@ -1980,4 +1980,43 @@ describe('streamToolBridge', () => {
     assert.strictEqual(error, 'DOM gone');
   });
 
+  test('69. injectResultIfSafe — getInputContent throws → INJECT_SKIPPED_NO_INSPECT', async () => {
+    const adapter: AdapterLike = {
+      insertText: async () => true,
+      getInputContent: () => { throw new Error('DOM detached'); },
+    };
+    const { outcome } = await injectResultIfSafe({
+      callId: 'c1', name: 'test', status: 'success', result: 'data',
+      autoSubmit: false, adapter: () => adapter,
+    });
+    assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_INSPECT');
+  });
+
+  test('70. circuit breaker — maxToolCallsPerStream < 0 disables breaker', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: -1 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    for (let i = 0; i < 10; i++) {
+      await handler({ type: 'stream_cutoff', streamId: 'stream-neg', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+    }
+    assert.strictEqual(mockClient._calls.length, 10, 'all 10 calls execute with negative maxCalls');
+    assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'));
+  });
+
 });
