@@ -1,202 +1,25 @@
 /**
- * Unit tests for interceptorMain.ts Notion patch format parsing
+ * Unit tests for functionCallScanner.ts — Notion patch format parsing
  *
  * Tests the cross-patch accumulator scanner, patch text extraction,
  * and JSONL block identity extraction.
  *
- * Run: node --test --experimental-strip-types interceptorMain.test.ts
+ * These tests import production code directly (no shadow implementation).
+ *
+ * Run: node --test --experimental-strip-types functionCallScanner.test.ts
  * (from render_prescript/src/stream/ directory)
  */
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-// ============================================================================
-// Re-implement the testable functions from interceptorMain.ts
-// (The IIFE doesn't export; we duplicate the logic for testing)
-// ============================================================================
-
-interface FunctionCallIdentity {
-    name: string | null;
-    callId: string | null;
-    arguments: string | null;
-}
-
-const FUNCTION_CALL_KEYWORDS = ['function_call', 'tool_use', 'tool_calls', 'name'];
-const MIN_KEYWORD_MATCHES = 2;
-
-function detectFunctionCall(line: string): boolean {
-    if (!line || line.length < 10) return false;
-    let matches = 0;
-    for (const keyword of FUNCTION_CALL_KEYWORDS) {
-        if (line.includes(keyword)) {
-            matches++;
-            if (matches >= MIN_KEYWORD_MATCHES) return true;
-        }
-    }
-    return false;
-}
-
-function extractFunctionCallIdentity(line: string): FunctionCallIdentity | null {
-    try {
-        const obj = JSON.parse(line);
-        if (!obj || typeof obj !== 'object') return null;
-
-        if (obj.type === 'function_call') {
-            return {
-                name: typeof obj.name === 'string' ? obj.name : null,
-                callId: typeof obj.id === 'string' ? obj.id : null,
-                arguments: typeof obj.arguments === 'string' ? obj.arguments : null,
-            };
-        }
-
-        if (obj.function_call && typeof obj.function_call === 'object') {
-            const fc = obj.function_call;
-            return {
-                name: typeof fc.name === 'string' ? fc.name : null,
-                callId: typeof obj.id === 'string' ? obj.id : null,
-                arguments: typeof fc.arguments === 'string' ? fc.arguments : null,
-            };
-        }
-
-        if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
-            const tc = obj.tool_calls[0];
-            const fn = tc.function;
-            return {
-                name: fn && typeof fn.name === 'string' ? fn.name : null,
-                callId: typeof tc.id === 'string' ? tc.id : null,
-                arguments: fn && typeof fn.arguments === 'string' ? fn.arguments : null,
-            };
-        }
-
-        if (obj.tool_use && typeof obj.tool_use === 'object') {
-            const tu = obj.tool_use;
-            return {
-                name: typeof tu.name === 'string' ? tu.name : null,
-                callId: typeof tu.id === 'string' ? tu.id : null,
-                arguments: tu.input ? JSON.stringify(tu.input) : null,
-            };
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-function extractPatchTextContent(line: string): string | null {
-    try {
-        const obj = JSON.parse(line);
-        if (obj?.type !== 'patch' || !Array.isArray(obj.v)) return null;
-
-        let text = '';
-        for (const op of obj.v) {
-            if (op.o === 'x' && typeof op.v === 'string' && typeof op.p === 'string' && op.p.endsWith('/content')) {
-                text += op.v;
-            }
-        }
-        return text || null;
-    } catch {
-        return null;
-    }
-}
-
-function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentity | null {
-    const lines = text.split('\n');
-    let name: string | null = null;
-    let callId: string | null = null;
-    const args: Record<string, string> = {};
-
-    for (const rawLine of lines) {
-        const trimmed = rawLine.trim();
-        if (!trimmed.startsWith('{')) continue;
-        try {
-            const obj = JSON.parse(trimmed);
-            if (obj.type === 'function_call_start') {
-                name = typeof obj.name === 'string' ? obj.name : null;
-                callId = typeof obj.call_id === 'string' ? obj.call_id : null;
-            } else if (obj.type === 'parameter' && typeof obj.key === 'string') {
-                args[obj.key] = typeof obj.value === 'string' ? obj.value : JSON.stringify(obj.value);
-            }
-        } catch {
-            continue;
-        }
-    }
-
-    if (!name) return null;
-    return {
-        name,
-        callId,
-        arguments: Object.keys(args).length > 0 ? JSON.stringify(args) : null,
-    };
-}
-
-interface ScanResult {
-    detected: boolean;
-    identity: FunctionCallIdentity | null;
-    rawLine: string;
-    accumulating: boolean;
-}
-
-function createFunctionCallScanner() {
-    let patchContentBuffer = '';
-    let isAccumulating = false;
-    let firstDetectionLine = '';
-
-    function processLine(trimmedLine: string): ScanResult {
-        if (isAccumulating) {
-            const patchText = extractPatchTextContent(trimmedLine);
-            if (patchText !== null) {
-                patchContentBuffer += patchText;
-                if (patchContentBuffer.includes('function_call_end')) {
-                    const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
-                    const rawLine = firstDetectionLine;
-                    reset();
-                    return { detected: true, identity, rawLine, accumulating: false };
-                }
-                return { detected: false, identity: null, rawLine: '', accumulating: true };
-            }
-            const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
-            const rawLine = firstDetectionLine;
-            reset();
-            if (identity !== null) {
-                return { detected: true, identity, rawLine, accumulating: false };
-            }
-        }
-
-        if (!detectFunctionCall(trimmedLine)) {
-            return { detected: false, identity: null, rawLine: '', accumulating: false };
-        }
-
-        const identity = extractFunctionCallIdentity(trimmedLine);
-        if (identity !== null) {
-            return { detected: true, identity, rawLine: trimmedLine, accumulating: false };
-        }
-
-        const patchText = extractPatchTextContent(trimmedLine);
-        if (patchText !== null && patchText.includes('function_call_start')) {
-            patchContentBuffer = patchText;
-            firstDetectionLine = trimmedLine;
-            if (patchText.includes('function_call_end')) {
-                const patchIdentity = extractIdentityFromJsonlBlock(patchContentBuffer);
-                reset();
-                return { detected: true, identity: patchIdentity, rawLine: trimmedLine, accumulating: false };
-            }
-            isAccumulating = true;
-            return { detected: false, identity: null, rawLine: '', accumulating: true };
-        }
-
-        return { detected: true, identity: null, rawLine: trimmedLine, accumulating: false };
-    }
-
-    function reset() {
-        patchContentBuffer = '';
-        isAccumulating = false;
-        firstDetectionLine = '';
-    }
-
-    return { processLine };
-}
+import {
+    detectFunctionCall,
+    extractFunctionCallIdentity,
+    extractPatchTextContent,
+    extractIdentityFromJsonlBlock,
+    createFunctionCallScanner,
+} from './functionCallScanner.ts';
 
 // ============================================================================
 // Real Notion NDJSON fixture data (captured from live stream)
