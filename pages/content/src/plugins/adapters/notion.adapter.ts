@@ -148,6 +148,39 @@ export class NotionAdapter extends BaseAdapterPlugin {
     // ── Core capabilities ──────────────────────────────────────────────
 
     /**
+     * Emit tool execution success event via eventBus.
+     * Missing from BaseAdapterPlugin — defined here to match chatgpt.adapter pattern.
+     */
+    private emitExecutionCompleted(toolName: string, parameters: any, result: any): void {
+        this.context.eventBus.emit('tool:execution-completed', {
+            execution: {
+                id: this.generateCallId(),
+                toolName,
+                parameters,
+                result,
+                timestamp: Date.now(),
+                status: 'success',
+            },
+        });
+    }
+
+    /**
+     * Emit tool execution failure event via eventBus.
+     * Missing from BaseAdapterPlugin — defined here to match chatgpt.adapter pattern.
+     */
+    private emitExecutionFailed(toolName: string, error: string): void {
+        this.context.eventBus.emit('tool:execution-failed', {
+            toolName,
+            error,
+            callId: this.generateCallId(),
+        });
+    }
+
+    private generateCallId(): string {
+        return `notion-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    }
+
+    /**
      * Insert text into the Notion AI chat input (contenteditable div).
      * Uses execCommand / InputEvent to update both DOM and editor internal state.
      */
