@@ -107,7 +107,8 @@ console.log('  ✅ 4. Full pipeline: stream_cutoff → reserveExecution → call
 
 // --- Test 5: DOM injection happened ---
 assert(insertedTexts.length === 1, `Expected 1 insertText call, got ${insertedTexts.length}`);
-assert(insertedTexts[0].includes('<function_result call_id="call_smoke_123">'), 'insertText should contain function_result');
+assert(insertedTexts[0].includes('<function_results>'), 'insertText should contain function_results wrapper');
+assert(insertedTexts[0].includes('call_id="call_smoke_123"'), 'insertText should contain call_id');
 assert(insertedTexts[0].includes('mcp__web_search'), 'insertText should contain tool result');
 testsPassed++;
 console.log('  ✅ 5. DOM injection: adapter.insertText called with formatted result');
