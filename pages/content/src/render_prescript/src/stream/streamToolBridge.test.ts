@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   createStreamToolHandler,
+  MAX_ARGS_SIZE,
   type AdapterLike,
   type ExecutionGuardLike,
   type McpClientLike,
@@ -836,6 +837,213 @@ describe('streamToolBridge', () => {
     assert.strictEqual(mockGuard._calls.markFailed.length, 1, 'should mark failed');
     assert.strictEqual(mockGuard._calls.markFailed[0].key, 'fail-key');
     assert.ok(mockGuard._calls.markFailed[0].error!.includes('tool crashed'));
+  });
+
+  // --- Gate 3B: Parameter validation (type checking + size limits) ---
+
+  test('25. arguments=\'[]\' (array) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c1', arguments: '[]' } }));
+
+    assert.strictEqual(mockClient._calls.length, 0);
+    assert.strictEqual(mockGuard._calls.reserve.length, 0, 'reserve should NOT be called');
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+    assert.ok(failEvent.error!.includes('array'));
+  });
+
+  test('26. arguments=\'123\' (number) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c2', arguments: '123' } }));
+
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+    assert.ok(failEvent.error!.includes('number'));
+  });
+
+  test('27. arguments=\'null\' (JSON null) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c3', arguments: 'null' } }));
+
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+  });
+
+  test('28. arguments=\'"string"\' (JSON string) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c4', arguments: '"hello"' } }));
+
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+  });
+
+  test('29. oversized arguments — reject with ARGS_TOO_LARGE before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Create oversized args (> 64KB)
+    const bigValue = 'x'.repeat(70_000);
+    const oversizedArgs = JSON.stringify({ data: bigValue });
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c5', arguments: oversizedArgs } }));
+
+    assert.strictEqual(mockGuard._calls.reserve.length, 0, 'reserve should NOT be called for oversized args');
+    assert.strictEqual(mockClient._calls.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_TOO_LARGE');
+  });
+
+  test('30. arguments=\'{}\' (empty object string) — treated as empty args, execution proceeds', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-empty' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'echo', callId: 'c6', arguments: '{}' } }));
+
+    assert.strictEqual(mockClient._calls.length, 1);
+    assert.deepStrictEqual(mockClient._calls[0].params, {});
+    const successEvent = events.find(e => e.status === 'succeeded');
+    assert.ok(successEvent);
+  });
+
+  test('31. parameterized execution — echo(message=\'hello\') receives correct params', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: { echoed: 'hello' } });
+    const mockGuard = createMockGuard({ reserveResult: 'key-echo' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({
+      identity: { name: 'echo', callId: 'call-echo-1', arguments: '{"message":"hello"}' },
+    }));
+
+    assert.strictEqual(mockClient._calls.length, 1);
+    assert.strictEqual(mockClient._calls[0].name, 'echo');
+    assert.deepStrictEqual(mockClient._calls[0].params, { message: 'hello' });
+    const successEvent = events.find(e => e.status === 'succeeded');
+    assert.ok(successEvent);
+    assert.deepStrictEqual(successEvent.result, { echoed: 'hello' });
+  });
+
+  test('32. complex parameterized execution — nested object params preserved', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'done' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-complex' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    const complexArgs = JSON.stringify({
+      query: 'test',
+      options: { limit: 10, offset: 0 },
+      tags: ['a', 'b'],
+    });
+
+    await handler(makeCutoffEvent({
+      identity: { name: 'search', callId: 'call-complex', arguments: complexArgs },
+    }));
+
+    assert.strictEqual(mockClient._calls.length, 1);
+    assert.deepStrictEqual(mockClient._calls[0].params, {
+      query: 'test',
+      options: { limit: 10, offset: 0 },
+      tags: ['a', 'b'],
+    });
   });
 
 });
