@@ -8,6 +8,8 @@
  * Tests: streamToolBridge.test.ts imports directly from this file.
  */
 
+import { formatFunctionResult } from './functionResultFormatter.ts';
+
 // --- Constants ---
 
 /** Maximum allowed size for raw arguments string (64KB). Reject before parse to prevent DoS. */
@@ -326,7 +328,12 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
       // P0-4 fix: try/catch around insert with structured error
       try {
-        const formattedResult = `<function_result call_id="${callId}">\n${typeof result === 'string' ? result : JSON.stringify(result)}\n</function_result>`;
+        const formattedResult = formatFunctionResult({
+          callId,
+          name: identity.name!,
+          status: 'ok',
+          result,
+        });
         await currentAdapter.insertText(formattedResult);
       } catch (e) {
         emit(streamId, identity, 'failed', {
