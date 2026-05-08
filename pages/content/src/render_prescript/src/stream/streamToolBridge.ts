@@ -20,6 +20,10 @@ export interface StreamToolBridgeConfig {
   autoInsert: boolean;
   autoSubmit: boolean;
   toolTimeoutMs: number;
+  // Reserved for Gate 5. No runtime enforcement in Gate 3C-prep.
+  circuitBreaker?: {
+    maxToolCallsPerStream?: number;
+  };
 }
 
 export interface StreamToolExecutionEvent {
@@ -77,6 +81,52 @@ export interface StreamEvent {
   type?: string;
   streamId?: string;
   identity?: FunctionCallIdentityLike;
+}
+
+// --- Adapter Diagnostic (P0-3) ---
+
+export type AdapterStatus = 'ok' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
+
+export interface AdapterDiagnostic {
+  adapterAvailable: boolean;
+  adapterStatus: AdapterStatus;
+  inputEmpty: boolean | null;
+  inputTextLength: number | null;
+}
+
+/**
+ * Pure diagnostic function — inspects an adapter and returns health info.
+ * Does not expose input content, only length and emptiness.
+ */
+export function getAdapterDiagnostic(adapter: AdapterLike | null): AdapterDiagnostic {
+  if (!adapter) {
+    return { adapterAvailable: false, adapterStatus: 'input_not_found', inputEmpty: null, inputTextLength: null };
+  }
+
+  if (typeof adapter.insertText !== 'function') {
+    return { adapterAvailable: true, adapterStatus: 'input_not_editable', inputEmpty: null, inputTextLength: null };
+  }
+
+  if (typeof adapter.submitForm !== 'function') {
+    // Can insert but cannot submit
+    const inputInfo = getInputInfo(adapter);
+    return { adapterAvailable: true, adapterStatus: 'submit_not_found', ...inputInfo };
+  }
+
+  const inputInfo = getInputInfo(adapter);
+  return { adapterAvailable: true, adapterStatus: 'ok', ...inputInfo };
+}
+
+function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; inputTextLength: number | null } {
+  if (typeof adapter.getInputContent !== 'function') {
+    return { inputEmpty: null, inputTextLength: null };
+  }
+  try {
+    const content = adapter.getInputContent();
+    return { inputEmpty: !content, inputTextLength: content ? content.length : 0 };
+  } catch {
+    return { inputEmpty: null, inputTextLength: null };
+  }
 }
 
 // --- Implementation ---

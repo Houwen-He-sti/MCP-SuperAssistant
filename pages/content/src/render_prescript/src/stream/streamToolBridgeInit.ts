@@ -11,7 +11,9 @@ import { onStreamEvent as onStreamEventIsolated } from './interceptor';
 import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
 import {
   createStreamToolHandler,
+  getAdapterDiagnostic,
   type AdapterLike,
+  type AdapterStatus,
   type McpClientLike,
   type StreamToolBridgeConfig,
   type StreamToolExecutionEvent,
@@ -161,9 +163,13 @@ export function getStreamToolBridgeInfo(): {
   mcpClientAvailable: boolean;
   mcpClientReady: boolean;
   adapterAvailable: boolean;
+  adapterStatus: AdapterStatus;
+  inputEmpty: boolean | null;
+  inputTextLength: number | null;
 } {
   const mcpClient = resolveMcpClient();
   const currentAdapter = resolveCurrentAdapter();
+  const adapterDiag = getAdapterDiagnostic(currentAdapter);
   return {
     config: { ...currentConfig },
     isNotionHost: isNotionHost(),
@@ -171,6 +177,6 @@ export function getStreamToolBridgeInfo(): {
     subscribed: unsubscribe !== null,
     mcpClientAvailable: mcpClient !== null,
     mcpClientReady: mcpClient !== null && mcpClient.isReady(),
-    adapterAvailable: currentAdapter !== null,
+    ...adapterDiag,
   };
 }
