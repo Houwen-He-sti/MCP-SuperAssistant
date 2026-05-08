@@ -12,8 +12,8 @@
  *   const { extensionId, extensionName, extensionWsUrl, tab, navigated } = await preflight();
  *
  *   // Option B: individual checks
- *   const id = await resolveExtensionId('MCP SuperAssistant');
- *   const tab = await ensureAgentPage();
+ *   const { extensionId, name, wsUrl } = await resolveExtensionId('MCP SuperAssistant');
+ *   const { tab, navigated, url } = await ensureAgentPage();
  */
 
 const http = require('http');

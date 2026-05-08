@@ -1,0 +1,121 @@
+{
+  "timestamp": "2026-05-08T15:47:11.337Z",
+  "sentinel": "sentinel_g5b_mox39209_5gps",
+  "bridgeConfig": {
+    "enabled": true,
+    "cutoffEnabled": true,
+    "autoInsert": true,
+    "autoSubmit": true,
+    "toolTimeoutMs": 30000
+  },
+  "preflightInfo": {
+    "mcpClientAvailable": true,
+    "mcpClientReady": true,
+    "adapterAvailable": true,
+    "hasSubmitForm": true,
+    "hasGetInputContent": true,
+    "bridgeInfo": {
+      "config": {
+        "enabled": true,
+        "cutoffEnabled": true,
+        "autoInsert": true,
+        "autoSubmit": true,
+        "toolTimeoutMs": 30000
+      },
+      "isNotionHost": true,
+      "bridgeHandlerReady": true,
+      "subscribed": true,
+      "mcpClientAvailable": true,
+      "mcpClientReady": true,
+      "adapterAvailable": true,
+      "adapterStatus": "ok",
+      "inputEmpty": true,
+      "inputTextLength": 0
+    }
+  },
+  "events": [
+    {
+      "type": "getInputContent",
+      "contentLen": 0,
+      "ts": 1778255232899
+    },
+    {
+      "type": "getInputContent",
+      "contentLen": 0,
+      "ts": 1778255232902
+    },
+    {
+      "type": "callTool",
+      "name": "echo",
+      "params": "{\"message\":\"sentinel_g5b_mox39209_5gps\"}",
+      "ts": 1778255241020
+    },
+    {
+      "type": "callTool_error",
+      "name": "echo",
+      "error": "Tool \"echo\" is not registered in the current MCP tool registry",
+      "ts": 1778255241020
+    },
+    {
+      "type": "getInputContent",
+      "contentLen": 0,
+      "ts": 1778255241022
+    },
+    {
+      "type": "insertText",
+      "textLen": 227,
+      "preview": "<function_results>\n  <result call_id=\"c1\" name=\"echo\" status=\"error\">\n    <error type=\"ToolExecutionError\"><![CDATA[\nTool \"echo\" is not registered in the current MCP tool registry\n    ]]></error>\n  </",
+      "ts": 1778255241022
+    },
+    {
+      "type": "insertText_result",
+      "result": true,
+      "ts": 1778255241059
+    },
+    {
+      "type": "submitForm",
+      "ts": 1778255241059
+    },
+    {
+      "type": "submitForm_result",
+      "result": true,
+      "ts": 1778255241063
+    }
+  ],
+  "streamLifecycle": [
+    {
+      "text": "stream_start: {\"type\":\"stream_start\",\"streamId\":\"notion-ai-1\",\"url\":\"https://www.notion.so/api/v3/runInferenceTranscript\"}",
+      "ts": 1778255234381
+    },
+    {
+      "text": "function_call: {\"type\":\"function_call\",\"rawLine\":\"{\\\"type\\\":\\\"patch\\\",\\\"v\\\":[{\\\"o\\\":\\\"a\\\",\\\"p\\\":\\\"/s/-\\\",\\\"v\\\":{\\\"id\\\":\\\"35acae42-116c-81ad-8ef3-00aad2903276\\\",\\\"type\\\":\\\"agent-inference\\\",\\\"value\\\":[{\\\"type\\\":\\\"tex",
+      "ts": 1778255241019
+    },
+    {
+      "text": "stream_cutoff: {\"type\":\"stream_cutoff\",\"streamId\":\"notion-ai-1\",\"cutoffChunkIndex\":8,\"elapsedMs\":6645,\"identity\":{\"name\":\"echo\",\"callId\":\"c1\",\"arguments\":\"{\\\"message\\\":\\\"sentinel_g5b_mox39209_5gps\\\"}\"},\"reason\":\"fun",
+      "ts": 1778255241080
+    },
+    {
+      "text": "stream_end: {\"type\":\"stream_end\",\"streamId\":\"notion-ai-1\",\"url\":\"https://www.notion.so/api/v3/runInferenceTranscript\",\"totalChunks\":8}",
+      "ts": 1778255241080
+    },
+    {
+      "text": "stream_drain_complete: {\"type\":\"stream_drain_complete\",\"streamId\":\"notion-ai-1\",\"droppedChunks\":2,\"droppedBytes\":38051,\"drainDurationMs\":555.3000000119209,\"timedOut\":false}",
+      "ts": 1778255241583
+    }
+  ],
+  "submitMethod": "adapter.submitForm",
+  "sentinelBefore": 1,
+  "sentinelAfter": 0,
+  "scannerEvidence": null,
+  "result": "PASS",
+  "diagnostics": {
+    "streamLifecycleSummary": {
+      "functionCallObserved": true,
+      "streamCutoffObserved": true,
+      "totalEvents": 5
+    },
+    "sentinelNote": "Sentinel echo not detected (AI behavior — not a system issue)"
+  },
+  "durationMs": 12034
+}

@@ -40,6 +40,7 @@ async function main() {
         bridgeConfig: null,
         preflightInfo: null,
         events: [],
+        streamLifecycle: [], // P0#3: MAIN world stream events
         submitMethod: 'unknown',
         sentinelBefore: null,
         sentinelAfter: null,
@@ -76,6 +77,7 @@ async function runE2E(sentinel, evidence) {
     let msgId = 0;
     const listeners = new Map();
     const contexts = [];
+    const streamLifecycle = []; // P0#3: capture MAIN world stream events
 
     ws.on('message', (data) => {
         const msg = JSON.parse(data);
@@ -313,6 +315,24 @@ async function runE2E(sentinel, evidence) {
     }
     console.log('✅ Dependency wrappers installed');
 
+    // --- Step 3b: Install MAIN world stream lifecycle listener (P0#3) ---
+    await evalMain(`(function() {
+        if (window.__gate5b_stream) return;
+        window.__gate5b_stream = [];
+        window.addEventListener('message', function(e) {
+            const d = e.data;
+            // Match interceptorMain.ts postMessage format:
+            // { channel: 'mcp-superassistant.stream', direction: 'main-to-isolated', event: { type: '...' } }
+            if (d && d.channel === 'mcp-superassistant.stream' && d.direction === 'main-to-isolated' && d.event) {
+                window.__gate5b_stream.push({
+                    event: d.event.type || 'unknown',
+                    ts: Date.now(),
+                    detail: JSON.stringify(d.event).slice(0, 300)
+                });
+            }
+        });
+    })()`, { awaitPromise: false });
+
     // --- Step 4: Inject prompt into Notion via CDP (MAIN world) ---
     console.log('\n--- Step 4: Inject prompt + submit ---');
 
@@ -399,6 +419,20 @@ async function runE2E(sentinel, evidence) {
         })()`, { awaitPromise: false });
         const events = eventsResult?.value || [];
 
+        // P0#3: Read stream lifecycle from MAIN world postMessage listener
+        const streamResult = await evalMain(`(function() {
+            return JSON.parse(JSON.stringify(window.__gate5b_stream || []));
+        })()`);
+        if (streamResult?.value?.length > 0) {
+            // Merge new events (deduplicate by ts)
+            const existingTs = new Set(streamLifecycle.map(e => e.ts));
+            for (const evt of streamResult.value) {
+                if (!existingTs.has(evt.ts)) {
+                    streamLifecycle.push({ text: evt.event + ': ' + (evt.detail || '').slice(0, 200), ts: evt.ts });
+                }
+            }
+        }
+
         // Check what happened
         const hasCallTool = events.some(e => e.type === 'callTool');
         const hasInsertText = events.some(e => e.type === 'insertText');
@@ -461,6 +495,7 @@ async function runE2E(sentinel, evidence) {
     }
 
     evidence.submitMethod = submitMethod;
+    evidence.streamLifecycle = streamLifecycle; // P0#3: record stream events
     if (!consumed) {
         // Final sentinel check
         const finalCheck = await evalMain(`(function() {
@@ -476,6 +511,15 @@ async function runE2E(sentinel, evidence) {
     }
 
     // --- Determine result ---
+    // P0#3: Include stream lifecycle in diagnostics
+    const hasStreamCutoff = streamLifecycle.some(e => e.text.startsWith('stream_cutoff'));
+    const hasFunctionCallObserved = streamLifecycle.some(e => e.text.startsWith('function_call'));
+    evidence.diagnostics.streamLifecycleSummary = {
+        functionCallObserved: hasFunctionCallObserved,
+        streamCutoffObserved: hasStreamCutoff,
+        totalEvents: streamLifecycle.length,
+    };
+
     if (consumed && submitMethod === 'adapter.submitForm') {
         evidence.result = 'PASS';
         const sentinelNote = (evidence.sentinelAfter || 0) >= 2
@@ -514,6 +558,7 @@ async function runE2E(sentinel, evidence) {
     // Final summary
     console.log('\n' + '='.repeat(60));
     console.log(`Result: ${evidence.result}`);
+    console.log(`Stream: start=${streamLifecycle.some(e => e.text.includes('stream_start'))} call=${hasFunctionCallObserved} cutoff=${hasStreamCutoff}`);
     console.log(`Tool executed: ${toolExecuted}`);
     console.log(`Result inserted: ${resultInserted}`);
     console.log(`Form submitted: ${formSubmitted} (${submitMethod})`);
@@ -551,6 +596,12 @@ function generateMarkdownReport(ev) {
     const callToolName = ev.events.find(e => e.type === 'callTool')?.name || '';
     const insertTextLen = ev.events.find(e => e.type === 'insertText')?.textLen || 0;
 
+    // Derive stream lifecycle flags for table
+    const hasStreamStart = (ev.streamLifecycle || []).some(e => e.text.startsWith('stream_start'));
+    const hasFunctionCall = (ev.streamLifecycle || []).some(e => e.text.startsWith('function_call'));
+    const hasStreamCutoff = (ev.streamLifecycle || []).some(e => e.text.startsWith('stream_cutoff'));
+    const hasStreamEnd = (ev.streamLifecycle || []).some(e => e.text.startsWith('stream_end'));
+
     const lines = [
         `# Gate 5b Live E2E Evidence — ${ev.timestamp}`,
         '',
@@ -562,6 +613,9 @@ function generateMarkdownReport(ev) {
         `| ISOLATED world | ${ev.preflightInfo ? '✅' : '❌'} |`,
         `| mcpClient ready | ${ev.preflightInfo?.mcpClientReady ? '✅' : '❌'} |`,
         `| Bridge config | ${ev.bridgeConfig ? '✅ autoInsert=' + ev.bridgeConfig.autoInsert + ' autoSubmit=' + ev.bridgeConfig.autoSubmit : '❌'} |`,
+        `| stream_start | ${hasStreamStart ? '✅' : '❌'} |`,
+        `| function_call detected | ${hasFunctionCall ? '✅' : '❌'} |`,
+        `| stream_cutoff | ${hasStreamCutoff ? '✅' : '❌'} |`,
         `| Tool executed | ${hasCallTool ? '✅ ' + callToolName : '❌'} |`,
         `| Result injected | ${hasInsertText ? '✅ ' + insertTextLen + ' chars' : '❌'} |`,
         `| Submit method | ${ev.submitMethod} |`,
@@ -579,6 +633,10 @@ function generateMarkdownReport(ev) {
 
     if (ev.events.length > 0) {
         lines.push('## Bridge Events', '', '```json', JSON.stringify(ev.events, null, 2), '```', '');
+    }
+
+    if (ev.streamLifecycle && ev.streamLifecycle.length > 0) {
+        lines.push('## Stream Lifecycle (MAIN world)', '', '```json', JSON.stringify(ev.streamLifecycle, null, 2), '```', '');
     }
 
     if (ev.diagnostics && Object.keys(ev.diagnostics).length > 0) {
