@@ -1,8 +1,9 @@
 /**
- * Gate 4 P0-2/P0-3: Consumption Proof E2E
+ * Gate 4 P0-2/P0-3: Consumption Proof E2E (Semi-automated, superseded)
+ * Classification: SEMI-AUTOMATED PROBE — superseded by auto-submit-v2.cjs and error-submit.cjs.
  *
- * Validates the full tool-loop closure:
- *   AI function_call → MCP execution → result injection → human submit → AI consumes result
+ * Original semi-automated version. Kept for reference.
+ * Validates tool-result consumption via direct injection + manual/auto submit.
  *
  * P0-2: Success consumption — sentinel value referenced in AI reply
  * P0-3: Error consumption — AI acknowledges tool error
@@ -44,86 +45,86 @@ const WAIT_FOR_AI_MS = 60_000; // Wait up to 60s for AI response
 // ============================================================================
 
 class CDPSession {
-  constructor(wsUrl) {
-    this.wsUrl = wsUrl;
-    this.ws = null;
-    this.msgId = 0;
-    this.listeners = new Map();
-    this.contexts = [];
-    this.isolatedCtxId = null;
-  }
+    constructor(wsUrl) {
+        this.wsUrl = wsUrl;
+        this.ws = null;
+        this.msgId = 0;
+        this.listeners = new Map();
+        this.contexts = [];
+        this.isolatedCtxId = null;
+    }
 
-  async connect() {
-    this.ws = new WebSocket(this.wsUrl);
-    await new Promise((resolve, reject) => {
-      this.ws.on('open', resolve);
-      this.ws.on('error', reject);
-    });
-    this.ws.on('message', (data) => {
-      const msg = JSON.parse(data);
-      if (msg.id && this.listeners.has(msg.id)) {
-        this.listeners.get(msg.id)(msg);
-        this.listeners.delete(msg.id);
-      }
-      if (msg.method === 'Runtime.executionContextCreated') {
-        this.contexts.push(msg.params.context);
-      }
-    });
-  }
-
-  async findIsolatedContext() {
-    await new Promise(r => setTimeout(r, 1000));
-    for (const ctx of this.contexts) {
-      if (ctx.name === 'MCP SuperAssistant') {
-        const check = await this.send('Runtime.evaluate', {
-          contextId: ctx.id,
-          expression: `typeof window.pluginRegistry !== 'undefined'`,
-          returnByValue: true,
+    async connect() {
+        this.ws = new WebSocket(this.wsUrl);
+        await new Promise((resolve, reject) => {
+            this.ws.on('open', resolve);
+            this.ws.on('error', reject);
         });
-        if (check.result?.result?.value === true) {
-          this.isolatedCtxId = ctx.id;
-          return ctx.id;
+        this.ws.on('message', (data) => {
+            const msg = JSON.parse(data);
+            if (msg.id && this.listeners.has(msg.id)) {
+                this.listeners.get(msg.id)(msg);
+                this.listeners.delete(msg.id);
+            }
+            if (msg.method === 'Runtime.executionContextCreated') {
+                this.contexts.push(msg.params.context);
+            }
+        });
+    }
+
+    async findIsolatedContext() {
+        await new Promise(r => setTimeout(r, 1000));
+        for (const ctx of this.contexts) {
+            if (ctx.name === 'MCP SuperAssistant') {
+                const check = await this.send('Runtime.evaluate', {
+                    contextId: ctx.id,
+                    expression: `typeof window.pluginRegistry !== 'undefined'`,
+                    returnByValue: true,
+                });
+                if (check.result?.result?.value === true) {
+                    this.isolatedCtxId = ctx.id;
+                    return ctx.id;
+                }
+            }
         }
-      }
+        return null;
     }
-    return null;
-  }
 
-  send(method, params = {}) {
-    return new Promise((resolve) => {
-      const id = ++this.msgId;
-      this.listeners.set(id, resolve);
-      this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
-        if (this.listeners.has(id)) {
-          this.listeners.delete(id);
-          resolve({ error: { message: 'CDP timeout' } });
+    send(method, params = {}) {
+        return new Promise((resolve) => {
+            const id = ++this.msgId;
+            this.listeners.set(id, resolve);
+            this.ws.send(JSON.stringify({ id, method, params }));
+            setTimeout(() => {
+                if (this.listeners.has(id)) {
+                    this.listeners.delete(id);
+                    resolve({ error: { message: 'CDP timeout' } });
+                }
+            }, TIMEOUT_MS);
+        });
+    }
+
+    async evaluate(expression, opts = {}) {
+        const params = {
+            expression,
+            returnByValue: true,
+            awaitPromise: opts.awaitPromise || false,
+            ...opts,
+        };
+        if (this.isolatedCtxId && !opts.contextId) {
+            params.contextId = this.isolatedCtxId;
         }
-      }, TIMEOUT_MS);
-    });
-  }
-
-  async evaluate(expression, opts = {}) {
-    const params = {
-      expression,
-      returnByValue: true,
-      awaitPromise: opts.awaitPromise || false,
-      ...opts,
-    };
-    if (this.isolatedCtxId && !opts.contextId) {
-      params.contextId = this.isolatedCtxId;
+        const result = await this.send('Runtime.evaluate', params);
+        if (result.result?.exceptionDetails) {
+            const exc = result.result.exceptionDetails;
+            return { __exception: true, text: exc.text, description: exc.exception?.description };
+        }
+        return result.result?.result;
     }
-    const result = await this.send('Runtime.evaluate', params);
-    if (result.result?.exceptionDetails) {
-      const exc = result.result.exceptionDetails;
-      return { __exception: true, text: exc.text, description: exc.exception?.description };
-    }
-    return result.result?.result;
-  }
 
-  close() {
-    if (this.ws) this.ws.close();
-  }
+    close() {
+        if (this.ws) this.ws.close();
+    }
 }
 
 // ============================================================================
@@ -131,17 +132,17 @@ class CDPSession {
 // ============================================================================
 
 function log(level, ...args) {
-  const prefix = { info: '●', pass: '✅', fail: '❌', warn: '⚠', step: '→', probe: '🔬' };
-  console.log(`  ${prefix[level] || '·'} ${args.join(' ')}`);
+    const prefix = { info: '●', pass: '✅', fail: '❌', warn: '⚠', step: '→', probe: '🔬' };
+    console.log(`  ${prefix[level] || '·'} ${args.join(' ')}`);
 }
 
 async function findNotionTab() {
-  const resp = await fetch(CDP_URL);
-  const tabs = await resp.json();
-  const notionTabs = tabs.filter(t =>
-    t.type === 'page' && t.url && t.url.includes('notion.so')
-  );
-  return notionTabs.find(t => t.url && t.url.includes('/agent/')) || notionTabs[0];
+    const resp = await fetch(CDP_URL);
+    const tabs = await resp.json();
+    const notionTabs = tabs.filter(t =>
+        t.type === 'page' && t.url && t.url.includes('notion.so')
+    );
+    return notionTabs.find(t => t.url && t.url.includes('/agent/')) || notionTabs[0];
 }
 
 /**
@@ -149,7 +150,7 @@ async function findNotionTab() {
  * Uses DOM inspection to find the most recent assistant message.
  */
 async function getLastAIMessage(cdp) {
-  const result = await cdp.evaluate(`
+    const result = await cdp.evaluate(`
     (function() {
       // Notion AI assistant messages — try common selectors
       const messages = document.querySelectorAll('[data-block-id]');
@@ -158,7 +159,7 @@ async function getLastAIMessage(cdp) {
       return last.textContent || '';
     })()
   `, { contextId: undefined }); // MAIN world for DOM access
-  return result?.value || null;
+    return result?.value || null;
 }
 
 /**
@@ -166,15 +167,15 @@ async function getLastAIMessage(cdp) {
  * Polls the DOM for new content.
  */
 async function waitForNewAIResponse(cdp, previousMessageText, timeoutMs = WAIT_FOR_AI_MS) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const current = await getLastAIMessage(cdp);
-    if (current && current !== previousMessageText && current.length > 10) {
-      return current;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const current = await getLastAIMessage(cdp);
+        if (current && current !== previousMessageText && current.length > 10) {
+            return current;
+        }
+        await new Promise(r => setTimeout(r, 2000));
     }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  return null;
+    return null;
 }
 
 // ============================================================================
@@ -182,14 +183,14 @@ async function waitForNewAIResponse(cdp, previousMessageText, timeoutMs = WAIT_F
 // ============================================================================
 
 async function testSuccessConsumption(cdp) {
-  console.log('\n━━━ P0-2: Success Consumption Proof ━━━');
+    console.log('\n━━━ P0-2: Success Consumption Proof ━━━');
 
-  const SENTINEL = `sentinel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-  log('info', `Sentinel value: ${SENTINEL}`);
+    const SENTINEL = `sentinel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    log('info', `Sentinel value: ${SENTINEL}`);
 
-  // 1. Configure bridge
-  log('step', 'Configuring bridge: enabled=true, autoInsert=true, autoSubmit=false...');
-  const configResult = await cdp.evaluate(`
+    // 1. Configure bridge
+    log('step', 'Configuring bridge: enabled=true, autoInsert=true, autoSubmit=false...');
+    const configResult = await cdp.evaluate(`
     (function() {
       if (typeof window.configureStreamToolBridge !== 'function') {
         return { error: 'configureStreamToolBridge not available' };
@@ -203,11 +204,11 @@ async function testSuccessConsumption(cdp) {
       return window.getStreamToolBridgeInfo();
     })()
   `);
-  log('info', `Bridge config: ${JSON.stringify(configResult?.value?.config || configResult?.value, null, 2).slice(0, 200)}`);
+    log('info', `Bridge config: ${JSON.stringify(configResult?.value?.config || configResult?.value, null, 2).slice(0, 200)}`);
 
-  // 2. Set up mock mcpClient that returns sentinel
-  log('step', `Setting up mcpClient mock (returns sentinel: ${SENTINEL})...`);
-  const mockSetup = await cdp.evaluate(`
+    // 2. Set up mock mcpClient that returns sentinel
+    log('step', `Setting up mcpClient mock (returns sentinel: ${SENTINEL})...`);
+    const mockSetup = await cdp.evaluate(`
     (function() {
       const sentinel = ${JSON.stringify(SENTINEL)};
       window.mcpClient = {
@@ -220,47 +221,47 @@ async function testSuccessConsumption(cdp) {
       return { mockInstalled: true, sentinel: sentinel };
     })()
   `);
-  log('info', `Mock setup: ${JSON.stringify(mockSetup?.value)}`);
+    log('info', `Mock setup: ${JSON.stringify(mockSetup?.value)}`);
 
-  // 3. Record current last AI message (to detect new response later)
-  const beforeMsg = await getLastAIMessage(cdp);
-  log('info', `Last AI message (before): ${(beforeMsg || '').slice(0, 80)}...`);
+    // 3. Record current last AI message (to detect new response later)
+    const beforeMsg = await getLastAIMessage(cdp);
+    log('info', `Last AI message (before): ${(beforeMsg || '').slice(0, 80)}...`);
 
-  // 4. Instruct user
-  log('probe', 'MANUAL STEPS:');
-  log('probe', '1. Type a message in Notion AI that will trigger echo tool call');
-  log('probe', '   Example: "Please call the echo tool with message: hello"');
-  log('probe', '2. Submit the message');
-  log('probe', '3. Wait for interceptor to detect function_call → bridge executes → result injected');
-  log('probe', '4. Review the injected result in the input box');
-  log('probe', `5. The result should contain sentinel: ${SENTINEL}`);
-  log('probe', '6. Click Submit to send the result to AI');
-  log('probe', '7. Wait for AI to respond');
-  log('probe', '');
-  log('probe', 'This script will monitor for the AI response...');
+    // 4. Instruct user
+    log('probe', 'MANUAL STEPS:');
+    log('probe', '1. Type a message in Notion AI that will trigger echo tool call');
+    log('probe', '   Example: "Please call the echo tool with message: hello"');
+    log('probe', '2. Submit the message');
+    log('probe', '3. Wait for interceptor to detect function_call → bridge executes → result injected');
+    log('probe', '4. Review the injected result in the input box');
+    log('probe', `5. The result should contain sentinel: ${SENTINEL}`);
+    log('probe', '6. Click Submit to send the result to AI');
+    log('probe', '7. Wait for AI to respond');
+    log('probe', '');
+    log('probe', 'This script will monitor for the AI response...');
 
-  // 5. Wait for AI response containing sentinel
-  log('step', 'Polling for AI response (up to 60s)...');
-  const aiResponse = await waitForNewAIResponse(cdp, beforeMsg);
+    // 5. Wait for AI response containing sentinel
+    log('step', 'Polling for AI response (up to 60s)...');
+    const aiResponse = await waitForNewAIResponse(cdp, beforeMsg);
 
-  if (!aiResponse) {
-    log('warn', 'No new AI response detected within timeout.');
-    log('warn', 'Check browser manually for AI response.');
-    return { success: false, sentinel: SENTINEL, reason: 'timeout' };
-  }
+    if (!aiResponse) {
+        log('warn', 'No new AI response detected within timeout.');
+        log('warn', 'Check browser manually for AI response.');
+        return { success: false, sentinel: SENTINEL, reason: 'timeout' };
+    }
 
-  log('info', `AI response (last 200 chars): ...${aiResponse.slice(-200)}`);
+    log('info', `AI response (last 200 chars): ...${aiResponse.slice(-200)}`);
 
-  const consumed = aiResponse.includes(SENTINEL);
-  if (consumed) {
-    log('pass', `SUCCESS: AI referenced sentinel "${SENTINEL}" in response`);
-  } else {
-    log('warn', `AI response does not contain sentinel "${SENTINEL}"`);
-    log('info', 'This may be acceptable if AI paraphrased the result.');
-    log('info', 'Manual verification needed: did AI acknowledge the echo result?');
-  }
+    const consumed = aiResponse.includes(SENTINEL);
+    if (consumed) {
+        log('pass', `SUCCESS: AI referenced sentinel "${SENTINEL}" in response`);
+    } else {
+        log('warn', `AI response does not contain sentinel "${SENTINEL}"`);
+        log('info', 'This may be acceptable if AI paraphrased the result.');
+        log('info', 'Manual verification needed: did AI acknowledge the echo result?');
+    }
 
-  return { success: consumed, sentinel: SENTINEL, aiResponse: aiResponse.slice(-300) };
+    return { success: consumed, sentinel: SENTINEL, aiResponse: aiResponse.slice(-300) };
 }
 
 // ============================================================================
@@ -268,13 +269,13 @@ async function testSuccessConsumption(cdp) {
 // ============================================================================
 
 async function testErrorConsumption(cdp) {
-  console.log('\n━━━ P0-3: Error Consumption Proof ━━━');
+    console.log('\n━━━ P0-3: Error Consumption Proof ━━━');
 
-  const ERROR_MSG = `error_${Date.now().toString(36)}: Connection refused to MCP server`;
+    const ERROR_MSG = `error_${Date.now().toString(36)}: Connection refused to MCP server`;
 
-  // 1. Configure bridge
-  log('step', 'Configuring bridge: enabled=true, autoInsert=true, autoSubmit=false...');
-  await cdp.evaluate(`
+    // 1. Configure bridge
+    log('step', 'Configuring bridge: enabled=true, autoInsert=true, autoSubmit=false...');
+    await cdp.evaluate(`
     (function() {
       window.configureStreamToolBridge({
         enabled: true,
@@ -285,10 +286,10 @@ async function testErrorConsumption(cdp) {
     })()
   `);
 
-  // 2. Set up mock mcpClient that throws error
-  log('step', `Setting up error mcpClient mock...`);
-  const errorMsg = JSON.stringify(ERROR_MSG);
-  await cdp.evaluate(`
+    // 2. Set up mock mcpClient that throws error
+    log('step', `Setting up error mcpClient mock...`);
+    const errorMsg = JSON.stringify(ERROR_MSG);
+    await cdp.evaluate(`
     (function() {
       window.mcpClient = {
         callTool: async function(name, params) {
@@ -299,40 +300,40 @@ async function testErrorConsumption(cdp) {
     })()
   `);
 
-  // 3. Record current state
-  const beforeMsg = await getLastAIMessage(cdp);
+    // 3. Record current state
+    const beforeMsg = await getLastAIMessage(cdp);
 
-  // 4. Instruct user
-  log('probe', 'MANUAL STEPS:');
-  log('probe', '1. Trigger a function_call in Notion AI (e.g., "call echo")');
-  log('probe', '2. Bridge will execute → tool errors → error result injected');
-  log('probe', '3. Review error result in input box');
-  log('probe', '4. Submit to AI');
-  log('probe', '5. Observe AI response — should acknowledge the error');
+    // 4. Instruct user
+    log('probe', 'MANUAL STEPS:');
+    log('probe', '1. Trigger a function_call in Notion AI (e.g., "call echo")');
+    log('probe', '2. Bridge will execute → tool errors → error result injected');
+    log('probe', '3. Review error result in input box');
+    log('probe', '4. Submit to AI');
+    log('probe', '5. Observe AI response — should acknowledge the error');
 
-  // 5. Wait for response
-  log('step', 'Polling for AI response (up to 60s)...');
-  const aiResponse = await waitForNewAIResponse(cdp, beforeMsg);
+    // 5. Wait for response
+    log('step', 'Polling for AI response (up to 60s)...');
+    const aiResponse = await waitForNewAIResponse(cdp, beforeMsg);
 
-  if (!aiResponse) {
-    log('warn', 'No new AI response detected. Check browser manually.');
-    return { success: false, errorMsg: ERROR_MSG, reason: 'timeout' };
-  }
+    if (!aiResponse) {
+        log('warn', 'No new AI response detected. Check browser manually.');
+        return { success: false, errorMsg: ERROR_MSG, reason: 'timeout' };
+    }
 
-  log('info', `AI response (last 200 chars): ...${aiResponse.slice(-200)}`);
+    log('info', `AI response (last 200 chars): ...${aiResponse.slice(-200)}`);
 
-  // Check if AI mentions error-related keywords
-  const errorKeywords = ['error', 'failed', 'failure', '失败', '错误', 'issue', 'problem', 'unable', 'could not'];
-  const mentioned = errorKeywords.some(kw => aiResponse.toLowerCase().includes(kw));
+    // Check if AI mentions error-related keywords
+    const errorKeywords = ['error', 'failed', 'failure', '失败', '错误', 'issue', 'problem', 'unable', 'could not'];
+    const mentioned = errorKeywords.some(kw => aiResponse.toLowerCase().includes(kw));
 
-  if (mentioned) {
-    log('pass', 'AI acknowledged the error in its response');
-  } else {
-    log('warn', 'AI response may not explicitly mention the error.');
-    log('info', 'Manual verification needed.');
-  }
+    if (mentioned) {
+        log('pass', 'AI acknowledged the error in its response');
+    } else {
+        log('warn', 'AI response may not explicitly mention the error.');
+        log('info', 'Manual verification needed.');
+    }
 
-  return { success: mentioned, errorMsg: ERROR_MSG, aiResponse: aiResponse.slice(-300) };
+    return { success: mentioned, errorMsg: ERROR_MSG, aiResponse: aiResponse.slice(-300) };
 }
 
 // ============================================================================
@@ -340,51 +341,51 @@ async function testErrorConsumption(cdp) {
 // ============================================================================
 
 async function main() {
-  const isError = process.argv.includes('--error');
+    const isError = process.argv.includes('--error');
 
-  console.log('━━━ Gate 4: Consumption Proof E2E ━━━');
-  console.log(`  Mode: ${isError ? 'P0-3 Error consumption' : 'P0-2 Success consumption'}`);
+    console.log('━━━ Gate 4: Consumption Proof E2E ━━━');
+    console.log(`  Mode: ${isError ? 'P0-3 Error consumption' : 'P0-2 Success consumption'}`);
 
-  let cdp;
-  try {
-    const tab = await findNotionTab();
-    if (!tab) {
-      log('fail', 'No Notion tab found.');
-      process.exit(2);
+    let cdp;
+    try {
+        const tab = await findNotionTab();
+        if (!tab) {
+            log('fail', 'No Notion tab found.');
+            process.exit(2);
+        }
+        log('info', `Found Notion tab: ${tab.url.slice(0, 60)}...`);
+
+        cdp = new CDPSession(tab.webSocketDebuggerUrl);
+        await cdp.connect();
+        await cdp.send('Runtime.enable');
+        await cdp.findIsolatedContext();
+
+        if (!cdp.isolatedCtxId) {
+            log('fail', 'No ISOLATED world found. Extension may not be loaded.');
+            process.exit(2);
+        }
+        log('pass', `ISOLATED world found: contextId=${cdp.isolatedCtxId}`);
+
+        let result;
+        if (isError) {
+            result = await testErrorConsumption(cdp);
+        } else {
+            result = await testSuccessConsumption(cdp);
+        }
+
+        // Output result for transcript
+        console.log('\n━━━ RESULT ━━━');
+        console.log(JSON.stringify(result, null, 2));
+
+        process.exit(result.success ? 0 : 1);
+
+    } catch (err) {
+        log('fail', `Infrastructure error: ${err.message}`);
+        console.error(err);
+        process.exit(2);
+    } finally {
+        if (cdp) cdp.close();
     }
-    log('info', `Found Notion tab: ${tab.url.slice(0, 60)}...`);
-
-    cdp = new CDPSession(tab.webSocketDebuggerUrl);
-    await cdp.connect();
-    await cdp.send('Runtime.enable');
-    await cdp.findIsolatedContext();
-
-    if (!cdp.isolatedCtxId) {
-      log('fail', 'No ISOLATED world found. Extension may not be loaded.');
-      process.exit(2);
-    }
-    log('pass', `ISOLATED world found: contextId=${cdp.isolatedCtxId}`);
-
-    let result;
-    if (isError) {
-      result = await testErrorConsumption(cdp);
-    } else {
-      result = await testSuccessConsumption(cdp);
-    }
-
-    // Output result for transcript
-    console.log('\n━━━ RESULT ━━━');
-    console.log(JSON.stringify(result, null, 2));
-
-    process.exit(result.success ? 0 : 1);
-
-  } catch (err) {
-    log('fail', `Infrastructure error: ${err.message}`);
-    console.error(err);
-    process.exit(2);
-  } finally {
-    if (cdp) cdp.close();
-  }
 }
 
 main();

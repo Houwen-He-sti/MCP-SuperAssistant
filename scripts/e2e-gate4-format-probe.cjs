@@ -1,7 +1,9 @@
 /**
  * Gate 4 P0-1a: Format Compatibility Probe
+ * Classification: PROBE / DEBUG HELPER — not a production-path test.
  *
  * Tests whether Notion AI can consume different function_result formats.
+ * Injects format candidates directly via CDP adapter (not through production bridge).
  * This is a semi-automated test: the script injects result text and submits,
  * then waits for AI to respond. Human verifies consumption in browser.
  *

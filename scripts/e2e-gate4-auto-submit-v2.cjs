@@ -1,8 +1,10 @@
 /**
- * Gate 4: Auto-submit format B via DOM click and verify AI consumption.
- * 
- * Uses DOM click on Notion's send button instead of adapter.submitForm()
- * to avoid the emitExecutionFailed binding issue.
+ * Gate 4 P0-2: Success Consumption Proof (Direct Injection)
+ * Classification: CONSUMPTION PROOF — direct injection, not production bridge path.
+ *
+ * Injects Format B (protocol spec CDATA) directly via CDP adapter.insertText(),
+ * submits via DOM click on Notion's send button, and verifies AI echoes sentinel.
+ * Uses DOM click instead of adapter.submitForm() to avoid emitExecutionFailed binding issue.
  */
 
 const WebSocket = require('ws');

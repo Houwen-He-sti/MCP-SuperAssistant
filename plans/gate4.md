@@ -133,26 +133,28 @@ export interface FormatResultOptions {
 
 ---
 
-### P0-3: Error Consumption Proof
+### P0-3: Error Consumption Proof (Manual/Direct Injection Only)
 
-**目标**：验证 AI 收到 error result 后的行为合理（不陷入循环、不忽略错误）。
+**目标**：验证 Notion AI 能理解并合理回应**手动注入的** error result block。
+
+> **Scope 说明**：P0-3 仅验证 error-format 的 consumption（AI 能理解错误 XML），
+> **不验证** production bridge 的 tool-failure → error-result auto-injection 路径。
+> Production error-result auto-injection 属于 Gate 5 scope（与 autoSubmit 同层 bridge 行为增强）。
 
 **测试步骤**：
-1. 配置一个会失败的 MCP tool（或 mock callTool 返回 error）
-2. AI 调用该工具 → bridge 执行 → 工具返回 error
-3. `formatFunctionResult({ status: 'error', result: 'Connection refused' })` 格式化
-4. 注入输入框 → 人工提交
-5. 观察 AI 回复
+1. 构造 error-format function_result block（协议 §2.2 格式）
+2. 通过 CDP adapter 脚本直接注入输入框
+3. 通过 DOM click send button 提交
+4. 观察 AI 回复
 
 **期望行为**：
-- AI 解释错误（"工具执行失败"）
-- 或提供替代方案
-- **不期望**：AI 再次调用同一工具（但不阻塞——Gate 5 熔断器处理循环）
+- AI 回显或引用 error ID / error message
+- AI 不忽略错误内容
 
 **验收标准**：
 - [ ] Error result 格式正确（协议 §2.2）
-- [ ] AI 回复中提到了错误（不是无视）
-- [ ] 1 次成功即可（error 场景确定性更高）
+- [ ] AI 回复中提到了错误 ID 或错误内容
+- [ ] 3/3 次 AI 回显了 error ID = PASS
 
 ---
 
