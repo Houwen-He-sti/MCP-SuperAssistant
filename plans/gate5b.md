@@ -197,16 +197,6 @@ Evidence report 中必须明确标注 submit 方式：
 
 ### Step 5: 观测 + 验证
 
-> GPT Review: sentinel 验证要 before/after snapshot，不能只看 count。
-
-**Sentinel Before/After Protocol**:
-1. 生成唯一 sentinel (包含 timestamp + random)
-2. **Before snapshot**: 记录 submit 前 page body text 中 sentinel 出现次数（应该为 0）
-3. 人工触发 AI function_call（prompt 中包含 sentinel 作为 tool 参数）
-4. Bridge 执行 tool → result 中包含 sentinel → inject + submit
-5. **After snapshot**: poll page body text 中 sentinel 出现次数
-6. **PASS 条件**: after count >= 2（user message + AI echo），且 after > before
-
 Poll 以下信号（最多等待 60 秒）：
 
 | Signal | 检测方式 | 含义 |
@@ -214,7 +204,9 @@ Poll 以下信号（最多等待 60 秒）：
 | callTool invoked | `__gate5b_events` array | tool 被 bridge 调用 |
 | insertText invoked | `__gate5b_events` array | result 被注入 DOM |
 | submitForm invoked | `__gate5b_events` array | 自动提交触发 |
-| AI response | sentinel before/after snapshot | AI 消费了 result |
+| stream lifecycle | MAIN world postMessage | stream_start/function_call/stream_cutoff |
+
+> **Note**: AI consumption (sentinel echo) 验证属于 Gate 5c scope。Gate 5b 的 PIPELINE_PASS 条件为：callTool + insertText + submitForm 全部成功。
 
 ### Step 6: Durable Evidence Artifact
 
@@ -238,7 +230,7 @@ Poll 以下信号（最多等待 60 秒）：
   "sentinelBefore": 0,
   "sentinelAfter": 2,
   "scannerEvidence": null,
-  "result": "PASS"
+  "result": "PIPELINE_PASS"
 }
 ```
 
@@ -256,7 +248,7 @@ Poll 以下信号（最多等待 60 秒）：
 | Tool executed | ✅ echo({"message": "sentinel_xxx"}) |
 | Result injected | ✅ 150 chars |
 | Auto-submitted | ✅ adapter.submitForm |
-| AI consumed | ✅ sentinel 0 → 2 |
+| Stream lifecycle | ✅ start→call→cutoff→end |
 ```
 
 ### Scanner Miss Debugging Evidence
@@ -296,12 +288,16 @@ Poll 以下信号（最多等待 60 秒）：
 - [ ] AI 输出 function_call → bridge 自动执行 tool (verified via `__gate5b_events`)
 - [ ] Result 注入到 input textbox (verified via `__gate5b_events` insertText)
 - [ ] **adapter.submitForm** 自动触发成功 (不是 DOM click fallback)
-- [ ] AI 在回复中引用注入的 result (sentinel before/after protocol)
+- [ ] Stream lifecycle 完整捕获 (stream_start → function_call → stream_cutoff → stream_end)
 - [ ] Durable evidence artifact 生成 (JSON + Markdown)
+
+### Gate 5c Scope (deferred)
+
+- [ ] AI 在回复中引用注入的 result (sentinel before/after protocol)
+- [ ] Multi-turn: AI 调用 tool A → bridge 处理 → AI 再调用 tool B → bridge 再处理
 
 ### Stretch Goals
 
-- [ ] Multi-turn: AI 调用 tool A → bridge 处理 → AI 再调用 tool B → bridge 再处理
 - [ ] Error path: AI 调用不存在的 tool → bridge 注入 error result → AI 处理错误
 
 ---

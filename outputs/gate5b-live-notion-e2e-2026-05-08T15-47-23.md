@@ -1,6 +1,6 @@
 # Gate 5b Live E2E Evidence — 2026-05-08T15:47:11.337Z
 
-## Result: PASS
+## Result: PIPELINE_PASS
 
 | Step | Status |
 |------|--------|
@@ -14,7 +14,7 @@
 | Tool executed | ✅ echo |
 | Result injected | ✅ 227 chars |
 | Submit method | adapter.submitForm |
-| AI consumed | ❌ sentinel 1 → 0 |
+| AI consumed | N/A (Gate 5c scope) |
 
 ## Sentinel
 

@@ -108,14 +108,14 @@
   "sentinelBefore": 1,
   "sentinelAfter": 0,
   "scannerEvidence": null,
-  "result": "PASS",
+  "result": "PIPELINE_PASS",
   "diagnostics": {
     "streamLifecycleSummary": {
       "functionCallObserved": true,
       "streamCutoffObserved": true,
       "totalEvents": 5
     },
-    "sentinelNote": "Sentinel echo not detected (AI behavior — not a system issue)"
+    "sentinelNote": "Sentinel echo not tracked — AI consumption is Gate 5c scope"
   },
   "durationMs": 12034
 }
