@@ -327,6 +327,143 @@ describe('extractFunctionCallIdentity — legacy formats still work', () => {
     });
 });
 
+// ============================================================================
+// o:'a' (append) regression tests — PR #21 scanner fix
+//
+// Root cause: extractPatchTextContent only handled o:'x' (extend) operations.
+// Notion's agent-inference blocks emit function_call_start via o:'a' (append)
+// where content is nested in v.value[].content.
+// ============================================================================
+
+// Realistic o:'a' fixture from Notion agent-inference stream
+const NOTION_APPEND_FUNCTION_CALL = JSON.stringify({
+    type: 'patch',
+    v: [{
+        o: 'a',
+        p: '/s/11/value/-',
+        v: {
+            value: [
+                { content: '```jsonl\n{"type":"function_call_start","name":"echo","call_id":"c1"}\n' },
+            ],
+        },
+    }],
+});
+
+const NOTION_APPEND_PARAM_AND_END = JSON.stringify({
+    type: 'patch',
+    v: [{
+        o: 'x',
+        p: '/s/11/value/0/content',
+        v: '{"type":"parameter","key":"message","value":"hello"}\n{"type":"function_call_end","call_id":"c1"}\n```',
+    }],
+});
+
+describe('extractPatchTextContent — o:a (append) operations', () => {
+    test('extracts content from o:a with v.value[].content', () => {
+        const text = extractPatchTextContent(NOTION_APPEND_FUNCTION_CALL);
+        assert.ok(text !== null, 'should extract text from o:a');
+        assert.ok(text.includes('function_call_start'));
+        assert.ok(text.includes('echo'));
+    });
+
+    test('returns null for o:a without v.value array (title/metadata)', () => {
+        // NOTION_PATCH_TITLE has v = { id, type, value } where value is a string, not array
+        assert.equal(extractPatchTextContent(NOTION_PATCH_TITLE), null);
+    });
+
+    test('returns null for o:a with v.value[] but no content field', () => {
+        const noContent = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/5/value/-',
+                v: { value: [{ id: 'block1', type: 'text' }] },
+            }],
+        });
+        assert.equal(extractPatchTextContent(noContent), null);
+    });
+
+    test('returns null for o:a with v.value[].content that is non-string', () => {
+        const nonString = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/5/value/-',
+                v: { value: [{ content: 42 }] },
+            }],
+        });
+        assert.equal(extractPatchTextContent(nonString), null);
+    });
+
+    test('concatenates content from multiple o:a entries', () => {
+        const multi = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/5/value/-',
+                v: {
+                    value: [
+                        { content: 'part1\n' },
+                        { content: 'part2\n' },
+                    ],
+                },
+            }],
+        });
+        assert.equal(extractPatchTextContent(multi), 'part1\npart2\n');
+    });
+});
+
+describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
+    test('detects function_call starting with o:a and completed by o:x', () => {
+        const scanner = createFunctionCallScanner();
+
+        // o:a starts accumulation
+        const r1 = scanner.processLine(NOTION_APPEND_FUNCTION_CALL);
+        assert.equal(r1.accumulating, true, 'should start accumulating from o:a');
+        assert.equal(r1.detected, false);
+
+        // o:x completes with parameter + function_call_end
+        const r2 = scanner.processLine(NOTION_APPEND_PARAM_AND_END);
+        assert.equal(r2.detected, true, 'should detect after o:x completion');
+        assert.equal(r2.accumulating, false);
+        assert.ok(r2.identity !== null);
+        assert.equal(r2.identity!.name, 'echo');
+        assert.equal(r2.identity!.callId, 'c1');
+        assert.deepEqual(JSON.parse(r2.identity!.arguments!), { message: 'hello' });
+    });
+
+    test('existing o:x behavior is not regressed', () => {
+        // Original 3-line o:x cross-patch still works
+        const scanner = createFunctionCallScanner();
+        scanner.processLine(NOTION_PATCH_LINE_12);
+        scanner.processLine(NOTION_PATCH_LINE_13);
+        const r = scanner.processLine(NOTION_PATCH_LINE_14);
+        assert.equal(r.detected, true);
+        assert.equal(r.identity!.name, 'read_workspace_file');
+        assert.deepEqual(JSON.parse(r.identity!.arguments!), { path: 'README.md' });
+    });
+
+    test('o:a complete in single patch (start + end)', () => {
+        const complete = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/5/value/-',
+                v: {
+                    value: [
+                        { content: '{"type":"function_call_start","name":"list_tools","call_id":"q1"}\n{"type":"function_call_end","call_id":"q1"}' },
+                    ],
+                },
+            }],
+        });
+        const scanner = createFunctionCallScanner();
+        const r = scanner.processLine(complete);
+        assert.equal(r.detected, true);
+        assert.equal(r.identity!.name, 'list_tools');
+        assert.equal(r.identity!.callId, 'q1');
+    });
+});
+
 describe('createFunctionCallScanner — buffer cap', () => {
     test('aborts accumulation when buffer exceeds MAX_PATCH_BUFFER_SIZE', () => {
         const scanner = createFunctionCallScanner();
