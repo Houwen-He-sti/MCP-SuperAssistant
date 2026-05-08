@@ -35,7 +35,7 @@ export interface StreamToolExecutionEvent {
   streamId: string;
   identity: FunctionCallIdentityLike;
   status: 'reserved' | 'executing' | 'succeeded' | 'failed' | 'duplicate';
-  phase?: 'identity' | 'parse' | 'reserve' | 'mcp_client' | 'tool_call' | 'inject' | 'submit';
+  phase?: 'identity' | 'parse' | 'reserve' | 'mcp_client' | 'tool_call' | 'inject' | 'submit' | 'error_inject';
   result?: unknown;
   error?: string;
   errorCode?: string;
@@ -138,6 +138,103 @@ function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; input
   }
 }
 
+// --- Constants (Gate 5) ---
+
+/** Default max tool calls per stream when circuitBreaker config is undefined. */
+export const DEFAULT_MAX_TOOL_CALLS_PER_STREAM = 5;
+
+/** TTL for stream call count entries (10 minutes). */
+export const STREAM_CALL_TTL_MS = 10 * 60 * 1000;
+
+// --- Shared Safe-Injection Helper (Gate 5) ---
+
+export type InjectOutcome =
+  | 'RESULT_INJECTED'
+  | 'RESULT_SUBMITTED'
+  | 'INJECT_SKIPPED_NO_ADAPTER'
+  | 'INJECT_SKIPPED_NO_INSPECT'
+  | 'INJECT_SKIPPED_DRAFT'
+  | 'INSERT_FAILED'
+  | 'SUBMIT_FAILED';
+
+export interface InjectResult {
+  outcome: InjectOutcome;
+  error?: string;
+}
+
+export interface InjectResultParams {
+  callId: string;
+  name: string;
+  status: 'success' | 'error';
+  result: unknown;
+  autoSubmit: boolean;
+  adapter: () => AdapterLike | null;
+}
+
+/**
+ * Shared safe-injection logic used by both success and error paths.
+ * Returns a structured InjectResult so callers can emit appropriate events.
+ *
+ * Steps:
+ * 1. Resolve adapter → null check
+ * 2. Check getInputContent is function → fail-closed
+ * 3. Check getInputContent() !== null → fail-closed
+ * 4. Check input empty → skip if draft present
+ * 5. formatFunctionResult({ callId, name, status, result })
+ * 6. insertText(formatted) → check === false
+ * 7. If autoSubmit → submitForm() → check === false
+ */
+export async function injectResultIfSafe(params: InjectResultParams): Promise<InjectResult> {
+  const { callId, name, status, result, autoSubmit, adapter } = params;
+
+  const currentAdapter = adapter();
+  if (!currentAdapter) {
+    return { outcome: 'INJECT_SKIPPED_NO_ADAPTER' };
+  }
+
+  if (typeof currentAdapter.getInputContent !== 'function') {
+    return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
+  }
+
+  let existingContent: string | null;
+  try {
+    existingContent = currentAdapter.getInputContent();
+  } catch {
+    return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
+  }
+  if (existingContent === null) {
+    return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
+  }
+  if (existingContent) {
+    return { outcome: 'INJECT_SKIPPED_DRAFT' };
+  }
+
+  const formatted = formatFunctionResult({ callId, name, status, result });
+
+  try {
+    const insertOk = await currentAdapter.insertText(formatted);
+    if (insertOk === false) {
+      return { outcome: 'INSERT_FAILED', error: 'insertText returned false' };
+    }
+  } catch (e) {
+    return { outcome: 'INSERT_FAILED', error: (e as Error).message };
+  }
+
+  if (autoSubmit && typeof currentAdapter.submitForm === 'function') {
+    try {
+      const submitOk = await currentAdapter.submitForm();
+      if (submitOk === false) {
+        return { outcome: 'SUBMIT_FAILED', error: 'submitForm returned false' };
+      }
+    } catch (e) {
+      return { outcome: 'SUBMIT_FAILED', error: (e as Error).message };
+    }
+    return { outcome: 'RESULT_SUBMITTED' };
+  }
+
+  return { outcome: 'RESULT_INJECTED' };
+}
+
 // --- Implementation ---
 
 export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
@@ -145,6 +242,18 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
   let executionCounter = 0;
   const expiredExecutions = new Set<number>();
+
+  // Gate 5: Circuit breaker state
+  const streamCallCounts = new Map<string, { count: number; lastAccess: number }>();
+
+  function sweepExpiredEntries() {
+    const now = Date.now();
+    for (const [id, entry] of streamCallCounts) {
+      if (now - entry.lastAccess > STREAM_CALL_TTL_MS) {
+        streamCallCounts.delete(id);
+      }
+    }
+  }
 
   function emit(streamId: string, identity: FunctionCallIdentityLike, status: StreamToolExecutionEvent['status'], extra: Partial<StreamToolExecutionEvent> = {}) {
     onEvent({
@@ -235,6 +344,24 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       return;
     }
 
+    // Step 4b (Gate 5): Circuit breaker check — only after valid + reserved + non-duplicate
+    sweepExpiredEntries();
+    const maxCalls = config.circuitBreaker?.maxToolCallsPerStream ?? DEFAULT_MAX_TOOL_CALLS_PER_STREAM;
+    if (maxCalls > 0) {
+      const entry = streamCallCounts.get(streamId);
+      const currentCount = entry ? entry.count : 0;
+      if (currentCount >= maxCalls) {
+        guard.executionGuardStore.markFailed(reservedKey, `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`);
+        emit(streamId, identity, 'failed', {
+          phase: 'reserve',
+          error: `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`,
+          errorCode: 'CIRCUIT_BREAKER_OPEN',
+        });
+        return;
+      }
+      streamCallCounts.set(streamId, { count: currentCount + 1, lastAccess: Date.now() });
+    }
+
     // Step 5: Check mcpClient availability (lazy per-event resolution)
     const mcpClient = resolveMcpClient();
     if (!mcpClient) {
@@ -289,6 +416,20 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           errorCode: 'TIMEOUT',
           durationMs: Date.now() - startTime,
         });
+        // Gate 5: inject error result for AI consumption
+        if (config.autoInsert) {
+          const { outcome, error: injectError } = await injectResultIfSafe({
+            callId, name: identity.name!, status: 'error',
+            result: 'Tool execution timeout',
+            autoSubmit: !!config.autoSubmit, adapter,
+          });
+          emit(streamId, identity, 'failed', {
+            phase: 'error_inject',
+            error: injectError || undefined,
+            errorCode: outcome,
+            durationMs: Date.now() - startTime,
+          });
+        }
         return;
       }
       guard.executionGuardStore.markFailed(reservedKey, (e as Error).message);
@@ -298,6 +439,20 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
         errorCode: 'TOOL_ERROR',
         durationMs: Date.now() - startTime,
       });
+      // Gate 5: inject error result for AI consumption
+      if (config.autoInsert) {
+        const { outcome, error: injectError } = await injectResultIfSafe({
+          callId, name: identity.name!, status: 'error',
+          result: (e as Error).message,
+          autoSubmit: !!config.autoSubmit, adapter,
+        });
+        emit(streamId, identity, 'failed', {
+          phase: 'error_inject',
+          error: injectError || undefined,
+          errorCode: outcome,
+          durationMs: Date.now() - startTime,
+        });
+      }
       return;
     }
 
@@ -313,103 +468,56 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     const contentSignature = storage.generateContentSignature(identity.name, parsedArgs);
     storage.storeExecutedFunction(identity.name, callId, parsedArgs, contentSignature);
 
-    // Step 9: DOM injection (with fail-closed protection)
+    // Step 9: DOM injection via shared safe-injection helper (Gate 5 refactor)
     if (config.autoInsert) {
-      const currentAdapter = adapter();
-      if (!currentAdapter) {
-        // P1 fix: adapter missing is a structured failure
-        emit(streamId, identity, 'failed', {
-          phase: 'inject',
-          error: 'No adapter available for DOM injection',
-          errorCode: 'ADAPTER_MISSING',
-          durationMs,
-        });
-        return;
-      }
+      const { outcome, error: injectError } = await injectResultIfSafe({
+        callId, name: identity.name!, status: 'success',
+        result, autoSubmit: !!config.autoSubmit, adapter,
+      });
 
-      // P0-3 fix: fail-closed — if getInputContent is not a function, we cannot
-      // reliably inspect whether user has a draft. Skip insert to avoid overwriting.
-      if (typeof currentAdapter.getInputContent !== 'function') {
-        emit(streamId, identity, 'succeeded', {
-          result,
-          durationMs,
-          error: 'Cannot inspect input content — insert skipped (fail-closed)',
-          errorCode: 'INSERT_SKIPPED_NO_INSPECT',
-        });
-        return;
-      }
-
-      const existingContent = currentAdapter.getInputContent();
-      if (existingContent === null) {
-        // Cannot inspect input (element not found) — fail-closed, skip insert
-        emit(streamId, identity, 'succeeded', {
-          result,
-          durationMs,
-          error: 'Input element not found — insert skipped (fail-closed)',
-          errorCode: 'INSERT_SKIPPED_NO_INSPECT',
-        });
-        return;
-      }
-      if (existingContent) {
-        // User has draft — skip insert
-        emit(streamId, identity, 'succeeded', { result, durationMs });
-        return;
-      }
-
-      // P0-4 fix: try/catch around insert with structured error
-      try {
-        const formattedResult = formatFunctionResult({
-          callId,
-          name: identity.name!,
-          status: 'success',
-          result,
-        });
-        const insertOk = await currentAdapter.insertText(formattedResult);
-        if (insertOk === false) {
+      switch (outcome) {
+        case 'RESULT_SUBMITTED':
+        case 'RESULT_INJECTED':
+          emit(streamId, identity, 'succeeded', { result, durationMs });
+          return;
+        case 'INJECT_SKIPPED_NO_ADAPTER':
           emit(streamId, identity, 'failed', {
             phase: 'inject',
-            error: 'insertText returned false',
+            error: 'No adapter available for DOM injection',
+            errorCode: 'ADAPTER_MISSING',
+            durationMs,
+          });
+          return;
+        case 'INJECT_SKIPPED_NO_INSPECT':
+          emit(streamId, identity, 'succeeded', {
+            result, durationMs,
+            error: 'Cannot inspect input content — insert skipped (fail-closed)',
+            errorCode: 'INSERT_SKIPPED_NO_INSPECT',
+          });
+          return;
+        case 'INJECT_SKIPPED_DRAFT':
+          emit(streamId, identity, 'succeeded', { result, durationMs });
+          return;
+        case 'INSERT_FAILED':
+          emit(streamId, identity, 'failed', {
+            phase: 'inject',
+            error: injectError || 'insertText failed',
             errorCode: 'INSERT_FAILED',
             durationMs: Date.now() - startTime,
           });
           return;
-        }
-      } catch (e) {
-        emit(streamId, identity, 'failed', {
-          phase: 'inject',
-          error: (e as Error).message,
-          errorCode: 'INSERT_FAILED',
-          durationMs: Date.now() - startTime,
-        });
-        return;
-      }
-
-      // Step 10: Optional auto-submit (P0-4 fix: try/catch)
-      if (config.autoSubmit && typeof currentAdapter.submitForm === 'function') {
-        try {
-          const submitOk = await currentAdapter.submitForm();
-          if (submitOk === false) {
-            emit(streamId, identity, 'failed', {
-              phase: 'submit',
-              error: 'submitForm returned false',
-              errorCode: 'SUBMIT_FAILED',
-              durationMs: Date.now() - startTime,
-            });
-            return;
-          }
-        } catch (e) {
+        case 'SUBMIT_FAILED':
           emit(streamId, identity, 'failed', {
             phase: 'submit',
-            error: (e as Error).message,
+            error: injectError || 'submitForm failed',
             errorCode: 'SUBMIT_FAILED',
             durationMs: Date.now() - startTime,
           });
           return;
-        }
       }
     }
 
-    // Step 11: Emit success
+    // Step 10: Emit success (no autoInsert, or injection not attempted)
     emit(streamId, identity, 'succeeded', { result, durationMs });
   };
 }
