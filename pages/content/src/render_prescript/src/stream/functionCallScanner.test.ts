@@ -14,11 +14,12 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
+    createFunctionCallScanner,
     detectFunctionCall,
     extractFunctionCallIdentity,
-    extractPatchTextContent,
     extractIdentityFromJsonlBlock,
-    createFunctionCallScanner,
+    extractPatchTextContent,
+    MAX_PATCH_BUFFER_SIZE,
 } from './functionCallScanner.ts';
 
 // ============================================================================
@@ -303,5 +304,42 @@ describe('extractFunctionCallIdentity — legacy formats still work', () => {
     test('returns null for patch format (handled by scanner)', () => {
         const identity = extractFunctionCallIdentity(NOTION_PATCH_LINE_12);
         assert.equal(identity, null);
+    });
+});
+
+describe('createFunctionCallScanner — buffer cap', () => {
+    test('aborts accumulation when buffer exceeds MAX_PATCH_BUFFER_SIZE', () => {
+        const scanner = createFunctionCallScanner();
+
+        // Start accumulation with a function_call_start patch
+        const startPatch = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/5/value/0/content',
+                v: '{"type":"function_call_start","name":"big_tool","call_id":"c1"}\n',
+            }],
+        });
+        const r1 = scanner.processLine(startPatch);
+        assert.equal(r1.accumulating, true);
+
+        // Feed oversized patch that pushes buffer past limit
+        const bigContent = 'x'.repeat(MAX_PATCH_BUFFER_SIZE + 1);
+        const bigPatch = JSON.stringify({
+            type: 'patch',
+            v: [{ o: 'x', p: '/s/5/value/0/content', v: bigContent }],
+        });
+        const r2 = scanner.processLine(bigPatch);
+
+        // Should abort accumulation — best-effort identity extraction from what we have
+        assert.equal(r2.accumulating, false, 'should stop accumulating');
+        // identity may or may not be extracted (partial data), but accumulation must stop
+        assert.equal(r2.detected, true, 'should detect with partial data');
+        assert.ok(r2.identity !== null, 'should extract partial identity');
+        assert.equal(r2.identity!.name, 'big_tool');
+    });
+
+    test('MAX_PATCH_BUFFER_SIZE is 128KB', () => {
+        assert.equal(MAX_PATCH_BUFFER_SIZE, 128 * 1024);
     });
 });
