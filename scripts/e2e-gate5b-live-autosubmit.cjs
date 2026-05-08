@@ -1,0 +1,518 @@
+/**
+ * Gate 5b: Live Notion/CDP Auto-Submit Consumption E2E
+ *
+ * Semi-automated: CDP script configures bridge + observes.
+ * Human triggers AI function_call via Notion prompt.
+ *
+ * Prerequisites:
+ *   1. Chrome launched with: --remote-debugging-port=9222
+ *   2. Notion page open with MCP SuperAssistant extension loaded
+ *   3. mcpClient connected and ready
+ *   4. At least one tool available (e.g. echo, read_workspace_file)
+ *
+ * Run: node scripts/e2e-gate5b-live-autosubmit.cjs
+ *
+ * Outputs:
+ *   outputs/gate5b-live-notion-e2e-{timestamp}.json
+ *   outputs/gate5b-live-notion-e2e-{timestamp}.md
+ */
+
+const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
+
+const CDP_PORT = 9222;
+const TIMEOUT_MS = 10000;
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_ROUNDS = 20; // 60 seconds total
+const SENTINEL_PREFIX = 'sentinel_g5b_';
+
+// ============================================================================
+// CDP Infrastructure
+// ============================================================================
+
+async function main() {
+    const startTime = Date.now();
+    const sentinel = SENTINEL_PREFIX + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const evidence = {
+        timestamp: new Date().toISOString(),
+        sentinel,
+        bridgeConfig: null,
+        preflightInfo: null,
+        events: [],
+        submitMethod: 'unknown',
+        sentinelBefore: null,
+        sentinelAfter: null,
+        scannerEvidence: null,
+        assistantResponseSnippet: null,
+        result: 'PENDING',
+        diagnostics: {},
+        durationMs: 0,
+    };
+
+    try {
+        await runE2E(sentinel, evidence);
+    } catch (err) {
+        evidence.result = 'ERROR';
+        evidence.diagnostics.fatalError = err.message;
+        console.error('\n❌ Fatal error:', err.message);
+    } finally {
+        evidence.durationMs = Date.now() - startTime;
+        await writeEvidence(evidence);
+    }
+}
+
+async function runE2E(sentinel, evidence) {
+    // --- Step 1: CDP connect ---
+    console.log('\n🧪 Gate 5b Live E2E — Auto-Submit Consumption Proof\n');
+    console.log('Sentinel:', sentinel);
+
+    const resp = await fetch(`http://localhost:${CDP_PORT}/json`);
+    const tabs = await resp.json();
+    const notionTab = tabs.find(t => t.type === 'page' && t.url && t.url.includes('notion.so'));
+    if (!notionTab) {
+        console.log('❌ No Notion tab found');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'No Notion tab found';
+        return;
+    }
+    console.log('✅ Tab:', notionTab.url.slice(0, 80));
+
+    const ws = new WebSocket(notionTab.webSocketDebuggerUrl);
+    let msgId = 0;
+    const listeners = new Map();
+    const contexts = [];
+
+    ws.on('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.id && listeners.has(msg.id)) {
+            listeners.get(msg.id)(msg);
+            listeners.delete(msg.id);
+        }
+        if (msg.method === 'Runtime.executionContextCreated') {
+            contexts.push(msg.params.context);
+        }
+    });
+
+    await new Promise((r, e) => { ws.on('open', r); ws.on('error', e); });
+
+    function send(method, params = {}) {
+        return new Promise(resolve => {
+            const id = ++msgId;
+            listeners.set(id, resolve);
+            ws.send(JSON.stringify({ id, method, params }));
+            setTimeout(() => {
+                if (listeners.has(id)) { listeners.delete(id); resolve({ error: 'timeout' }); }
+            }, TIMEOUT_MS);
+        });
+    }
+
+    async function evalMain(expression, opts = {}) {
+        const params = { expression, returnByValue: true, awaitPromise: opts.awaitPromise || false, ...opts };
+        const result = await send('Runtime.evaluate', params);
+        return result.result?.result;
+    }
+
+    let isoCtx = null;
+    async function evalIso(expression, opts = {}) {
+        const params = { expression, returnByValue: true, awaitPromise: opts.awaitPromise || false, contextId: isoCtx, ...opts };
+        const result = await send('Runtime.evaluate', params);
+        return result.result?.result;
+    }
+
+    await send('Runtime.enable');
+    await new Promise(r => setTimeout(r, 1500));
+
+    // --- Find ISOLATED world ---
+    for (const ctx of contexts) {
+        if (ctx.name === 'MCP SuperAssistant') {
+            const check = await send('Runtime.evaluate', {
+                contextId: ctx.id,
+                expression: "typeof window.pluginRegistry !== 'undefined'",
+                returnByValue: true,
+            });
+            if (check.result?.result?.value === true) { isoCtx = ctx.id; break; }
+        }
+    }
+    if (!isoCtx) {
+        console.log('❌ No ISOLATED world (MCP SuperAssistant context) found');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'No ISOLATED world found';
+        ws.close();
+        return;
+    }
+    console.log('✅ ISOLATED world:', isoCtx);
+
+    // --- Step 1b: Preflight check ---
+    const preflight = await evalIso(`(function() {
+        const info = {};
+        // mcpClient
+        const mc = window.mcpClient;
+        info.mcpClientAvailable = !!(mc && typeof mc.callTool === 'function' && typeof mc.isReady === 'function');
+        info.mcpClientReady = info.mcpClientAvailable && mc.isReady();
+        // adapter via pluginRegistry
+        const reg = window.pluginRegistry;
+        const plugin = reg?.getActivePlugin?.();
+        const adapter = plugin?.adapter;
+        info.adapterAvailable = !!(adapter && typeof adapter.insertText === 'function');
+        info.hasSubmitForm = !!(adapter && typeof adapter.submitForm === 'function');
+        info.hasGetInputContent = !!(adapter && typeof adapter.getInputContent === 'function');
+        // bridge info if exported
+        try {
+            const bridgeInfo = window.getStreamToolBridgeInfo?.();
+            info.bridgeInfo = bridgeInfo || null;
+        } catch { info.bridgeInfo = null; }
+        return info;
+    })()`, { awaitPromise: false });
+
+    console.log('Preflight:', JSON.stringify(preflight?.value, null, 2));
+    evidence.preflightInfo = preflight?.value;
+
+    if (!preflight?.value?.mcpClientReady) {
+        console.log('❌ mcpClient not ready');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'mcpClient not ready';
+        ws.close();
+        return;
+    }
+    if (!preflight?.value?.adapterAvailable) {
+        console.log('❌ adapter not available');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'adapter not available';
+        ws.close();
+        return;
+    }
+    console.log('✅ Preflight passed');
+
+    // --- Step 2: Configure bridge ---
+    console.log('\n--- Step 2: Configure bridge ---');
+    const configResult = await evalIso(`(function() {
+        try {
+            if (typeof window.configureStreamToolBridge === 'function') {
+                window.configureStreamToolBridge({
+                    enabled: true,
+                    cutoffEnabled: true,
+                    autoInsert: true,
+                    autoSubmit: true,
+                });
+                const info = window.getStreamToolBridgeInfo?.();
+                return { ok: true, config: info?.config };
+            }
+            return { ok: false, error: 'configureStreamToolBridge not found' };
+        } catch (e) { return { ok: false, error: e.message }; }
+    })()`, { awaitPromise: false });
+
+    console.log('Bridge config:', JSON.stringify(configResult?.value));
+    evidence.bridgeConfig = configResult?.value?.config;
+
+    if (!configResult?.value?.ok) {
+        console.log('❌ Bridge configuration failed');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'Bridge config failed: ' + configResult?.value?.error;
+        ws.close();
+        return;
+    }
+    console.log('✅ Bridge configured: autoInsert=true, autoSubmit=true');
+
+    // --- Step 3: Install dependency wrappers ---
+    console.log('\n--- Step 3: Install dependency wrappers ---');
+    const wrapResult = await evalIso(`(function() {
+        // Guard against double-wrap
+        if (window.__gate5b_wrapped) return { ok: true, alreadyWrapped: true };
+        window.__gate5b_events = [];
+        window.__gate5b_wrapped = true;
+
+        // Wrap mcpClient.callTool
+        const mc = window.mcpClient;
+        if (mc && typeof mc.callTool === 'function') {
+            const origCallTool = mc.callTool.bind(mc);
+            mc.callTool = async (name, params) => {
+                window.__gate5b_events.push({ type: 'callTool', name, params: JSON.stringify(params).slice(0, 500), ts: Date.now() });
+                try {
+                    const result = await origCallTool(name, params);
+                    window.__gate5b_events.push({ type: 'callTool_result', name, resultPreview: JSON.stringify(result).slice(0, 500), ts: Date.now() });
+                    return result;
+                } catch (e) {
+                    window.__gate5b_events.push({ type: 'callTool_error', name, error: e.message, ts: Date.now() });
+                    throw e;
+                }
+            };
+        }
+
+        // Wrap adapter methods
+        const reg = window.pluginRegistry;
+        const plugin = reg?.getActivePlugin?.();
+        const adapter = plugin?.adapter;
+        if (adapter) {
+            // insertText
+            if (typeof adapter.insertText === 'function') {
+                const origInsert = adapter.insertText.bind(adapter);
+                adapter.insertText = async (text) => {
+                    window.__gate5b_events.push({ type: 'insertText', textLen: text.length, preview: text.slice(0, 200), ts: Date.now() });
+                    try {
+                        const result = await origInsert(text);
+                        window.__gate5b_events.push({ type: 'insertText_result', result, ts: Date.now() });
+                        return result;
+                    } catch (e) {
+                        window.__gate5b_events.push({ type: 'insertText_error', error: e.message, ts: Date.now() });
+                        throw e;
+                    }
+                };
+            }
+            // submitForm
+            if (typeof adapter.submitForm === 'function') {
+                const origSubmit = adapter.submitForm.bind(adapter);
+                adapter.submitForm = async () => {
+                    window.__gate5b_events.push({ type: 'submitForm', ts: Date.now() });
+                    try {
+                        const result = await origSubmit();
+                        window.__gate5b_events.push({ type: 'submitForm_result', result, ts: Date.now() });
+                        return result;
+                    } catch (e) {
+                        window.__gate5b_events.push({ type: 'submitForm_error', error: e.message, ts: Date.now() });
+                        throw e;
+                    }
+                };
+            }
+            // getInputContent
+            if (typeof adapter.getInputContent === 'function') {
+                const origGetInput = adapter.getInputContent.bind(adapter);
+                adapter.getInputContent = () => {
+                    try {
+                        const content = origGetInput();
+                        window.__gate5b_events.push({ type: 'getInputContent', contentLen: content?.length ?? -1, ts: Date.now() });
+                        return content;
+                    } catch (e) {
+                        window.__gate5b_events.push({ type: 'getInputContent_error', error: e.message, ts: Date.now() });
+                        throw e;
+                    }
+                };
+            }
+        }
+        return { ok: true, wrappedMethods: ['callTool', 'insertText', 'submitForm', 'getInputContent'] };
+    })()`, { awaitPromise: false });
+
+    console.log('Wrapper:', JSON.stringify(wrapResult?.value));
+    if (!wrapResult?.value?.ok) {
+        console.log('❌ Wrapper installation failed');
+        evidence.result = 'FAIL';
+        evidence.diagnostics.error = 'Wrapper install failed';
+        ws.close();
+        return;
+    }
+    console.log('✅ Dependency wrappers installed');
+
+    // --- Step 4: Before snapshot + prompt user ---
+    console.log('\n--- Step 4: Sentinel before snapshot ---');
+    const beforeCheck = await evalMain(`(function() {
+        const text = document.body.innerText;
+        const count = (text.match(/${sentinel}/g) || []).length;
+        return { count };
+    })()`);
+    evidence.sentinelBefore = beforeCheck?.value?.count || 0;
+    console.log('Sentinel before:', evidence.sentinelBefore);
+
+    console.log('\n' + '='.repeat(60));
+    console.log('📝 请在 Notion 中输入以下 prompt：');
+    console.log('');
+    console.log(`   请调用 echo 工具，参数为 {"message": "${sentinel}"}`);
+    console.log('');
+    console.log('   然后按 Enter 发送。');
+    console.log('   脚本将自动检测 bridge 活动...');
+    console.log('='.repeat(60) + '\n');
+
+    // --- Step 5: Poll for bridge activity ---
+    console.log('--- Step 5: Polling for bridge activity (max 60s) ---');
+    let bridgeActive = false;
+    let toolExecuted = false;
+    let resultInserted = false;
+    let formSubmitted = false;
+    let submitMethod = 'none';
+    let consumed = false;
+
+    for (let round = 0; round < MAX_POLL_ROUNDS; round++) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+
+        // Read events from ISOLATED world
+        const eventsResult = await evalIso(`(function() {
+            return JSON.parse(JSON.stringify(window.__gate5b_events || []));
+        })()`, { awaitPromise: false });
+        const events = eventsResult?.value || [];
+
+        // Check what happened
+        const hasCallTool = events.some(e => e.type === 'callTool');
+        const hasInsertText = events.some(e => e.type === 'insertText');
+        const hasSubmitForm = events.some(e => e.type === 'submitForm');
+        const hasSubmitResult = events.find(e => e.type === 'submitForm_result');
+
+        if (hasCallTool && !toolExecuted) {
+            toolExecuted = true;
+            const callEvent = events.find(e => e.type === 'callTool');
+            console.log(`  ✅ Tool executed: ${callEvent.name}(${callEvent.params?.slice(0, 100)})`);
+        }
+        if (hasInsertText && !resultInserted) {
+            resultInserted = true;
+            const insertEvent = events.find(e => e.type === 'insertText');
+            console.log(`  ✅ Result injected: ${insertEvent.textLen} chars`);
+        }
+        if (hasSubmitForm && !formSubmitted) {
+            formSubmitted = true;
+            if (hasSubmitResult?.result === true) {
+                submitMethod = 'adapter.submitForm';
+                console.log('  ✅ Auto-submitted via adapter.submitForm');
+            } else {
+                submitMethod = 'adapter.submitForm_failed';
+                console.log('  ⚠️ submitForm called but result:', hasSubmitResult?.result);
+            }
+        }
+
+        // Check sentinel in page
+        const sentinelCheck = await evalMain(`(function() {
+            const text = document.body.innerText;
+            const count = (text.match(/${sentinel}/g) || []).length;
+            // Find context around last occurrence
+            const idx = text.lastIndexOf('${sentinel}');
+            let context = '';
+            if (idx > -1) context = text.slice(Math.max(0, idx - 150), Math.min(text.length, idx + sentinel.length + 150));
+            return { count, context };
+        })()`);
+        const sentinelCount = sentinelCheck?.value?.count || 0;
+
+        if (round % 3 === 0) {
+            console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: events=${events.length}, sentinel=${sentinelCount}`);
+        }
+
+        // PASS condition: sentinel appears >= 2 AND was injected by bridge
+        if (sentinelCount >= 2 && toolExecuted && resultInserted && formSubmitted) {
+            consumed = true;
+            evidence.sentinelAfter = sentinelCount;
+            evidence.assistantResponseSnippet = sentinelCheck?.value?.context;
+            console.log(`  ✅ AI consumed result! Sentinel: ${evidence.sentinelBefore} → ${sentinelCount}`);
+            break;
+        }
+
+        // Store latest events for evidence
+        evidence.events = events;
+    }
+
+    evidence.submitMethod = submitMethod;
+    if (!consumed) {
+        // Final sentinel check
+        const finalCheck = await evalMain(`(function() {
+            const text = document.body.innerText;
+            const count = (text.match(/${sentinel}/g) || []).length;
+            const idx = text.lastIndexOf('${sentinel}');
+            let context = '';
+            if (idx > -1) context = text.slice(Math.max(0, idx - 150), Math.min(text.length, idx + sentinel.length + 150));
+            return { count, context };
+        })()`);
+        evidence.sentinelAfter = finalCheck?.value?.count || 0;
+        evidence.assistantResponseSnippet = finalCheck?.value?.context;
+    }
+
+    // --- Determine result ---
+    if (consumed && submitMethod === 'adapter.submitForm') {
+        evidence.result = 'PASS';
+    } else if (consumed && submitMethod !== 'adapter.submitForm') {
+        evidence.result = 'DIAGNOSTIC';
+        evidence.diagnostics.note = 'AI consumed result but submitForm was not the production path';
+    } else if (toolExecuted && resultInserted && formSubmitted && !consumed) {
+        evidence.result = 'INCONCLUSIVE';
+        evidence.diagnostics.note = 'Bridge path worked but AI may not have echoed sentinel';
+    } else if (toolExecuted && !resultInserted) {
+        evidence.result = 'FAIL';
+        evidence.diagnostics.note = 'Tool executed but result not injected';
+    } else if (!toolExecuted && evidence.events.length === 0) {
+        // Scanner miss — collect debugging evidence
+        evidence.result = 'SCANNER_MISS';
+        console.log('\n⚠️ No bridge activity detected. Collecting debugging evidence...');
+
+        const pageBodyTail = await evalMain(`(function() {
+            return document.body.innerText.slice(-500);
+        })()`);
+        evidence.diagnostics.pageBodyTail = pageBodyTail?.value;
+
+        const bridgeInfo = await evalIso(`(function() {
+            try { return window.getStreamToolBridgeInfo?.(); } catch { return null; }
+        })()`, { awaitPromise: false });
+        evidence.diagnostics.bridgeInfo = bridgeInfo?.value;
+        evidence.diagnostics.hypothesis = 'AI may not have called tool, or scanner did not detect function_call in stream';
+    } else {
+        evidence.result = 'FAIL';
+        evidence.diagnostics.note = 'Unknown failure state';
+    }
+
+    // Final summary
+    console.log('\n' + '='.repeat(60));
+    console.log(`Result: ${evidence.result}`);
+    console.log(`Tool executed: ${toolExecuted}`);
+    console.log(`Result inserted: ${resultInserted}`);
+    console.log(`Form submitted: ${formSubmitted} (${submitMethod})`);
+    console.log(`Sentinel: ${evidence.sentinelBefore} → ${evidence.sentinelAfter}`);
+    console.log('='.repeat(60));
+
+    ws.close();
+}
+
+// ============================================================================
+// Evidence Output
+// ============================================================================
+
+async function writeEvidence(evidence) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const dir = path.join(__dirname, '..', 'outputs');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    // JSON
+    const jsonPath = path.join(dir, `gate5b-live-notion-e2e-${ts}.json`);
+    fs.writeFileSync(jsonPath, JSON.stringify(evidence, null, 2));
+    console.log(`\n📄 JSON evidence: ${jsonPath}`);
+
+    // Markdown
+    const mdPath = path.join(dir, `gate5b-live-notion-e2e-${ts}.md`);
+    const md = generateMarkdownReport(evidence);
+    fs.writeFileSync(mdPath, md);
+    console.log(`📄 Markdown report: ${mdPath}`);
+}
+
+function generateMarkdownReport(ev) {
+    const lines = [
+        `# Gate 5b Live E2E Evidence — ${ev.timestamp}`,
+        '',
+        `## Result: ${ev.result}`,
+        '',
+        '| Step | Status |',
+        '|------|--------|',
+        `| CDP connect | ✅ |`,
+        `| ISOLATED world | ${ev.preflightInfo ? '✅' : '❌'} |`,
+        `| mcpClient ready | ${ev.preflightInfo?.mcpClientReady ? '✅' : '❌'} |`,
+        `| Bridge config | ${ev.bridgeConfig ? '✅ autoInsert=' + ev.bridgeConfig.autoInsert + ' autoSubmit=' + ev.bridgeConfig.autoSubmit : '❌'} |`,
+        `| Tool executed | ${ev.events.some(e => e.type === 'callTool') ? '✅ ' + (ev.events.find(e => e.type === 'callTool')?.name || '') : '❌'} |`,
+        `| Result injected | ${ev.events.some(e => e.type === 'insertText') ? '✅ ' + (ev.events.find(e => e.type === 'insertText')?.textLen || 0) + ' chars' : '❌'} |`,
+        `| Submit method | ${ev.submitMethod} |`,
+        `| AI consumed | ${ev.sentinelAfter >= 2 ? '✅' : '❌'} sentinel ${ev.sentinelBefore} → ${ev.sentinelAfter} |`,
+        '',
+        `## Sentinel`,
+        '',
+        `\`${ev.sentinel}\``,
+        '',
+    ];
+
+    if (ev.assistantResponseSnippet) {
+        lines.push('## Assistant Response Snippet', '', '```', ev.assistantResponseSnippet, '```', '');
+    }
+
+    if (ev.events.length > 0) {
+        lines.push('## Bridge Events', '', '```json', JSON.stringify(ev.events, null, 2), '```', '');
+    }
+
+    if (ev.diagnostics && Object.keys(ev.diagnostics).length > 0) {
+        lines.push('## Diagnostics', '', '```json', JSON.stringify(ev.diagnostics, null, 2), '```', '');
+    }
+
+    lines.push(`## Duration`, '', `${ev.durationMs}ms`, '', '---', '', 'Author: Opus/Claude (automated)');
+
+    return lines.join('\n');
+}
+
+main().catch(console.error);
