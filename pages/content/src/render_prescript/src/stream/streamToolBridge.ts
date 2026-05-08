@@ -111,19 +111,12 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       });
       return;
     }
-    if (identity.arguments === null || identity.arguments === undefined) {
-      emit(streamId, identity, 'failed', {
-        phase: 'identity',
-        error: 'identity.arguments is null',
-        errorCode: 'IDENTITY_INVALID',
-      });
-      return;
-    }
-
     // Step 2: Parse arguments (BEFORE reserve)
+    // Accept null/undefined as empty args — no-arg tools (e.g. get_bridge_info) are valid
     let parsedArgs: Record<string, unknown>;
+    const rawArgs = identity.arguments ?? '{}';
     try {
-      parsedArgs = JSON.parse(identity.arguments);
+      parsedArgs = JSON.parse(rawArgs);
     } catch (e) {
       emit(streamId, identity, 'failed', {
         phase: 'parse',

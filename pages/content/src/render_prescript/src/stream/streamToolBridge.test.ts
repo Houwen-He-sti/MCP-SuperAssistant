@@ -250,9 +250,9 @@ describe('streamToolBridge', () => {
     assert.strictEqual(failEvent.phase, 'identity');
   });
 
-  test('4. identity.arguments null — skip execution', async () => {
-    const mockClient = createMockMcpClient();
-    const mockGuard = createMockGuard();
+  test('4. identity.arguments null — treated as empty args, execution proceeds', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: { content: 'no-arg result' } });
+    const mockGuard = createMockGuard({ reserveResult: 'key-null-args' });
     const mockStorage = createMockStorage();
 
     const events: StreamToolExecutionEvent[] = [];
@@ -265,14 +265,15 @@ describe('streamToolBridge', () => {
       onEvent: (evt) => events.push(evt),
     });
 
-    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c1', arguments: null } }));
+    await handler(makeCutoffEvent({ identity: { name: 'get_bridge_info', callId: 'c1', arguments: null } }));
 
-    assert.strictEqual(mockClient._calls.length, 0);
-    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    // Should proceed with empty args
+    assert.strictEqual(mockClient._calls.length, 1, 'callTool should be called');
+    assert.deepStrictEqual(mockClient._calls[0].params, {}, 'params should be empty object');
+    assert.strictEqual(mockGuard._calls.reserve.length, 1);
 
-    const failEvent = events.find(e => e.status === 'failed');
-    assert.ok(failEvent);
-    assert.strictEqual(failEvent.phase, 'identity');
+    const successEvent = events.find(e => e.status === 'succeeded');
+    assert.ok(successEvent, 'should emit succeeded event');
   });
 
   test('5. arguments JSON parse fails — emit failed, guard NOT reserved', async () => {

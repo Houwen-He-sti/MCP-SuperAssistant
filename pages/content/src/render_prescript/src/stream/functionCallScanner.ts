@@ -179,6 +179,9 @@ export function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentit
  * - detected=true: function_call fully resolved, emit event
  * - detected=false && !accumulating: line is not a function_call
  */
+/** Maximum patch accumulation buffer size (128KB). Abort accumulation if exceeded. */
+export const MAX_PATCH_BUFFER_SIZE = 128 * 1024;
+
 export function createFunctionCallScanner() {
     let patchContentBuffer = '';
     let isAccumulating = false;
@@ -190,6 +193,16 @@ export function createFunctionCallScanner() {
             const patchText = extractPatchTextContent(trimmedLine);
             if (patchText !== null) {
                 patchContentBuffer += patchText;
+                // Safety cap: abort if buffer grows too large
+                if (patchContentBuffer.length > MAX_PATCH_BUFFER_SIZE) {
+                    const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
+                    const rawLine = firstDetectionLine;
+                    reset();
+                    if (identity !== null) {
+                        return { detected: true, identity, rawLine, accumulating: false };
+                    }
+                    return { detected: false, identity: null, rawLine: '', accumulating: false };
+                }
                 if (patchContentBuffer.includes('function_call_end')) {
                     const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
                     const rawLine = firstDetectionLine;
