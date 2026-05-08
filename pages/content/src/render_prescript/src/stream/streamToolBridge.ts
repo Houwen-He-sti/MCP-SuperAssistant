@@ -54,9 +54,9 @@ export interface McpClientLike {
 }
 
 export interface AdapterLike {
-  insertText(text: string): Promise<void>;
-  submitForm?(): Promise<void>;
-  getInputContent?(): string;
+  insertText(text: string): Promise<boolean>;
+  submitForm?(): Promise<boolean>;
+  getInputContent?(): string | null;
 }
 
 export interface ExecutionGuardLike {
@@ -129,7 +129,10 @@ function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; input
   }
   try {
     const content = adapter.getInputContent();
-    return { inputEmpty: !content, inputTextLength: content ? content.length : 0 };
+    if (content === null) {
+      return { inputEmpty: null, inputTextLength: null };
+    }
+    return { inputEmpty: !content, inputTextLength: content.length };
   } catch {
     return { inputEmpty: null, inputTextLength: null };
   }
@@ -337,6 +340,16 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       }
 
       const existingContent = currentAdapter.getInputContent();
+      if (existingContent === null) {
+        // Cannot inspect input (element not found) — fail-closed, skip insert
+        emit(streamId, identity, 'succeeded', {
+          result,
+          durationMs,
+          error: 'Input element not found — insert skipped (fail-closed)',
+          errorCode: 'INSERT_SKIPPED_NO_INSPECT',
+        });
+        return;
+      }
       if (existingContent) {
         // User has draft — skip insert
         emit(streamId, identity, 'succeeded', { result, durationMs });
@@ -351,7 +364,16 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           status: 'ok',
           result,
         });
-        await currentAdapter.insertText(formattedResult);
+        const insertOk = await currentAdapter.insertText(formattedResult);
+        if (insertOk === false) {
+          emit(streamId, identity, 'failed', {
+            phase: 'inject',
+            error: 'insertText returned false',
+            errorCode: 'INSERT_FAILED',
+            durationMs: Date.now() - startTime,
+          });
+          return;
+        }
       } catch (e) {
         emit(streamId, identity, 'failed', {
           phase: 'inject',
@@ -365,7 +387,16 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       // Step 10: Optional auto-submit (P0-4 fix: try/catch)
       if (config.autoSubmit && typeof currentAdapter.submitForm === 'function') {
         try {
-          await currentAdapter.submitForm();
+          const submitOk = await currentAdapter.submitForm();
+          if (submitOk === false) {
+            emit(streamId, identity, 'failed', {
+              phase: 'submit',
+              error: 'submitForm returned false',
+              errorCode: 'SUBMIT_FAILED',
+              durationMs: Date.now() - startTime,
+            });
+            return;
+          }
         } catch (e) {
           emit(streamId, identity, 'failed', {
             phase: 'submit',

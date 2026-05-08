@@ -269,13 +269,13 @@ export class NotionAdapter extends BaseAdapterPlugin {
      * Get the current text content of the Notion AI chat input.
      * Required by streamToolBridge fail-closed logic to check for user drafts.
      */
-    getInputContent(): string {
+    getInputContent(): string | null {
         const selectors = this.selectors.CHAT_INPUT.split(', ');
         for (const sel of selectors) {
             const el = document.querySelector(sel.trim()) as HTMLElement;
             if (el) return el.textContent || '';
         }
-        return '';
+        return null;
     }
 
     /**

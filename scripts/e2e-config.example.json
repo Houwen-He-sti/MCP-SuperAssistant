@@ -1,0 +1,5 @@
+{
+    "workspace": "your-workspace-name",
+    "agentUrl": "https://www.notion.so/agent/<agent-id>?wfv=chat",
+    "agentName": "SuperAssistant"
+}
