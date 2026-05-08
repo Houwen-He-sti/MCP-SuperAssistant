@@ -745,7 +745,7 @@ async function navigateByUrl(wsUrl) {
  * Steps:
  *   1) Look for agent link in current sidebar → click
  *   2) If not found, switch workspace then find agent link → click
- * Returns true if URL now includes the agent path.
+ * Returns true if URL now contains the expected agent path.
  */
 async function navigateByClick(wsUrl) {
     const ws = new WebSocket(wsUrl);
@@ -763,82 +763,152 @@ async function navigateByClick(wsUrl) {
         return r.result?.result?.value;
     };
 
-    // Extract agent path from URL for selector matching
+    // Extract agent path from URL — use JSON.stringify for safe injection into evaluated JS
     const agentPath = new URL(E2E_CONFIG.agentUrl).pathname;
+    const agentPathJson = JSON.stringify(agentPath);
+    const wsNameJson = JSON.stringify(E2E_CONFIG.workspace);
 
-    // Step 1: Try to find agent link directly in sidebar
-    log('step', `Looking for ${E2E_CONFIG.agentName} link in sidebar...`);
-    const directClick = await evalJS(`(function() {
-        var link = document.querySelector('a[href*="${agentPath}"]');
-        if (link) { link.click(); return 'direct'; }
-        return null;
-    })()`);
-
-    if (directClick) {
-        log('info', `Found ${E2E_CONFIG.agentName} link directly — clicked`);
-        await new Promise(r => setTimeout(r, 5000));
-        const url = await evalJS('location.href');
-        ws.close();
-        return url && url.includes('/agent/');
-    }
-
-    // Step 2: Switch workspace
-    log('step', 'Not found. Switching workspace...');
-    log('step', 'Clicking workspace switcher...');
-    const switcherClicked = await evalJS(`(function() {
-        var sw = document.querySelector('.notion-sidebar-switcher');
-        if (sw) { sw.click(); return true; }
-        return false;
-    })()`);
-    if (!switcherClicked) {
-        log('warn', 'Workspace switcher not found');
-        ws.close();
-        return false;
-    }
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Step 3: Click target workspace in menu
-    const wsName = E2E_CONFIG.workspace;
-    log('step', `Looking for "${wsName}" in menu...`);
-    const wsClicked = await evalJS(`(function() {
-        var items = document.querySelectorAll('[role="menuitem"]');
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].textContent.includes('${wsName.replace(/'/g, "\\'")}')) {
-                items[i].click();
-                return items[i].textContent.substring(0, 40);
-            }
+    // Helper: poll until condition or timeout
+    const pollUntil = async (checkExpr, timeoutMs = 10000, intervalMs = 500) => {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const val = await evalJS(checkExpr);
+            if (val) return val;
+            await new Promise(r => setTimeout(r, intervalMs));
         }
         return null;
-    })()`);
-    if (!wsClicked) {
-        log('warn', `Workspace "${wsName}" not found in switcher menu`);
-        await evalJS(`document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true}))`);
+    };
+
+    try {
+        // Step 1: Try to find agent link directly in sidebar (safe: uses JS filtering, not CSS injection)
+        log('step', `Looking for ${E2E_CONFIG.agentName} link in sidebar...`);
+        const directClick = await evalJS(`(function() {
+            var targetPath = ${agentPathJson};
+            var links = document.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                try {
+                    var href = new URL(links[i].href).pathname;
+                    if (href === targetPath || href.startsWith(targetPath + '/')) {
+                        links[i].click();
+                        return 'direct';
+                    }
+                } catch(e) {}
+            }
+            return null;
+        })()`);
+
+        if (directClick) {
+            log('info', `Found ${E2E_CONFIG.agentName} link directly — clicked`);
+            // Poll for URL change instead of fixed sleep
+            const arrived = await pollUntil(
+                `(function() { try { return new URL(location.href).pathname.indexOf(${agentPathJson}) >= 0; } catch(e) { return false; } })()`,
+                8000
+            );
+            if (!arrived) {
+                log('warn', 'URL did not change to agent path after click');
+            }
+            const url = await evalJS('location.href');
+            return url && new URL(url).pathname.includes(agentPath);
+        }
+
+        // Step 2: Switch workspace
+        log('step', 'Not found. Switching workspace...');
+        log('step', 'Clicking workspace switcher...');
+        const switcherClicked = await evalJS(`(function() {
+            var sw = document.querySelector('.notion-sidebar-switcher');
+            if (sw) { sw.click(); return true; }
+            return false;
+        })()`);
+        if (!switcherClicked) {
+            log('warn', 'Workspace switcher not found');
+            return false;
+        }
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Step 3: Click target workspace in menu (exact-first matching)
+        log('step', `Looking for ${E2E_CONFIG.workspace} in menu...`);
+        const wsClicked = await evalJS(`(function() {
+            var targetName = ${wsNameJson};
+            var items = document.querySelectorAll('[role="menuitem"]');
+            // Pass 1: exact match (textContent.trim() === targetName)
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].textContent.trim() === targetName) {
+                    items[i].click();
+                    return items[i].textContent.substring(0, 40);
+                }
+            }
+            // Pass 2: includes match (only if exactly one match)
+            var matches = [];
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].textContent.includes(targetName)) {
+                    matches.push(items[i]);
+                }
+            }
+            if (matches.length === 1) {
+                matches[0].click();
+                return matches[0].textContent.substring(0, 40);
+            }
+            return null;
+        })()`);
+        if (!wsClicked) {
+            log('warn', `Workspace "${E2E_CONFIG.workspace}" not found in switcher menu`);
+            await evalJS(`document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true}))`);
+            return false;
+        }
+        log('info', `Switched to: ${wsClicked}`);
+
+        // Poll for agent link to appear after workspace switch (instead of fixed 8s sleep)
+        log('step', 'Waiting for workspace to load and agent link to appear...');
+        const linkAppeared = await pollUntil(`(function() {
+            var targetPath = ${agentPathJson};
+            var links = document.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                try {
+                    if (new URL(links[i].href).pathname.indexOf(targetPath) >= 0) return true;
+                } catch(e) {}
+            }
+            return false;
+        })()`, 15000, 1000);
+
+        if (!linkAppeared) {
+            log('warn', `${E2E_CONFIG.agentName} link not found after workspace switch (15s timeout)`);
+            return false;
+        }
+
+        // Step 4: Find and click agent link (safe: JS filtering)
+        log('step', `Clicking ${E2E_CONFIG.agentName} link...`);
+        const afterSwitch = await evalJS(`(function() {
+            var targetPath = ${agentPathJson};
+            var links = document.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                try {
+                    var href = new URL(links[i].href).pathname;
+                    if (href === targetPath || href.startsWith(targetPath + '/')) {
+                        links[i].click();
+                        return 'clicked';
+                    }
+                } catch(e) {}
+            }
+            return null;
+        })()`);
+        if (!afterSwitch) {
+            log('warn', `${E2E_CONFIG.agentName} link not found after workspace switch`);
+            return false;
+        }
+
+        // Poll for final URL to contain agent path
+        const finalArrived = await pollUntil(
+            `(function() { try { return new URL(location.href).pathname.indexOf(${agentPathJson}) >= 0; } catch(e) { return false; } })()`,
+            8000
+        );
+        if (!finalArrived) {
+            log('warn', 'URL did not change to agent path after final click');
+        }
+        const finalUrl = await evalJS('location.href');
+        return finalUrl && new URL(finalUrl).pathname.includes(agentPath);
+    } finally {
         ws.close();
-        return false;
     }
-    log('info', `Switched to: ${wsClicked}`);
-
-    // Wait for workspace to load
-    log('step', 'Waiting 8s for workspace load...');
-    await new Promise(r => setTimeout(r, 8000));
-
-    // Step 4: Find and click agent link
-    log('step', `Looking for ${E2E_CONFIG.agentName} link after switch...`);
-    const afterSwitch = await evalJS(`(function() {
-        var link = document.querySelector('a[href*="${agentPath}"]');
-        if (link) { link.click(); return 'clicked'; }
-        return null;
-    })()`);
-    if (!afterSwitch) {
-        log('warn', `${E2E_CONFIG.agentName} link not found after workspace switch`);
-        ws.close();
-        return false;
-    }
-
-    await new Promise(r => setTimeout(r, 5000));
-    const finalUrl = await evalJS('location.href');
-    ws.close();
-    return finalUrl && finalUrl.includes('/agent/');
 }
 
 // ============================================================================
