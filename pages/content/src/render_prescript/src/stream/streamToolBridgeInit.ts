@@ -148,3 +148,29 @@ export function configureStreamToolBridge(config: Partial<StreamToolBridgeInitCo
   // Re-initialize with new config
   initStreamToolBridge();
 }
+
+/**
+ * Preflight diagnostic — reports whether all dependencies are ready for tool execution.
+ * Call from devtools console (ISOLATED world context) to check before E2E testing.
+ */
+export function getStreamToolBridgeInfo(): {
+  config: StreamToolBridgeInitConfig;
+  isNotionHost: boolean;
+  bridgeHandlerReady: boolean;
+  subscribed: boolean;
+  mcpClientAvailable: boolean;
+  mcpClientReady: boolean;
+  adapterAvailable: boolean;
+} {
+  const mcpClient = resolveMcpClient();
+  const currentAdapter = resolveCurrentAdapter();
+  return {
+    config: { ...currentConfig },
+    isNotionHost: isNotionHost(),
+    bridgeHandlerReady: bridgeHandler !== null,
+    subscribed: unsubscribe !== null,
+    mcpClientAvailable: mcpClient !== null,
+    mcpClientReady: mcpClient !== null && mcpClient.isReady(),
+    adapterAvailable: currentAdapter !== null,
+  };
+}
