@@ -329,6 +329,8 @@ User: First echo "hello", then add 2+3.
 
 ## GPT Review Findings 处理记录
 
+### Round 2 (Plan review)
+
 | # | Finding | 处理 |
 |---|---------|------|
 | 1 | Error injection 不能 silent best-effort | ✅ 添加 structured outcomes 表 |
@@ -337,8 +339,20 @@ User: First echo "hello", then add 2+3.
 | 4 | Breaker 计数位置太早 | ✅ 移到 reserveExecution 成功后 |
 | 5 | Map 不会自然淘汰 | ✅ 添加 TTL 10min sweep |
 | 6 | AutoSubmit E2E 必须 production path | ✅ 明确不直接调 adapter |
-| 7 | Scanner reset 需纯逻辑测试 | ✅ 添加 scanner reset 单元测试 |
+| 7 | Scanner reset 需纯逻辑测试 | ⏳ pending（后续 commit） |
 | 8 | 实施顺序：breaker first | ✅ 调整为 breaker → error injection → autoSubmit |
+
+### Round 3 (Code review, commit 188e74c)
+
+| # | Finding | Severity | 处理 |
+|---|---------|----------|------|
+| 1 | `'error_inject'` not in phase union type | P0 | ✅ 已修复 |
+| 2 | E2E missing from current diff | P0 (scope) | ⏳ 后续 commit |
+| 3 | `getInputContent()` could throw in `injectResultIfSafe` | P1 | ✅ try/catch → INJECT_SKIPPED_NO_INSPECT |
+| 4 | Plan naming inconsistency (ERROR_RESULT_INJECTED vs error_inject) | P1 | 🔄 见下方说明 |
+| 5 | Extra test coverage for edge cases | P2 | ✅ test 69, 70 added |
+
+**Naming note**: Plan 使用 outcome name `ERROR_RESULT_INJECTED`；实现使用 `phase='error_inject'` + `InjectOutcome` enum。两者表达同一语义，phase 是 event lifecycle 层面的标识，outcome 是 injection 结果层面的标识。保持当前设计不变。
 
 ---
 
