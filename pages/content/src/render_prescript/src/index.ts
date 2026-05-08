@@ -32,7 +32,7 @@ if (!isNotion) {
 }
 
 // Phase 3: Initialize stream tool bridge.
-// cutoffEnabled=true by default (Gate 1); execution disabled until Gate 3.
+// cutoffEnabled=false by default (background reader handles SPA abandonment).
 // On Notion: subscribes via MAIN world bridge. On others: subscribes via isolated interceptor.
 initStreamToolBridge();
 // Import the website-specific components

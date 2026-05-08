@@ -37,7 +37,7 @@ function isNotionHost(): boolean {
 // --- Default config ---
 const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
   enabled: false,           // MCP tool execution — disabled until Gate 3
-  cutoffEnabled: true,      // Phase 3 Gate 1: send cutoffEnabled=true to MAIN world
+  cutoffEnabled: false,     // Disabled: cutoff path doesn't handle consumer abandonment (SPA nav)
   autoInsert: true,
   autoSubmit: false,        // safety: human confirms before sending function_result
   toolTimeoutMs: 30_000,

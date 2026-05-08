@@ -24,6 +24,12 @@
  * @see outputs/main-world-injection-gpt-review-response-v2.md
  */
 
+import {
+    type FunctionCallIdentity,
+    MAX_RAW_LINE_LENGTH,
+    createFunctionCallScanner,
+} from './functionCallScanner';
+
 // ============================================================================
 // Install Guard — prevent multiple injection (SPA navigation / re-inject)
 // ============================================================================
@@ -56,14 +62,8 @@ if ((window as any)[INSTALL_KEY]) {
     const TARGET_PATHNAME = '/api/v3/runInferenceTranscript';
 
     // ============================================================================
-    // Types (inline — no external imports in MAIN world)
+    // Types (StreamEvent types — inline; FunctionCallIdentity imported from scanner)
     // ============================================================================
-
-    interface FunctionCallIdentity {
-        name: string | null;
-        callId: string | null;
-        arguments: string | null;
-    }
 
     type StreamEventType =
         | 'stream_start'
@@ -183,75 +183,9 @@ if ((window as any)[INSTALL_KEY]) {
     });
 
     // ============================================================================
-    // NDJSON Parser (inline — no external dependencies)
+    // Parser / Scanner — imported from ./functionCallScanner.ts
+    // (pure logic module, bundled by Vite into the IIFE)
     // ============================================================================
-
-    const FUNCTION_CALL_KEYWORDS = ['function_call', 'tool_use', 'tool_calls', 'name'];
-    const MIN_KEYWORD_MATCHES = 2;
-    const MAX_RAW_LINE_LENGTH = 65536; // 64KB cap per line
-
-    function detectFunctionCall(line: string): boolean {
-        if (!line || line.length < 10) return false;
-        let matches = 0;
-        for (const keyword of FUNCTION_CALL_KEYWORDS) {
-            if (line.includes(keyword)) {
-                matches++;
-                if (matches >= MIN_KEYWORD_MATCHES) return true;
-            }
-        }
-        return false;
-    }
-
-    function extractFunctionCallIdentity(line: string): FunctionCallIdentity | null {
-        try {
-            const obj = JSON.parse(line);
-            if (!obj || typeof obj !== 'object') return null;
-
-            // Format: { type: "function_call", name: "...", id: "...", arguments: "..." }
-            if (obj.type === 'function_call') {
-                return {
-                    name: typeof obj.name === 'string' ? obj.name : null,
-                    callId: typeof obj.id === 'string' ? obj.id : null,
-                    arguments: typeof obj.arguments === 'string' ? obj.arguments : null,
-                };
-            }
-
-            // Format: { function_call: { name: "...", arguments: "..." } }
-            if (obj.function_call && typeof obj.function_call === 'object') {
-                const fc = obj.function_call;
-                return {
-                    name: typeof fc.name === 'string' ? fc.name : null,
-                    callId: typeof obj.id === 'string' ? obj.id : null,
-                    arguments: typeof fc.arguments === 'string' ? fc.arguments : null,
-                };
-            }
-
-            // Format: { tool_calls: [{ id: "...", function: { name: "...", arguments: "..." } }] }
-            if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
-                const tc = obj.tool_calls[0];
-                const fn = tc.function;
-                return {
-                    name: fn && typeof fn.name === 'string' ? fn.name : null,
-                    callId: typeof tc.id === 'string' ? tc.id : null,
-                    arguments: fn && typeof fn.arguments === 'string' ? fn.arguments : null,
-                };
-            }
-
-            // Format: { tool_use: { name: "...", input: {...} } }
-            if (obj.tool_use && typeof obj.tool_use === 'object') {
-                const tu = obj.tool_use;
-                return {
-                    name: typeof tu.name === 'string' ? tu.name : null,
-                    callId: typeof tu.id === 'string' ? tu.id : null,
-                    arguments: tu.input ? JSON.stringify(tu.input) : null,
-                };
-            }
-
-            return null;
-        } catch {
-            return null;
-        }
-    }
 
     // ============================================================================
     // Background Drain (Phase 2)
@@ -297,10 +231,131 @@ if ((window as any)[INSTALL_KEY]) {
     }
 
     // ============================================================================
-    // Observer Stream (wraps original response body)
+    // Background Observer (reads stream independently — always completes)
+    // Returns a consumer ReadableStream that receives the same chunks via push.
+    // If consumer stops reading or cancels, we continue reading for event emission.
     // ============================================================================
 
-    function createObserverStream(
+    function createObservedStreamWithBackground(
+        originalBody: ReadableStream<Uint8Array>,
+        streamId: string,
+        url: string,
+    ): ReadableStream<Uint8Array> {
+        const decoder = new TextDecoder();
+        const originalReader = originalBody.getReader();
+        let chunkIndex = 0;
+        let functionCallDetected = false;
+        const startTime = performance.now();
+        let buffer = '';
+        let consumerActive = true;
+        let streamController: ReadableStreamDefaultController<Uint8Array>;
+        const scanner = createFunctionCallScanner();
+
+        // Consumer-facing stream (push-based: we enqueue from our background loop)
+        const consumerStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+                streamController = controller;
+            },
+            cancel() {
+                // Consumer abandoned — we keep reading in background for events
+                consumerActive = false;
+            },
+        });
+
+        // Background loop: reads original body to completion, emits events,
+        // and pushes chunks to consumer (if still active)
+        (async () => {
+            try {
+                while (true) {
+                    const { done, value } = await originalReader.read();
+
+                    if (done) {
+                        const remaining = decoder.decode();
+                        if (remaining) buffer += remaining;
+
+                        const lastLine = buffer.trim();
+                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
+                            const result = scanner.processLine(lastLine);
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+                            }
+                        }
+                        emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
+                        if (consumerActive) {
+                            try { streamController.close(); } catch { /* already closed */ }
+                        }
+                        return;
+                    }
+
+                    chunkIndex++;
+
+                    // Push to consumer (best-effort — if they cancelled, we still continue)
+                    if (consumerActive) {
+                        try { streamController.enqueue(value); } catch { consumerActive = false; }
+                    }
+
+                    // Scan for function_call (scanner handles cross-patch accumulation)
+                    if (!functionCallDetected && value) {
+                        const text = decoder.decode(value, { stream: true });
+                        buffer += text;
+
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() ?? '';
+
+                        if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
+                            buffer = '';
+                        }
+
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (trimmed.length === 0) continue;
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
+
+                            const result = scanner.processLine(trimmed);
+                            if (result.accumulating) continue; // Need more patches
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+
+                                functionCallDetected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch {
+                emit({ type: 'stream_error', streamId, url });
+                if (consumerActive) {
+                    try { streamController.close(); } catch { /* ignore */ }
+                }
+            }
+        })();
+
+        return consumerStream;
+    }
+
+    // ============================================================================
+    // Observer Stream with Cutoff (wraps response body — consumer drives reading)
+    // Used when cutoffEnabled=true to allow closing the consumer stream on function_call.
+    // ============================================================================
+
+    function createObserverStreamWithCutoff(
         originalBody: ReadableStream<Uint8Array>,
         streamId: string,
         url: string,
@@ -311,6 +366,7 @@ if ((window as any)[INSTALL_KEY]) {
         const startTime = performance.now();
         let buffer = '';
         let reader: ReadableStreamDefaultReader<Uint8Array>;
+        const scanner = createFunctionCallScanner();
 
         return new ReadableStream<Uint8Array>({
             start() {
@@ -322,23 +378,23 @@ if ((window as any)[INSTALL_KEY]) {
                     const { done, value } = await reader.read();
 
                     if (done) {
-                        // Flush decoder
                         const remaining = decoder.decode();
                         if (remaining) buffer += remaining;
 
-                        // Process remaining buffer
                         const lastLine = buffer.trim();
-                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected && detectFunctionCall(lastLine)) {
-                            const elapsed = performance.now() - startTime;
-                            const identity = extractFunctionCallIdentity(lastLine);
-                            emit({
-                                type: 'function_call',
-                                rawLine: lastLine.slice(0, MAX_RAW_LINE_LENGTH),
-                                identity,
-                                chunkIndex,
-                                elapsedMs: elapsed,
-                                streamId,
-                            });
+                        if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
+                            const result = scanner.processLine(lastLine);
+                            if (result.detected) {
+                                const elapsed = performance.now() - startTime;
+                                emit({
+                                    type: 'function_call',
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
+                                    chunkIndex,
+                                    elapsedMs: elapsed,
+                                    streamId,
+                                });
+                            }
                         }
                         emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
                         controller.close();
@@ -347,7 +403,6 @@ if ((window as any)[INSTALL_KEY]) {
 
                     chunkIndex++;
 
-                    // Decode and scan for function_call
                     let shouldCutoff = false;
                     let cutoffIdentity: FunctionCallIdentity | null = null;
 
@@ -355,12 +410,9 @@ if ((window as any)[INSTALL_KEY]) {
                         const text = decoder.decode(value, { stream: true });
                         buffer += text;
 
-                        // Process complete NDJSON lines (handle chunk boundaries correctly)
                         const lines = buffer.split('\n');
-                        buffer = lines.pop() ?? ''; // Keep incomplete line in buffer
+                        buffer = lines.pop() ?? '';
 
-                        // Buffer cap: only cap the INCOMPLETE tail after processing complete lines
-                        // This ensures we never miss function_call in complete lines
                         if (buffer.length > MAX_RAW_LINE_LENGTH * 2) {
                             // eslint-disable-next-line no-console
                             console.warn('[MCP-SA/MAIN] Dropping oversized partial NDJSON line (%d chars)', buffer.length);
@@ -370,39 +422,34 @@ if ((window as any)[INSTALL_KEY]) {
                         for (const line of lines) {
                             const trimmed = line.trim();
                             if (trimmed.length === 0) continue;
-                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue; // Skip oversized lines
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
-                            if (detectFunctionCall(trimmed)) {
+                            const result = scanner.processLine(trimmed);
+                            if (result.accumulating) continue; // Need more patches
+
+                            if (result.detected) {
                                 const elapsed = performance.now() - startTime;
-                                const identity = extractFunctionCallIdentity(trimmed);
 
                                 emit({
                                     type: 'function_call',
-                                    rawLine: trimmed.slice(0, MAX_RAW_LINE_LENGTH),
-                                    identity,
+                                    rawLine: result.rawLine.slice(0, MAX_RAW_LINE_LENGTH),
+                                    identity: result.identity,
                                     chunkIndex,
                                     elapsedMs: elapsed,
                                     streamId,
                                 });
 
-                                // Check if cutoff should trigger
-                                if (config.cutoffEnabled) {
-                                    const hasStructuredIdentity = identity !== null && identity.name !== null;
-                                    if (!config.requireStructuredIdentity || hasStructuredIdentity) {
-                                        functionCallDetected = true;
-                                        shouldCutoff = true;
-                                        cutoffIdentity = identity;
-                                    }
-                                    // else: identity gate not met, continue scanning
-                                } else {
+                                const hasStructuredIdentity = result.identity !== null && result.identity.name !== null;
+                                if (!config.requireStructuredIdentity || hasStructuredIdentity) {
                                     functionCallDetected = true;
+                                    shouldCutoff = true;
+                                    cutoffIdentity = result.identity;
                                 }
                                 break;
                             }
                         }
                     }
 
-                    // Phase 2: execute cutoff
                     if (shouldCutoff) {
                         const elapsed = performance.now() - startTime;
 
@@ -424,7 +471,7 @@ if ((window as any)[INSTALL_KEY]) {
                             return;
                         }
 
-                        // Drain-drop mode: forward trigger chunk, close frontend, drain background
+                        // Drain-drop mode
                         controller.enqueue(value);
                         emit({
                             type: 'stream_cutoff',
@@ -438,12 +485,10 @@ if ((window as any)[INSTALL_KEY]) {
                         });
                         controller.close();
                         emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex });
-                        // Background drain — fire-and-forget
                         drainBackground(reader, config.maxDrainMs, streamId).catch(() => { });
                         return;
                     }
 
-                    // Normal passthrough
                     controller.enqueue(value);
                 } catch (err) {
                     emit({ type: 'stream_error', streamId, url });
@@ -452,6 +497,8 @@ if ((window as any)[INSTALL_KEY]) {
             },
 
             cancel(reason) {
+                // Consumer abandoned the stream — emit stream_end so lifecycle is complete
+                emit({ type: 'stream_end', streamId, url, totalChunks: chunkIndex, cancelled: true });
                 return reader.cancel(reason);
             },
         });
@@ -507,12 +554,25 @@ if ((window as any)[INSTALL_KEY]) {
             // Emit stream_start only after confirming we will wrap
             emit({ type: 'stream_start', streamId, url: targetUrl.href });
 
-            // Wrap the body with our observer
-            const observedBody = createObserverStream(response.body, streamId, targetUrl.href);
+            if (config.cutoffEnabled) {
+                // Cutoff path: wrap body with observer stream that can close consumer on function_call
+                const observedBody = createObserverStreamWithCutoff(response.body, streamId, targetUrl.href);
+                const headers = new Headers(response.headers);
+                return new Response(observedBody, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers,
+                });
+            }
+
+            // Non-cutoff path: background reader that always completes.
+            // Consumer gets a push-based stream. If consumer abandons (e.g., SPA navigation),
+            // we continue reading for event emission (stream_end always fires).
+            const consumerBody = createObservedStreamWithBackground(response.body, streamId, targetUrl.href);
 
             // Reconstruct Response preserving metadata
             const headers = new Headers(response.headers);
-            return new Response(observedBody, {
+            return new Response(consumerBody, {
                 status: response.status,
                 statusText: response.statusText,
                 headers,
