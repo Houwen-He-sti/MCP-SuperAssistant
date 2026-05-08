@@ -1046,4 +1046,112 @@ describe('streamToolBridge', () => {
     });
   });
 
+  test('33. arguments=\'"hello"\' (JSON string) → ARGS_NOT_OBJECT rejection', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-str' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-str', arguments: '"hello"' } }));
+
+    assert.strictEqual(mockClient._calls.length, 0);
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+  });
+
+  test('34. arguments=\'null\' (JSON null literal) → ARGS_NOT_OBJECT rejection', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-null-str' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-null-str', arguments: 'null' } }));
+
+    assert.strictEqual(mockClient._calls.length, 0);
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
+  });
+
+  test('35. arguments at exactly MAX_ARGS_SIZE boundary → accepted', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-boundary' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Create args exactly at MAX_ARGS_SIZE (65536) code units
+    // {"x":"AAA..."} — key "x" takes 5 chars for {"x":"}, closing "} takes 2, value fills the rest
+    const overhead = '{"x":"'  .length + '"}'.length; // 6 + 2 = 8
+    const valueLen = 65_536 - overhead;
+    const boundaryArgs = '{"x":"' + 'A'.repeat(valueLen) + '"}';
+    assert.strictEqual(boundaryArgs.length, 65_536);
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-boundary', arguments: boundaryArgs } }));
+
+    assert.strictEqual(mockClient._calls.length, 1, 'should proceed — not over limit');
+    assert.strictEqual(mockClient._calls[0].params.x.length, valueLen);
+    const failEvent = events.find(e => e.status === 'failed' && e.errorCode === 'ARGS_TOO_LARGE');
+    assert.strictEqual(failEvent, undefined, 'should NOT get ARGS_TOO_LARGE at boundary');
+  });
+
+  test('36. arguments at MAX_ARGS_SIZE + 1 → ARGS_TOO_LARGE rejection', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-over' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Create args at MAX_ARGS_SIZE + 1
+    const overhead = '{"x":"'.length + '"}'.length; // 8
+    const valueLen = 65_536 - overhead + 1;
+    const overArgs = '{"x":"' + 'A'.repeat(valueLen) + '"}';
+    assert.strictEqual(overArgs.length, 65_537);
+
+    await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-over', arguments: overArgs } }));
+
+    assert.strictEqual(mockClient._calls.length, 0);
+    assert.strictEqual(mockGuard._calls.reserve.length, 0);
+    const failEvent = events.find(e => e.status === 'failed');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.errorCode, 'ARGS_TOO_LARGE');
+  });
+
 });
