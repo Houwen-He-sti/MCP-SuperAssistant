@@ -163,16 +163,21 @@ function sweepExpired() {
 
 **Structured Outcomes**（GPT Review Finding #1）：error path 必须有和 success path 一样的结构化语义：
 
-| Error Code | 含义 |
-|------------|------|
-| `TOOL_ERROR` | callTool 抛错（现有） |
-| `TIMEOUT` | 执行超时（现有） |
-| `ERROR_RESULT_INJECTED` | error result 成功注入 DOM |
-| `ERROR_RESULT_SUBMITTED` | error result 注入 + 提交成功 |
-| `ERROR_INSERT_SKIPPED_NO_INSPECT` | fail-closed: 无法检查 input |
-| `ERROR_INSERT_SKIPPED_DRAFT` | 用户有 draft，跳过注入 |
-| `ERROR_INSERT_FAILED` | insertText 返回 false 或 throws |
-| `ERROR_SUBMIT_FAILED` | submitForm 返回 false 或 throws |
+> **实现 note**: 实际实现使用 `InjectOutcome` type（7 variants），通过 `injectResultIfSafe()` 返回。
+> Event 使用 `phase='error_inject'` 标识 error injection lifecycle 阶段。
+> Plan 中的 `ERROR_*` 前缀是概念描述，实际 `InjectOutcome` values 为:
+> `RESULT_INJECTED`, `RESULT_SUBMITTED`, `INJECT_SKIPPED_NO_ADAPTER`,
+> `INJECT_SKIPPED_NO_INSPECT`, `INJECT_SKIPPED_DRAFT`, `INSERT_FAILED`, `SUBMIT_FAILED`
+
+| InjectOutcome | 含义 |
+|---------------|------|
+| `RESULT_INJECTED` | result 成功注入 DOM |
+| `RESULT_SUBMITTED` | result 注入 + 提交成功 |
+| `INJECT_SKIPPED_NO_ADAPTER` | adapter 不可用 |
+| `INJECT_SKIPPED_NO_INSPECT` | 无法检查 input (getInputContent 不可用或抛错) |
+| `INJECT_SKIPPED_DRAFT` | 用户有 draft，跳过注入 |
+| `INSERT_FAILED` | insertText 返回 false 或 throws |
+| `SUBMIT_FAILED` | submitForm 返回 false 或 throws |
 
 **实现**：调用 `injectResultIfSafe()` helper：
 
@@ -303,14 +308,27 @@ User: First echo "hello", then add 2+3.
 > 调整原因（GPT Review）：开启 autoSubmit/error loop 之前，先要有 breaker 保护。
 
 ```
-1. Shared infra: injectResultIfSafe() helper — 抽取 success/error 共用的 safe-injection 逻辑
-2. P0-1 (circuit breaker) — per-stream 计数器 + TTL cleanup + unit tests
-3. P0-2 (error auto-injection) — 使用 injectResultIfSafe() + structured outcomes + unit tests
-4. Refactor: success path 也改用 injectResultIfSafe() — 保持 success/error 语义一致
-5. P0-3 (autoSubmit E2E) — CDP 脚本验证 production bridge 全自动闭环
-6. P0-4 (scanner reset) — 纯逻辑单元测试 + E2E observation
-7. P1 (multi-turn) — stretch goal，如果 P0-3 自然触发
+1. ✅ Shared infra: injectResultIfSafe() helper — 抽取 success/error 共用的 safe-injection 逻辑
+2. ✅ P0-1 (circuit breaker) — per-stream 计数器 + TTL cleanup + unit tests
+3. ✅ P0-2 (error auto-injection) — 使用 injectResultIfSafe() + structured outcomes + unit tests
+4. ✅ Refactor: success path 也改用 injectResultIfSafe() — 保持 success/error 语义一致
+5. ✅ P0-3 (autoSubmit mocked integration) — gate5-e2e.test.ts 走 real bridge init path, 7/7 pass
+6. ✅ P0-4 (scanner reset) — 纯逻辑单元测试 (multi-turn same-format detection), 32/32 pass
+7. ⏳ P1 (multi-turn) — deferred to Gate 5b (follow-up issue)
 ```
+
+### Out of Scope (follow-up)
+
+> **Gate 5b: Live Notion/CDP Auto-Submit Consumption E2E**
+>
+> 验收标准：
+> - 真实浏览器 + 真实 Notion 页面
+> - 真实 stream_cutoff event (不是 mock)
+> - 真实 DOM insert + submit
+> - AI 无人工提交地消费 function_result
+> - AI 回复中引用 sentinel
+>
+> 跟踪 issue: https://github.com/Houwen-He-sti/MCP-SuperAssistant/issues/20
 
 ---
 
