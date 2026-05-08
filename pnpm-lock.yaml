@@ -138,6 +138,9 @@ importers:
       vite:
         specifier: 6.1.0
         version: 6.1.0(@types/node@22.13.14)(jiti@1.21.7)(terser@5.39.0)(tsx@4.21.0)(yaml@2.8.4)
+      ws:
+        specifier: 8.18.0
+        version: 8.18.0
 
   chrome-extension:
     dependencies:

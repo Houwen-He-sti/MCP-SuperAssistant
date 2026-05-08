@@ -535,8 +535,9 @@ async function testFullBridgeInsert(cdp) {
             })()
         `);
         if (binaryStale?.value) {
-            log('warn', 'Allowlist enforcement not active (stale binary lacks P0-1) — XFAIL');
-            assert(true, 'Allowlist blocked read_file (XFAIL: stale binary, unit tests pass)');
+            log('warn', 'Allowlist enforcement not active (stale binary lacks P0-1) — SKIPPED');
+            results.push({ test: 'Allowlist blocked read_file', pass: true, skipped: true, detail: 'stale binary — unit tests cover this' });
+            log('warn', 'Stale binary detected: refresh extension in chrome://extensions to test allowlist E2E');
         } else {
             assert(false, 'Allowlist blocked read_file (callTool unchanged)');
         }
@@ -971,9 +972,17 @@ async function main() {
 
     // Summary
     console.log('\n━━━ SUMMARY ━━━');
-    const passed = results.filter(r => r.pass).length;
+    const skipped = results.filter(r => r.skipped).length;
+    const passed = results.filter(r => r.pass && !r.skipped).length;
     const failed = results.filter(r => !r.pass).length;
-    console.log(`  Total: ${results.length} | Pass: ${passed} | Fail: ${failed}`);
+    console.log(`  Total: ${results.length} | Pass: ${passed} | Fail: ${failed} | Skipped: ${skipped}`);
+
+    if (skipped > 0) {
+        console.log('\n  Skipped (stale binary):');
+        results.filter(r => r.skipped).forEach(r => {
+            console.log(`    ⚠ ${r.test} — ${r.detail || ''}`);
+        });
+    }
 
     if (failed > 0) {
         console.log('\n  Failed tests:');

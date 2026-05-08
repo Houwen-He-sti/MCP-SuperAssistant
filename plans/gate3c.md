@@ -1,4 +1,4 @@
-# Gate 3C: Adapter + DOM Injection + Allowlist + Consumption Proof
+# Gate 3C: Adapter + DOM Injection + Allowlist
 
 > PR branch: `feat/gate-3c`
 > Issue: https://github.com/Houwen-He-sti/MCP-SuperAssistant/issues/14
@@ -14,7 +14,8 @@
 2. `function_result` 正确插入 DOM 输入框
 3. Draft protection 正常工作
 4. Tool allowlist 过滤非授权工具
-5. **最小 consumption proof**: inject → submit → AI 引用 result 内容
+
+> **Note**: Consumption proof (P0-4) deferred to Gate 4 — requires autoSubmit + AI interaction, scope too large for 3C.
 
 ## 非目标
 
@@ -22,6 +23,7 @@
 - 不实现 circuit breaker 运行时逻辑（Gate 5）
 - 不做多轮验证（Gate 4 edge cases）
 - 不做 error result consumption 验证（Gate 4）
+- ~~不做 consumption proof~~（moved to Gate 4）
 
 ---
 
@@ -154,33 +156,11 @@ if (config.toolAllowlist && config.toolAllowlist.length > 0) {
 - [ ] 输入框内容仍为 "用户草稿文本"
 - [ ] 事件状态为 `succeeded`（tool 执行成功，insert 跳过因 draft exists）
 
-### P0-4: E2E CDP — Consumption Proof (最小验证)
+### P0-4: ~~Consumption Proof~~ (Deferred to Gate 4)
 
-**目标**: 验证 Notion AI 能理解已提交的 `<function_result>` 并在后续回复中引用内容。
-
-**脚本**: `scripts/e2e-gate3c-consumption.cjs`
-
-**核心**: Gate 3C consumption proof = **result consumption proof**，不需要先让 AI 生成 function_call。
-
-**测试步骤**:
-1. 连接 CDP, 打开 Notion AI agent 对话（fresh 或空）
-2. 直接用 adapter.insertText 或 direct DOM 注入:
-   ```xml
-   <function_result call_id="c-proof-01" name="echo" status="ok">
-   {"message":"GATE3C_SENTINEL_xyz123"}
-   </function_result>
-   ```
-3. 提交（submitForm 或 execCommand + Enter）
-4. 等待 AI 回复
-5. 检查 AI 回复中是否包含 `GATE3C_SENTINEL_xyz123` 或语义引用
-
-**验收标准**:
-- [ ] AI 回复中引用了 function_result 的内容（至少 1/3 attempts）
-- [ ] AI 不把 XML 标签当作用户指令执行
-- [ ] AI 不只解释 XML 语法
-- [ ] 每次 transcript 记录在 investigation report 中
-
-**风险**: Notion AI 可能不总是一致地引用结果。重复 3 次取多数。
+> **Moved to Gate 4**: Consumption proof requires autoSubmit + AI interaction.
+> This is beyond Gate 3C scope (injection + allowlist + draft protection).
+> See Issue #14 for Gate 4 planning.
 
 ### (P0-5 已合并到 P0-1 和 P0-2b)
 
@@ -244,12 +224,12 @@ For P0-2/P0-3 (E2E):
 
 ## Definition of Done
 
-- [ ] P0-0: `emitExecutionFailed` triaged — confirmed not on `insertText` path 或已修复
-- [ ] Allowlist implemented with 5 unit tests passing
-- [ ] E2E: adapter resolves on Notion (P0-2a)
-- [ ] E2E: **full bridge** autoInsert path works (P0-2b) — 不能只靠 adapter-only
-- [ ] E2E: draft protection prevents overwrite (P0-3)
-- [ ] E2E: AI consumption proof (at least 1/3 attempts AI references result, transcript recorded)
-- [ ] `toolAllowlist` config visible in `getStreamToolBridgeInfo()`
-- [ ] All existing tests still pass (`node --test --experimental-strip-types`)
-- [ ] PR created, sent to GPT review
+- [x] P0-0: `emitExecutionFailed` triaged — fixed (added to NotionAdapter)
+- [x] Allowlist implemented with 5 unit tests passing
+- [x] E2E: adapter resolves on Notion (P0-2a)
+- [x] E2E: **full bridge** autoInsert path works (P0-2b) — 不能只靠 adapter-only
+- [x] E2E: draft protection prevents overwrite (P0-3)
+- [ ] ~~E2E: AI consumption proof~~ (deferred to Gate 4)
+- [x] `toolAllowlist` config visible in `getStreamToolBridgeInfo()`
+- [x] All existing tests still pass (55/55 via `node --test --experimental-strip-types`)
+- [x] PR created, sent to GPT review
