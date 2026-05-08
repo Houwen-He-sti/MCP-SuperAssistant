@@ -59,28 +59,38 @@ function createMockMcpClient(options: MockMcpClientOptions = {}): McpClientLike 
 interface MockAdapterOptions {
   hasContent?: boolean;
   hasGetInputContent?: boolean;
+  getInputContentReturnsNull?: boolean;
   insertThrows?: string | null;
   submitThrows?: string | null;
+  insertReturnsFalse?: boolean;
+  submitReturnsFalse?: boolean;
 }
 
 function createMockAdapter(options: MockAdapterOptions = {}): AdapterLike & { _calls: { insertText: string[]; submitForm: boolean[] } } {
-  const { hasContent = false, hasGetInputContent = true, insertThrows = null, submitThrows = null } = options;
+  const { hasContent = false, hasGetInputContent = true, getInputContentReturnsNull = false, insertThrows = null, submitThrows = null, insertReturnsFalse = false, submitReturnsFalse = false } = options;
   const calls = { insertText: [] as string[], submitForm: [] as boolean[] };
 
   const adapter: AdapterLike & { _calls: typeof calls } = {
-    insertText: async (text: string) => {
+    insertText: async (text: string): Promise<boolean> => {
       if (insertThrows) throw new Error(insertThrows);
+      if (insertReturnsFalse) return false;
       calls.insertText.push(text);
+      return true;
     },
-    submitForm: async () => {
+    submitForm: async (): Promise<boolean> => {
       if (submitThrows) throw new Error(submitThrows);
+      if (submitReturnsFalse) return false;
       calls.submitForm.push(true);
+      return true;
     },
     _calls: calls,
   };
 
   if (hasGetInputContent) {
-    adapter.getInputContent = () => hasContent ? 'existing user draft' : '';
+    adapter.getInputContent = () => {
+      if (getInputContentReturnsNull) return null;
+      return hasContent ? 'existing user draft' : '';
+    };
   }
   // If hasGetInputContent is false, getInputContent is undefined (fail-closed scenario)
 
@@ -706,6 +716,80 @@ describe('streamToolBridge', () => {
     assert.ok(failEvent, 'should emit failed event with phase=submit');
     assert.strictEqual(failEvent.errorCode, 'SUBMIT_FAILED');
     assert.ok(failEvent.error!.includes('Network timeout'));
+  });
+
+  // --- NEW: insertText returns false ---
+  test('20a. insertText returns false — emit failed with INSERT_FAILED', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'result' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-irf' });
+    const mockAdapter = createMockAdapter({ insertReturnsFalse: true });
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    const failEvent = events.find(e => e.status === 'failed' && e.phase === 'inject');
+    assert.ok(failEvent, 'should emit failed event with phase=inject');
+    assert.strictEqual(failEvent.errorCode, 'INSERT_FAILED');
+    assert.ok(failEvent.error!.includes('returned false'));
+  });
+
+  // --- NEW: submitForm returns false ---
+  test('20b. submitForm returns false — emit failed with SUBMIT_FAILED', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'result' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-srf' });
+    const mockAdapter = createMockAdapter({ submitReturnsFalse: true });
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: true, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    const failEvent = events.find(e => e.status === 'failed' && e.phase === 'submit');
+    assert.ok(failEvent, 'should emit failed event with phase=submit');
+    assert.strictEqual(failEvent.errorCode, 'SUBMIT_FAILED');
+    assert.ok(failEvent.error!.includes('returned false'));
+  });
+
+  // --- NEW: getInputContent returns null — fail-closed ---
+  test('20c. getInputContent returns null — INSERT_SKIPPED_NO_INSPECT', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'result' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-gin' });
+    const mockAdapter = createMockAdapter({ getInputContentReturnsNull: true });
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    const succEvent = events.find(e => e.status === 'succeeded' && e.errorCode === 'INSERT_SKIPPED_NO_INSPECT');
+    assert.ok(succEvent, 'should emit succeeded event with INSERT_SKIPPED_NO_INSPECT');
+    assert.strictEqual(mockAdapter._calls.insertText.length, 0, 'insertText should NOT be called');
   });
 
   // --- NEW: P1 adapter() returns null ---
