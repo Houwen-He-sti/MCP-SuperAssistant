@@ -339,7 +339,7 @@ User: First echo "hello", then add 2+3.
 | 4 | Breaker 计数位置太早 | ✅ 移到 reserveExecution 成功后 |
 | 5 | Map 不会自然淘汰 | ✅ 添加 TTL 10min sweep |
 | 6 | AutoSubmit E2E 必须 production path | ✅ 明确不直接调 adapter |
-| 7 | Scanner reset 需纯逻辑测试 | ⏳ pending（后续 commit） |
+| 7 | Scanner reset 需纯逻辑测试 | ✅ 已有 + 新增 multi-turn test |
 | 8 | 实施顺序：breaker first | ✅ 调整为 breaker → error injection → autoSubmit |
 
 ### Round 3 (Code review, commit 188e74c)

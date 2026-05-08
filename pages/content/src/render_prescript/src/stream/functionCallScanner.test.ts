@@ -259,6 +259,26 @@ describe('createFunctionCallScanner — Notion patch format (cross-patch)', () =
         assert.equal(r.detected, false);
         assert.equal(r.accumulating, false);
     });
+
+    test('multi-turn: detects second standard function_call after first (same format)', () => {
+        const scanner = createFunctionCallScanner();
+        const callA = '{"type":"function_call","name":"echo","id":"call_A","arguments":"{\\"msg\\":\\"hello\\"}"}';
+        const callB = '{"type":"function_call","name":"add","id":"call_B","arguments":"{\\"x\\":1,\\"y\\":2}"}';
+
+        const rA = scanner.processLine(callA);
+        assert.equal(rA.detected, true, 'should detect first function_call');
+        assert.equal(rA.identity!.name, 'echo');
+        assert.equal(rA.identity!.callId, 'call_A');
+
+        // Simulate intermediate non-function_call lines (AI text response)
+        const rText = scanner.processLine('{"type":"text","content":"Here is the result..."}');
+        assert.equal(rText.detected, false);
+
+        const rB = scanner.processLine(callB);
+        assert.equal(rB.detected, true, 'should detect second function_call after reset');
+        assert.equal(rB.identity!.name, 'add');
+        assert.equal(rB.identity!.callId, 'call_B');
+    });
 });
 
 describe('detectFunctionCall — Notion patch lines', () => {
