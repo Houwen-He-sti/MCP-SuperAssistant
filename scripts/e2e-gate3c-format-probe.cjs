@@ -1,17 +1,25 @@
 /**
  * Gate 3C-prep P0-1 — Format Probe: function_result compatibility test
  *
- * Injects different function_result formats into Notion AI input via the adapter,
- * submits, and observes AI response to determine which format Notion AI can consume.
+ * Injects different function_result formats into Notion AI input via direct DOM
+ * manipulation (execCommand), submits, and observes AI response to determine
+ * which format Notion AI can consume.
+ *
+ * Architecture note: The adapter (pluginRegistry/mcpAdapter) lives in Chrome's
+ * ISOLATED world, while CDP evaluates in MAIN world by default. This script uses
+ * direct DOM manipulation which works in either world. The CDPSession also supports
+ * findIsolatedContext() for future tests that need adapter access.
  *
  * Prerequisites:
  *   - Chrome running with: --remote-debugging-port=9222
  *   - MCP-SuperAssistant extension loaded from dist/ (pnpm build first)
- *   - A Notion page open with AI available (notion.so)
+ *   - A Notion page open with AI available (notion.so/agent/...)
  *   - `ws` package available: npm install ws
  *
  * Usage:
- *   node scripts/e2e-gate3c-format-probe.cjs
+ *   node scripts/e2e-gate3c-format-probe.cjs                    # Plan A, manual submit
+ *   node scripts/e2e-gate3c-format-probe.cjs "Plan A (bare XML)" --auto-submit
+ *   node scripts/e2e-gate3c-format-probe.cjs "Plan B (short wrapper)" --auto-submit
  *
  * Test sequence (each format injected separately):
  *   Plan A: Bare XML — <function_result call_id="..." name="..." status="ok">{payload}</function_result>
@@ -22,8 +30,8 @@
  *   PASS: AI response references the SENTINEL value from result payload
  *   FAIL: AI ignores payload, explains XML syntax, or treats content as instruction
  *
- * This is an exploratory/interactive test — requires human observation of AI responses.
- * The script injects content and waits for manual submission + response verification.
+ * RESULTS (2025-07-22):
+ *   Plan A: PASS ✅ — AI responded: "收到桥接器回贴的 echo 结果：message="GATE3C_SENTINEL_7f3a"，value=42。连通性测试通过"
  *
  * Exit codes:
  *   0 = injection successful (manual verification required)
@@ -51,6 +59,8 @@ class CDPSession {
         this.ws = null;
         this.msgId = 0;
         this.listeners = new Map();
+        this.contexts = [];
+        this.isolatedCtxId = null;
     }
 
     async connect() {
@@ -65,7 +75,36 @@ class CDPSession {
                 this.listeners.get(msg.id)(msg);
                 this.listeners.delete(msg.id);
             }
+            // Collect execution contexts
+            if (msg.method === 'Runtime.executionContextCreated') {
+                this.contexts.push(msg.params.context);
+            }
         });
+    }
+
+    /**
+     * Find the ISOLATED world execution context where MCP-SuperAssistant
+     * exposes pluginRegistry, mcpAdapter, and bridge functions.
+     * CDP evaluates in MAIN world by default — the adapter lives in ISOLATED world.
+     */
+    async findIsolatedContext() {
+        // Wait for contexts to arrive
+        await new Promise(r => setTimeout(r, 1000));
+
+        for (const ctx of this.contexts) {
+            if (ctx.name === 'MCP SuperAssistant') {
+                const check = await this.send('Runtime.evaluate', {
+                    contextId: ctx.id,
+                    expression: `typeof window.pluginRegistry !== 'undefined'`,
+                    returnByValue: true,
+                });
+                if (check.result?.result?.value === true) {
+                    this.isolatedCtxId = ctx.id;
+                    return ctx.id;
+                }
+            }
+        }
+        return null;
     }
 
     send(method, params = {}) {
@@ -83,12 +122,17 @@ class CDPSession {
     }
 
     async evaluate(expression, opts = {}) {
-        const result = await this.send('Runtime.evaluate', {
+        const params = {
             expression,
             returnByValue: true,
             awaitPromise: opts.awaitPromise || false,
             ...opts,
-        });
+        };
+        // Use ISOLATED world context if found (adapter lives there)
+        if (this.isolatedCtxId && !opts.contextId) {
+            params.contextId = this.isolatedCtxId;
+        }
+        const result = await this.send('Runtime.evaluate', params);
         if (result.result?.exceptionDetails) {
             const exc = result.result.exceptionDetails;
             return { __exception: true, text: exc.text, description: exc.exception?.description };
@@ -156,40 +200,38 @@ async function main() {
     await cdp.send('Runtime.enable');
     log('pass', 'CDP connected');
 
-    // Step 3: Check adapter availability
-    log('info', 'Checking adapter...');
+    // Note: Using MAIN world for direct DOM manipulation (no adapter dependency).
+    // The adapter lives in ISOLATED world but has a bug (emitExecutionFailed missing).
+    // Direct DOM manipulation via execCommand is more reliable for the probe.
+
+    // Step 3: Check adapter availability (DOM elements)
+    log('info', 'Checking Notion AI input elements...');
     const adapterCheck = await cdp.evaluate(`
         (function() {
-            if (window.mcpAdapter && typeof window.mcpAdapter.insertText === 'function') {
-                return { available: true, hasSubmit: typeof window.mcpAdapter.submitForm === 'function' };
-            }
-            if (window.pluginRegistry && window.pluginRegistry.getActivePlugin) {
-                const p = window.pluginRegistry.getActivePlugin();
-                if (p && p.adapter && typeof p.adapter.insertText === 'function') {
-                    return { available: true, hasSubmit: typeof p.adapter.submitForm === 'function' };
-                }
-            }
-            return { available: false };
+            const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+            const sendBtn = document.querySelector('[data-testid="agent-send-message-button"]');
+            return { 
+                available: !!input, 
+                hasSubmit: !!sendBtn,
+                placeholder: input ? (input.getAttribute('placeholder') || input.getAttribute('data-placeholder') || '') : ''
+            };
         })()
     `);
 
     if (!adapterCheck?.value?.available) {
-        log('fail', 'No adapter available. Extension may not be initialized or not on a supported page.');
-        log('info', 'Try: Open a Notion AI conversation, ensure extension is loaded.');
+        log('fail', 'No Notion AI input element found. Ensure Notion AI chat is visible.');
         cdp.close();
         process.exit(2);
     }
-    log('pass', `Adapter found (submitForm: ${adapterCheck.value.hasSubmit})`);
+    log('pass', `Input found (submitBtn: ${adapterCheck.value.hasSubmit}, placeholder: "${adapterCheck.value.placeholder}")`);
 
     // Step 4: Check current input state
     const inputState = await cdp.evaluate(`
         (function() {
-            const adapter = window.mcpAdapter || (window.pluginRegistry?.getActivePlugin?.()?.adapter);
-            if (adapter && typeof adapter.getInputContent === 'function') {
-                const content = adapter.getInputContent();
-                return { empty: !content, length: content ? content.length : 0 };
-            }
-            return { empty: null, length: null };
+            const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+            if (!input) return { empty: null, length: null };
+            const content = input.textContent || '';
+            return { empty: content.trim().length === 0, length: content.length };
         })()
     `);
     if (inputState?.value) {
@@ -213,15 +255,35 @@ async function main() {
     console.log(`  Sentinel: ${SENTINEL} = ${SENTINEL_VALUE}`);
     console.log(`  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
 
-    // Step 6: Inject format into input
+    // Step 6: Inject format into input (direct DOM manipulation)
     log('step', 'Injecting function_result into input...');
     const escaped = formatContent.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
     const injectResult = await cdp.evaluate(`
         (async function() {
-            const adapter = window.mcpAdapter || (window.pluginRegistry?.getActivePlugin?.()?.adapter);
-            if (!adapter) return { success: false, error: 'no adapter' };
+            const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+            if (!input) return { success: false, error: 'input not found' };
             try {
-                await adapter.insertText(\`${escaped}\`);
+                input.focus();
+                // Select all existing content
+                const selection = window.getSelection();
+                if (selection) {
+                    const range = document.createRange();
+                    range.selectNodeContents(input);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+                // Insert text via execCommand (preserves editor state)
+                const text = \`${escaped}\`;
+                let ok = document.execCommand('insertText', false, text);
+                if (!ok) {
+                    // Fallback: direct content + InputEvent
+                    input.textContent = text;
+                    input.dispatchEvent(new InputEvent('input', {
+                        bubbles: true, cancelable: true,
+                        inputType: 'insertText', data: text,
+                    }));
+                }
+                input.dispatchEvent(new Event('input', { bubbles: true }));
                 return { success: true };
             } catch (e) {
                 return { success: false, error: e.message };
@@ -239,16 +301,14 @@ async function main() {
     // Step 7: Verify content in input
     const verifyResult = await cdp.evaluate(`
         (function() {
-            const adapter = window.mcpAdapter || (window.pluginRegistry?.getActivePlugin?.()?.adapter);
-            if (adapter && typeof adapter.getInputContent === 'function') {
-                const content = adapter.getInputContent();
-                return { 
-                    hasSentinel: content.includes('${SENTINEL}'),
-                    length: content.length,
-                    preview: content.substring(0, 100)
-                };
-            }
-            return { hasSentinel: null, length: null, preview: null };
+            const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+            if (!input) return { hasSentinel: null, length: null, preview: null };
+            const content = input.textContent || '';
+            return { 
+                hasSentinel: content.includes('${SENTINEL}'),
+                length: content.length,
+                preview: content.substring(0, 100)
+            };
         })()
     `);
 
@@ -265,12 +325,10 @@ async function main() {
         log('step', 'Auto-submitting...');
         const submitResult = await cdp.evaluate(`
             (async function() {
-                const adapter = window.mcpAdapter || (window.pluginRegistry?.getActivePlugin?.()?.adapter);
-                if (adapter && typeof adapter.submitForm === 'function') {
-                    await adapter.submitForm();
-                    return { success: true };
-                }
-                return { success: false, error: 'no submitForm' };
+                const sendBtn = document.querySelector('[data-testid="agent-send-message-button"]');
+                if (!sendBtn) return { success: false, error: 'send button not found' };
+                sendBtn.click();
+                return { success: true };
             })()
         `, { awaitPromise: true });
 
