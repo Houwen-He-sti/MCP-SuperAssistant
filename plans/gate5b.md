@@ -113,21 +113,71 @@ const info = getStreamToolBridgeInfo();
 // assert: info.config.autoSubmit === true
 ```
 
-### Step 3: 安装 event 观测器
+### Step 3: 安装 dependency wrapper 观测器
+
+> GPT Review: 不要只靠 console intercept + DOM polling。在 ISOLATED world 包一层真实依赖。
+
+在 ISOLATED world 中 wrap 真实 adapter 和 mcpClient 方法，记录调用：
 
 ```javascript
-// 在 ISOLATED world 注入 event listener:
 window.__gate5b_events = [];
-// Hook into bridge handler onEvent
-// 方案：通过 configureStreamToolBridge 重新初始化后，
-// 读取 event log（bridge 已有 console.log/warn output）
+window.__gate5b_sentinel = 'sentinel_g5b_' + Date.now().toString(36);
+
+// Wrap mcpClient.callTool
+const origCallTool = window.mcpClient.callTool.bind(window.mcpClient);
+window.mcpClient.callTool = async (name, params) => {
+  window.__gate5b_events.push({ type: 'callTool', name, params, ts: Date.now() });
+  const result = await origCallTool(name, params);
+  window.__gate5b_events.push({ type: 'callTool_result', name, result, ts: Date.now() });
+  return result;
+};
+
+// Wrap adapter methods via pluginRegistry
+const adapter = pluginRegistry.getActivePlugin()?.adapter;
+if (adapter) {
+  const origInsert = adapter.insertText.bind(adapter);
+  adapter.insertText = async (text) => {
+    window.__gate5b_events.push({ type: 'insertText', textLen: text.length, preview: text.slice(0, 200), ts: Date.now() });
+    const result = await origInsert(text);
+    window.__gate5b_events.push({ type: 'insertText_result', result, ts: Date.now() });
+    return result;
+  };
+
+  const origSubmit = adapter.submitForm?.bind(adapter);
+  if (origSubmit) {
+    adapter.submitForm = async () => {
+      window.__gate5b_events.push({ type: 'submitForm', ts: Date.now() });
+      const result = await origSubmit();
+      window.__gate5b_events.push({ type: 'submitForm_result', result, ts: Date.now() });
+      return result;
+    };
+  }
+
+  const origGetInput = adapter.getInputContent?.bind(adapter);
+  if (origGetInput) {
+    adapter.getInputContent = () => {
+      const content = origGetInput();
+      window.__gate5b_events.push({ type: 'getInputContent', contentLen: content?.length ?? -1, ts: Date.now() });
+      return content;
+    };
+  }
+}
 ```
 
-**问题**：`onEvent` callback 在 `createStreamToolHandler` 内部，不容易从外部 hook。
+**不修改 runtime 代码**，只在 test 期间 wrap。
 
-**替代方案**：
-- **Console intercept**: 在 ISOLATED world 中 monkey-patch `console.debug` 和 `console.warn`，捕获 `[StreamToolBridge]` 前缀的日志
-- **Bridge info polling**: 定期调用 `getStreamToolBridgeInfo()` 检查状态变化
+### DOM Click Fallback 策略
+
+> GPT Review: DOM click fallback 不能算 production autoSubmit PASS。
+
+- 如果 `adapter.submitForm()` 成功 → **PASS** (production path)
+- 如果 `adapter.submitForm()` 失败但 DOM click 成功 → **DIAGNOSTIC**（记录为 known issue，需修复 production adapter）
+- 如果两者都失败 → **FAIL**
+
+```
+Evidence report 中必须明确标注 submit 方式：
+  submit_method: 'adapter.submitForm' | 'dom_click_fallback' | 'failed'
+```
 - **DOM observation**: 在 MAIN world 观测 input textbox 内容变化（result 被 insert 时内容会变）
 
 ### Step 4: 人工触发 (prompt)
@@ -143,24 +193,93 @@ window.__gate5b_events = [];
 
 ### Step 5: 观测 + 验证
 
+> GPT Review: sentinel 验证要 before/after snapshot，不能只看 count。
+
+**Sentinel Before/After Protocol**:
+1. 生成唯一 sentinel (包含 timestamp + random)
+2. **Before snapshot**: 记录 submit 前 page body text 中 sentinel 出现次数（应该为 0）
+3. 人工触发 AI function_call（prompt 中包含 sentinel 作为 tool 参数）
+4. Bridge 执行 tool → result 中包含 sentinel → inject + submit
+5. **After snapshot**: poll page body text 中 sentinel 出现次数
+6. **PASS 条件**: after count >= 2（user message + AI echo），且 after > before
+
 Poll 以下信号（最多等待 60 秒）：
 
 | Signal | 检测方式 | 含义 |
 |--------|---------|------|
-| Bridge event logs | console intercept | stream_cutoff → executing → succeeded/failed |
-| Input content change | DOM polling (MAIN world) | result 被 insertText 注入 |
-| Submit trigger | DOM observation (send button state) | submitForm 被调用 |
-| AI response | sentinel polling (body.innerText) | AI 消费了注入的 result |
+| callTool invoked | `__gate5b_events` array | tool 被 bridge 调用 |
+| insertText invoked | `__gate5b_events` array | result 被注入 DOM |
+| submitForm invoked | `__gate5b_events` array | 自动提交触发 |
+| AI response | sentinel before/after snapshot | AI 消费了 result |
 
-### Step 6: 结果报告
+### Step 6: Durable Evidence Artifact
 
+> GPT Review: 必须输出 durable evidence artifact。
+
+脚本自动生成两个文件：
+
+**JSON 原始数据** (`outputs/gate5b-live-notion-e2e-{timestamp}.json`):
+```json
+{
+  "timestamp": "2026-05-10T12:00:00Z",
+  "bridgeConfig": { "enabled": true, "autoInsert": true, "autoSubmit": true },
+  "sentinel": "sentinel_g5b_xxx",
+  "events": [
+    { "type": "callTool", "name": "echo", "ts": 1234567890 },
+    { "type": "insertText", "textLen": 150, "ts": 1234567891 },
+    { "type": "submitForm", "ts": 1234567892 },
+    { "type": "submitForm_result", "result": true, "ts": 1234567893 }
+  ],
+  "submitMethod": "adapter.submitForm",
+  "sentinelBefore": 0,
+  "sentinelAfter": 2,
+  "scannerEvidence": null,
+  "result": "PASS"
+}
 ```
-=== Gate 5b E2E Results ===
-✅ stream_cutoff received: YES
-✅ Tool executed: echo({"message": "sentinel_xxx"})
-✅ Result injected: <function_results>...</function_results>
-✅ Auto-submitted: YES
-✅ AI consumed result: sentinel count = 2 (user + AI echo)
+
+**Markdown 报告** (`outputs/gate5b-live-notion-e2e-{timestamp}.md`):
+```markdown
+# Gate 5b Live E2E Evidence — {timestamp}
+
+## Result: PASS/FAIL/DIAGNOSTIC
+
+| Step | Status |
+|------|--------|
+| CDP connect | ✅ |
+| ISOLATED world | ✅ |
+| Bridge config | ✅ autoInsert + autoSubmit |
+| Tool executed | ✅ echo({"message": "sentinel_xxx"}) |
+| Result injected | ✅ 150 chars |
+| Auto-submitted | ✅ adapter.submitForm |
+| AI consumed | ✅ sentinel 0 → 2 |
+```
+
+### Scanner Miss Debugging Evidence
+
+> GPT Review: scanner miss 要保留 debugging evidence。
+
+如果 60 秒内没有检测到 bridge 活动：
+
+1. 检查 MAIN world console 是否有 `[StreamInterceptor]` 日志
+2. 检查 ISOLATED world `__gate5b_events` 是否有任何 event
+3. 如果 events 为空 → scanner 可能未检测到 function_call
+4. 保存以下 debugging data：
+   - MAIN world console log (last 50 lines)
+   - ISOLATED world console log (last 50 lines)
+   - stream lifecycle 状态
+   - page body last 500 chars（检查 AI 是否输出了 function_call 但 scanner 未识别）
+
+```json
+{
+  "result": "SCANNER_MISS",
+  "debugging": {
+    "mainConsole": ["..."],
+    "isoConsole": ["..."],
+    "pageBodyTail": "...",
+    "hypothesis": "AI output function_call but scanner did not detect"
+  }
+}
 ```
 
 ---
@@ -169,10 +288,12 @@ Poll 以下信号（最多等待 60 秒）：
 
 - [ ] CDP 脚本成功连接 Notion + ISOLATED world
 - [ ] Bridge 配置为 autoInsert=true + autoSubmit=true
-- [ ] AI 输出 function_call → bridge 自动执行 tool
-- [ ] Result 注入到 input textbox
-- [ ] submitForm 自动触发（或 DOM click fallback）
-- [ ] AI 在回复中引用注入的 result（sentinel 验证）
+- [ ] Dependency wrapper 安装成功 (callTool, insertText, submitForm, getInputContent)
+- [ ] AI 输出 function_call → bridge 自动执行 tool (verified via `__gate5b_events`)
+- [ ] Result 注入到 input textbox (verified via `__gate5b_events` insertText)
+- [ ] **adapter.submitForm** 自动触发成功 (不是 DOM click fallback)
+- [ ] AI 在回复中引用注入的 result (sentinel before/after protocol)
+- [ ] Durable evidence artifact 生成 (JSON + Markdown)
 
 ### Stretch Goals
 
@@ -198,10 +319,25 @@ Poll 以下信号（最多等待 60 秒）：
 ```
 1. CDP infra: 连接 + ISOLATED world 发现 + preflight check
 2. Bridge 配置: autoInsert=true, autoSubmit=true
-3. Event 观测器: console intercept + DOM polling
-4. 手动触发 + 观测
-5. 结果报告生成
+3. Dependency wrapper 安装 (callTool, insertText, submitForm, getInputContent)
+4. 手动触发 + 自动观测 (sentinel before/after)
+5. Durable evidence artifact 生成 (JSON + Markdown)
+6. Scanner miss debugging evidence (if no bridge activity)
 ```
+
+---
+
+## GPT Review Findings 处理记录
+
+### Round 1 (Plan review, PR comment #4405613476)
+
+| # | Finding | 处理 |
+|---|---------|------|
+| 1 | 不要只靠 console intercept，用 dependency wrapper | ✅ Step 3 改为 wrap 真实 adapter/mcpClient 方法 |
+| 2 | DOM click fallback 不算 production PASS | ✅ 明确 submitForm vs DOM click 的 PASS/DIAGNOSTIC 区分 |
+| 3 | Sentinel 验证要 before/after snapshot | ✅ Step 5 添加 before/after protocol |
+| 4 | 必须输出 durable evidence artifact | ✅ Step 6 定义 JSON + Markdown 输出 |
+| 5 | Scanner miss 要保留 debugging evidence | ✅ 添加 scanner miss debugging section |
 
 ---
 
