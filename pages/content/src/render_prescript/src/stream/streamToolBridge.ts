@@ -87,7 +87,7 @@ export interface StreamEvent {
 
 // --- Adapter Diagnostic (P0-3) ---
 
-export type AdapterStatus = 'ok' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
+export type AdapterStatus = 'ok' | 'partial' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
 
 export interface AdapterDiagnostic {
   adapterAvailable: boolean;
@@ -116,7 +116,9 @@ export function getAdapterDiagnostic(adapter: AdapterLike | null): AdapterDiagno
   }
 
   const inputInfo = getInputInfo(adapter);
-  return { adapterAvailable: true, adapterStatus: 'ok', ...inputInfo };
+  // 'partial' if we cannot inspect input content (getInputContent missing or throws)
+  const status: AdapterStatus = inputInfo.inputEmpty === null ? 'partial' : 'ok';
+  return { adapterAvailable: true, adapterStatus: status, ...inputInfo };
 }
 
 function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; inputTextLength: number | null } {
