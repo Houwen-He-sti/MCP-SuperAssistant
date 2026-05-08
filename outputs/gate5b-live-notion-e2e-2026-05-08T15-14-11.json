@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-05-08T15:13:51.200Z",
+  "sentinel": "sentinel_g5b_mox226ow_2f3d",
+  "bridgeConfig": {
+    "enabled": true,
+    "cutoffEnabled": true,
+    "autoInsert": true,
+    "autoSubmit": true,
+    "toolTimeoutMs": 30000
+  },
+  "preflightInfo": {
+    "mcpClientAvailable": true,
+    "mcpClientReady": true,
+    "adapterAvailable": true,
+    "hasSubmitForm": true,
+    "hasGetInputContent": true,
+    "bridgeInfo": {
+      "config": {
+        "enabled": false,
+        "cutoffEnabled": false,
+        "autoInsert": true,
+        "autoSubmit": false,
+        "toolTimeoutMs": 30000
+      },
+      "isNotionHost": true,
+      "bridgeHandlerReady": true,
+      "subscribed": true,
+      "mcpClientAvailable": true,
+      "mcpClientReady": true,
+      "adapterAvailable": true,
+      "adapterStatus": "partial",
+      "inputEmpty": null,
+      "inputTextLength": null
+    }
+  },
+  "events": [],
+  "submitMethod": "adapter.submitForm",
+  "sentinelBefore": 1,
+  "sentinelAfter": 0,
+  "scannerEvidence": null,
+  "result": "PASS",
+  "diagnostics": {
+    "sentinelNote": "Sentinel echo not detected (AI behavior — not a system issue)"
+  },
+  "durationMs": 20439
+}

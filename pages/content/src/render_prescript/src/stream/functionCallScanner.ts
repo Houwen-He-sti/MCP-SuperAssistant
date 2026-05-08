@@ -116,7 +116,11 @@ export function extractFunctionCallIdentity(line: string): FunctionCallIdentity 
 //   {"type":"function_call_end","call_id":"..."}
 // ============================================================================
 
-/** Extract text content from a Notion patch line (o:"x" extend operations on content paths) */
+/** Extract text content from a Notion patch line.
+ *  Handles two operation types:
+ *  - o:"x" (extend) — appends text to an existing content path
+ *  - o:"a" (append) — creates a new block; content is nested inside v.value[].content
+ */
 export function extractPatchTextContent(line: string): string | null {
     try {
         const obj = JSON.parse(line);
@@ -124,8 +128,18 @@ export function extractPatchTextContent(line: string): string | null {
 
         let text = '';
         for (const op of obj.v) {
+            // o:"x" — extend operation on a content path (existing behavior)
             if (op.o === 'x' && typeof op.v === 'string' && typeof op.p === 'string' && op.p.endsWith('/content')) {
                 text += op.v;
+            }
+            // o:"a" — append operation; content nested in v.value[].content
+            // Used by Notion's agent-inference blocks for the initial function_call_start
+            if (op.o === 'a' && op.v && typeof op.v === 'object' && Array.isArray(op.v.value)) {
+                for (const entry of op.v.value) {
+                    if (entry && typeof entry.content === 'string') {
+                        text += entry.content;
+                    }
+                }
             }
         }
         return text || null;
