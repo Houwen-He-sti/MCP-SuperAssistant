@@ -1,7 +1,7 @@
 # Gate 5c: AI Consumption / Sentinel Verification E2E
 
-> PR branch: TBD
-> PR: TBD
+> PR branch: `feat/gate-5c`
+> PR: #22
 > Issue: https://github.com/Houwen-He-sti/MCP-SuperAssistant/issues/20 (follow-up)
 > Author: Opus/Claude
 > Depends on: Gate 5b (PR #21, MERGED)
@@ -82,33 +82,110 @@ Gate 5b 走的是 error-result path（echo 未注册 → 注入 error XML）。G
 ### 设计
 
 1. 生成唯一 sentinel: `sentinel_g5c_{timestamp}_{random}`
-2. Prompt AI 调用 echo tool，参数包含 sentinel: `"请调用 echo 工具，参数为 {"message": "sentinel_g5c_xxx"}"`
-3. Bridge 执行 echo → 返回 `{"echo": "sentinel_g5c_xxx", ...}` → 注入 → 提交
-4. Poll AI 回复，检查是否包含 sentinel
+2. **Baseline snapshot**: 记录 prompt 前的 transcript / assistant message 状态
+3. Prompt AI 调用 echo tool，参数包含 sentinel: `"请调用 echo 工具，参数为 {"message": "sentinel_g5c_xxx"}"`
+4. Bridge 执行 echo → 返回 `{"echo": "sentinel_g5c_xxx", ...}` → 注入 → 提交
+5. 记录 insertText payload，确认 success result 包含 sentinel
+6. 等到 submitForm_result 成功后，记录 submit timestamp
+7. **Post-submit delta**: 只在 submit 后的新 assistant response / transcript delta 中查 sentinel
+
+### Consumption Evidence Levels
+
+> GPT Review P1: body-level sentinel count 太弱，容易误判（sentinel 可能出现在 user prompt / injected XML / debug text）
+
+三级 evidence quality：
+
+| Level | 方法 | 可靠性 |
+|-------|------|--------|
+| `assistant_delta` | Submit 后监控新 assistant response，在 delta 文本中查 sentinel | ✅ 最可靠 |
+| `transcript_diff` | 对比 submit 前后 transcript，在 diff 部分查 sentinel | 中等 |
+| `body_count_only` | 全页面 body.innerText sentinel count | ⚠️ 仅作补充证据，不能单独作为 PASS |
 
 ### PASS 条件
 
+> GPT Review P1: CONSUMPTION_PARTIAL 不能关闭 Gate 5c
+
 ```
-CONSUMPTION_PASS 条件:
-  - tool 调用成功 (非 error)
-  - result 注入成功
-  - submitForm 成功
-  - AI 回复中 sentinel 出现次数 >= 2 (user message + AI echo)
-    OR AI 回复中明确引用了 tool result 的内容
+CONSUMPTION_PASS 需要同时满足:
+1. MCP runtime identity 和 tool registry 已记录
+2. Sentinel-capable tool 在测试开始前已注册
+3. Tool 调用成功返回 non-error result
+4. insertText payload 是 success <function_results> block，包含 sentinel
+5. adapter.submitForm 在 insertText 后成功
+6. Submit 后的新 assistant response / transcript delta 中引用了 sentinel 或明确 cite 了 tool result
+7. JSON + Markdown evidence artifact 包含 ordered events 和 response snippets
 ```
 
-### 观测策略
+**尝试预算**: 最多 3 次尝试（每次使用不同 sentinel）：
+- ≥1 次 assistant-delta-confirmed consumption → **CONSUMPTION_PASS**
+- Success path 可工作但 AI 没引用 sentinel → **CONSUMPTION_PARTIAL**（不关闭 Gate 5c，记录 follow-up）
+- Tool 执行/注入/提交失败 → **CONSUMPTION_FAIL**
 
-由于 AI 行为不确定，采用**观测而非断言**策略：
+### Evidence Artifact 结构
 
-- `CONSUMPTION_PASS`: sentinel count ≥ 2，或 AI 明确引用 tool result
-- `CONSUMPTION_PARTIAL`: tool 执行成功 + 注入成功 + 提交成功，但 AI 未引用 sentinel
-- `CONSUMPTION_FAIL`: tool 执行失败，或注入失败，或提交失败
-- `CONSUMPTION_INCONCLUSIVE`: tool 成功但 AI 行为无法判断
+```json
+{
+  "sentinelBeforePrompt": 0,
+  "sentinelAfterInsert": 1,
+  "sentinelAfterSubmit": 1,
+  "assistantDeltaAfterSubmit": "...",
+  "assistantDeltaContainsSentinel": true,
+  "consumptionEvidenceQuality": "assistant_delta | transcript_diff | body_count_only | manual_review_required"
+}
+```
 
 ---
 
 ## 实施方案
+
+### Phase 0: MCP Registry Diagnosis (Preflight Gate)
+
+> GPT Review P1: echo 未注册 root cause 需要成为明确 Phase 0 gate
+> GPT Review P1: 不能假设 getAvailableTools() 存在
+
+**Phase 0 必须在 consumption test 前完成。如果 Phase 0 失败则停止，不继续跑 consumption。**
+
+```javascript
+// Phase 0: Discover actual runtime API surface
+const runtimeSurface = await evalIsolated(`(function() {
+  const surface = {
+    hasCallTool: typeof window.mcpClient?.callTool === 'function',
+    hasIsReady: typeof window.mcpClient?.isReady === 'function',
+    hasGetAvailableTools: typeof window.mcpClient?.getAvailableTools === 'function',
+    hasGetTools: typeof window.mcpClient?.getTools === 'function',
+    // Check if tool list can be discovered from sidebar/registry
+    mcpClientKeys: window.mcpClient ? Object.keys(window.mcpClient) : [],
+  };
+  return surface;
+})()`);
+
+// If getAvailableTools exists, use it
+if (runtimeSurface.hasGetAvailableTools) {
+  const tools = await mcpClient.getAvailableTools();
+  // Record tool list, check for echo
+} else {
+  // Fallback: try calling echo directly and inspect error
+  // "not registered" = server reachable but tool missing
+  // other error = different problem
+}
+
+// Confirm connected server identity
+const serverInfo = await evalIsolated(`(function() {
+  // Try to discover server identity from mcpClient internals
+  // or call get_bridge_info if available
+  return window.mcpClient?.serverInfo || null;
+})()`);
+```
+
+**Phase 0 输出**:
+- Connected server identity
+- Available tool names
+- Whether echo (or alternative sentinel tool) is registered
+- If echo missing: exact diagnostic and stop
+
+**Alternative sentinel tool**: 如果 echo 不可用，plan 需要一个替代方案：
+- 任何 tool 只要 result 中包含 caller-controlled unique string 即可
+- 例如: `get_bridge_info` 可能返回包含 request 参数的结果
 
 ### 基础: 复用 Gate 5b 脚本
 
@@ -119,48 +196,52 @@ Gate 5c E2E 脚本基于 `e2e-gate5b-live-autosubmit.cjs` 扩展：
 3. 将 result 判定改为 `CONSUMPTION_PASS/PARTIAL/FAIL/INCONCLUSIVE`
 4. 增加 **sentinel before/after snapshot** 对比
 
-### 新增 Preflight 检查
+### 新增 Sentinel Before/After Protocol (Post-Submit Delta)
 
 ```javascript
-// Step 0b: Verify echo tool is registered
-const toolsResult = await evalIsolated(`(function() {
-  if (!window.mcpClient || !window.mcpClient.getAvailableTools) {
-    return { error: 'mcpClient.getAvailableTools not available' };
-  }
-  return window.mcpClient.getAvailableTools().then(tools => ({
-    count: tools.length,
-    names: tools.map(t => t.name),
-    hasEcho: tools.some(t => t.name === 'echo'),
-  }));
-})()`);
-
-if (!toolsResult?.value?.hasEcho) {
-  console.error('❌ echo tool not registered');
-  console.log('Available tools:', toolsResult?.value?.names);
-  // Diagnostic: check MCP connection status
-  // ...
-}
-```
-
-### Sentinel Before/After Protocol
-
-```javascript
-// Before: record sentinel count in page body
+// Step 1: Generate unique sentinel
 const sentinel = `sentinel_g5c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-const beforeCount = await evalMain(`(function() {
-  return (document.body.innerText.match(/${sentinel}/g) || []).length;
+
+// Step 2: Baseline snapshot (before prompt)
+const baseline = await evalMain(`(function() {
+  // Capture assistant message elements or transcript state
+  const assistantMsgs = document.querySelectorAll('[data-assistant-message]');
+  return {
+    assistantMessageCount: assistantMsgs.length,
+    lastAssistantText: assistantMsgs[assistantMsgs.length - 1]?.innerText?.slice(-200) || '',
+    bodyTextLength: document.body.innerText.length,
+    sentinelCountInBody: (document.body.innerText.match(/${sentinel}/g) || []).length,
+  };
 })()`);
 
-// ... prompt + bridge execution ...
+// Step 3: ... prompt + bridge execution + insertText + submitForm ...
 
-// After: poll for sentinel appearance
+// Step 4: Post-submit delta monitoring
+// Wait for new assistant response after submitForm_result
 for (let round = 0; round < maxRounds; round++) {
-  const afterCount = await evalMain(`(function() {
-    return (document.body.innerText.match(/${sentinel}/g) || []).length;
+  const postSubmit = await evalMain(`(function() {
+    const assistantMsgs = document.querySelectorAll('[data-assistant-message]');
+    const newCount = assistantMsgs.length;
+    const lastText = assistantMsgs[newCount - 1]?.innerText || '';
+    return {
+      assistantMessageCount: newCount,
+      lastAssistantText: lastText.slice(-500),
+      sentinelInLastAssistant: lastText.includes('${sentinel}'),
+      sentinelCountInBody: (document.body.innerText.match(/${sentinel}/g) || []).length,
+      bodyTextLength: document.body.innerText.length,
+    };
   })()`);
-  if (afterCount >= 2) {
-    // CONSUMPTION_PASS: user message (1) + AI echo (1+)
+
+  if (postSubmit.assistantMessageCount > baseline.assistantMessageCount
+      && postSubmit.sentinelInLastAssistant) {
+    // CONSUMPTION_PASS: new assistant response references sentinel
+    evidenceQuality = 'assistant_delta';
     break;
+  }
+
+  if (postSubmit.sentinelCountInBody > baseline.sentinelCountInBody + 1) {
+    // Possible consumption, but only body-level evidence
+    evidenceQuality = 'body_count_only'; // supplemental only, not PASS-worthy alone
   }
 }
 ```
@@ -172,10 +253,14 @@ for (let round = 0; round < maxRounds; round++) {
   "gate": "5c",
   "timestamp": "...",
   "sentinel": "sentinel_g5c_xxx",
+  "attempts": 1,
   "toolRegistration": {
+    "phase0Passed": true,
     "echoRegistered": true,
     "availableTools": ["echo", "get_bridge_info", "..."],
-    "totalTools": 29
+    "totalTools": 29,
+    "serverIdentity": "committee-bridge-mcp",
+    "runtimeApiSurface": { "hasCallTool": true, "hasIsReady": true, "hasGetAvailableTools": false }
   },
   "toolExecution": {
     "name": "echo",
@@ -183,9 +268,14 @@ for (let round = 0; round < maxRounds; round++) {
     "result": { "echo": "sentinel_g5c_xxx", "timestamp": "...", "server": "committee-bridge-mcp" },
     "error": null
   },
-  "sentinelBefore": 0,
-  "sentinelAfter": 2,
-  "aiResponse": "根据 echo 工具返回的结果...",
+  "consumptionEvidence": {
+    "sentinelBeforePrompt": 0,
+    "sentinelAfterInsert": 1,
+    "sentinelAfterSubmit": 2,
+    "assistantDeltaAfterSubmit": "根据 echo 工具返回的结果，sentinel_g5c_xxx ...",
+    "assistantDeltaContainsSentinel": true,
+    "consumptionEvidenceQuality": "assistant_delta"
+  },
   "result": "CONSUMPTION_PASS",
   "streamLifecycle": [...],
   "events": [...]
@@ -196,12 +286,15 @@ for (let round = 0; round < maxRounds; round++) {
 
 ## 验收标准
 
-- [ ] Preflight 确认 echo tool 已注册
+- [ ] **Phase 0 preflight gate 通过**: MCP runtime identity 确认 + echo (或替代 sentinel tool) 注册
+  - 如果 echo 未注册，脚本停止并输出完整诊断（available tools, server info）
+- [ ] 工具 registry preflight 使用**实际 runtime API**（不假设 `getAvailableTools()` 存在）
 - [ ] Tool 调用成功返回 success result（非 error）
 - [ ] Result 注入 + 提交成功
-- [ ] Sentinel before/after 对比显示 AI 引用了 tool result
-- [ ] Evidence artifact 生成 (JSON + Markdown)
-- [ ] Result 为 `CONSUMPTION_PASS` 或 `CONSUMPTION_PARTIAL`
+- [ ] Post-submit assistant delta 对比显示 AI 引用了 tool result (sentinel)
+- [ ] Evidence artifact 生成 (JSON + Markdown)，包含 `consumptionEvidenceQuality` level
+- [ ] Result 为 **CONSUMPTION_PASS**（最多 3 次尝试中 ≥1 次 assistant-delta-confirmed）
+  - CONSUMPTION_PARTIAL 只是诊断证据，**不关闭 Gate 5c**
 
 ### Stretch Goals
 
@@ -214,9 +307,11 @@ for (let round = 0; round < maxRounds; round++) {
 
 | 风险 | 缓解 |
 |------|------|
-| MCP 连接不到 committee-bridge-mcp | Preflight 检查 + 诊断输出 |
+| MCP 连接不到 committee-bridge-mcp | Phase 0 preflight gate + 诊断输出 |
+| echo 未注册 | Phase 0 hard gate：停止并诊断，不继续 consumption test |
 | AI 不调用 echo tool | 人工触发 prompt，明确要求 |
-| AI 不引用 sentinel | 使用 PARTIAL 而非 FAIL |
+| AI 不引用 sentinel | 最多 3 次尝试；仍未引用则 PARTIAL（不关闭 Gate 5c）|
+| `getAvailableTools()` API 不存在 | Fallback: 直接调用 echo，根据 error type 判断注册状态 |
 | Proxy 不稳定 | 检查 proxy status in preflight |
 | Notion DOM 变化导致 adapter 失败 | 复用 Gate 5b 已验证的 adapter |
 
