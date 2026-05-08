@@ -28,6 +28,9 @@ tsconfig.tsbuildinfo
 # trash
 .trash
 .trash/*
+
+# E2E config (user-specific workspace/agent settings)
+scripts/e2e-config.json
 mcp-superassistant-proxy/bun.lock
 # pnpm-lock.yaml
 
