@@ -15,6 +15,7 @@ import { describe, test } from 'node:test';
 import {
   createStreamToolHandler,
   getAdapterDiagnostic,
+  injectResultIfSafe,
   type AdapterLike,
   type ExecutionGuardLike,
   type McpClientLike,
@@ -418,7 +419,7 @@ describe('streamToolBridge', () => {
     assert.strictEqual(failEvent.errorCode, 'TIMEOUT');
   });
 
-  test('10. late result after timeout — ignored (no inject, no markSucceeded)', async () => {
+  test('10. late result after timeout — ignored (no markSucceeded, error injected)', async () => {
     const mockClient = createMockMcpClient({ callToolDelay: 100, callToolResult: 'late result' });
     const mockGuard = createMockGuard({ reserveResult: 'key-late' });
     const mockAdapter = createMockAdapter();
@@ -440,11 +441,13 @@ describe('streamToolBridge', () => {
     await new Promise(r => setTimeout(r, 150));
 
     assert.strictEqual(mockGuard._calls.markSucceeded.length, 0, 'late result must NOT markSucceeded');
-    assert.strictEqual(mockAdapter._calls.insertText.length, 0, 'late result must NOT insert');
+    // Gate 5: error result IS injected on timeout (error auto-injection)
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1, 'timeout error result injected');
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="error"'), 'injected error format');
     assert.strictEqual(mockStorage._calls.length, 0, 'late result must NOT store');
   });
 
-  test('11. callTool returns error — emit failed + markFailed', async () => {
+  test('11. callTool returns error — emit failed + markFailed + error injected', async () => {
     const mockClient = createMockMcpClient({ callToolError: 'Server unavailable' });
     const mockGuard = createMockGuard({ reserveResult: 'key-err' });
     const mockAdapter = createMockAdapter();
@@ -467,10 +470,13 @@ describe('streamToolBridge', () => {
     assert.ok(mockGuard._calls.markFailed[0].error!.includes('Server unavailable'));
 
     assert.strictEqual(mockGuard._calls.markSucceeded.length, 0);
-    assert.strictEqual(mockAdapter._calls.insertText.length, 0, 'should NOT insert on error');
+    // Gate 5: error result IS injected (error auto-injection)
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1, 'error result injected');
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="error"'), 'injected error format');
+    assert.ok(mockAdapter._calls.insertText[0].includes('Server unavailable'), 'error message in result');
     assert.strictEqual(mockStorage._calls.length, 0, 'should NOT store on error');
 
-    const failEvent = events.find(e => e.status === 'failed');
+    const failEvent = events.find(e => e.status === 'failed' && e.phase === 'tool_call');
     assert.ok(failEvent);
     assert.strictEqual(failEvent.phase, 'tool_call');
   });
@@ -1584,6 +1590,394 @@ describe('streamToolBridge', () => {
     // Simulate partial update (only change autoSubmit, should preserve allowlist)
     const updated2 = { ...updated, autoSubmit: true };
     assert.deepStrictEqual(updated2.toolAllowlist, ['echo', 'read_file']);
+  });
+
+  // --- Gate 5: Circuit Breaker Runtime Tests ---
+
+  test('53. circuit breaker — blocks execution when maxToolCallsPerStream exceeded', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+    let guardCounter = 0;
+
+    // Custom guard that always succeeds with unique keys
+    const mockGuard: ExecutionGuardLike & { _calls: { markFailed: Array<{ key: string; error?: string }> } } = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: {
+        markSucceeded: () => {},
+        markFailed: (key: string, error?: string) => { mockGuard._calls.markFailed.push({ key, error }); },
+      },
+      _calls: { markFailed: [] },
+    };
+    const mockAdapter = createMockAdapter();
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 3 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Execute 3 times — all should succeed
+    for (let i = 0; i < 3; i++) {
+      await handler({ type: 'stream_cutoff', streamId: 'stream-cb', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+    }
+    assert.strictEqual(mockClient._calls.length, 3, 'first 3 calls execute');
+
+    // 4th call — should be blocked
+    await handler({ type: 'stream_cutoff', streamId: 'stream-cb', identity: { name: 'echo', callId: 'call-blocked', arguments: '{}' } });
+    assert.strictEqual(mockClient._calls.length, 3, '4th call blocked by circuit breaker');
+
+    const cbEvent = events.find(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN');
+    assert.ok(cbEvent, 'should emit CIRCUIT_BREAKER_OPEN event');
+    assert.strictEqual(cbEvent.phase, 'reserve');
+  });
+
+  test('54. circuit breaker — different streamIds have independent counts', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 2 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Stream A: 2 calls (max)
+    await handler({ type: 'stream_cutoff', streamId: 'stream-A', identity: { name: 'echo', callId: 'a1', arguments: '{}' } });
+    await handler({ type: 'stream_cutoff', streamId: 'stream-A', identity: { name: 'echo', callId: 'a2', arguments: '{}' } });
+    // Stream B: still has budget
+    await handler({ type: 'stream_cutoff', streamId: 'stream-B', identity: { name: 'echo', callId: 'b1', arguments: '{}' } });
+
+    assert.strictEqual(mockClient._calls.length, 3, 'all 3 calls execute');
+    assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
+  });
+
+  test('55. circuit breaker — maxToolCallsPerStream=0 means no limit', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 0 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Execute 10 times — all should succeed (no limit)
+    for (let i = 0; i < 10; i++) {
+      await handler({ type: 'stream_cutoff', streamId: 'stream-nolimit', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+    }
+    assert.strictEqual(mockClient._calls.length, 10, 'all 10 calls execute with no limit');
+    assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
+  });
+
+  test('56. circuit breaker — undefined circuitBreaker uses default 5', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Execute 6 times — first 5 succeed, 6th blocked
+    for (let i = 0; i < 6; i++) {
+      await handler({ type: 'stream_cutoff', streamId: 'stream-def', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+    }
+    assert.strictEqual(mockClient._calls.length, 5, 'default limit is 5');
+    assert.ok(events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), '6th call blocked');
+  });
+
+  test('57. circuit breaker — parse failures do not consume budget', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 2 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // Send invalid args (parse failure — should not consume budget)
+    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-bad', arguments: 'not-json' } });
+    // Send 2 valid calls — both should succeed
+    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-1', arguments: '{}' } });
+    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-2', arguments: '{"x":1}' } });
+
+    assert.strictEqual(mockClient._calls.length, 2, 'both valid calls execute');
+    assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
+  });
+
+  test('58. circuit breaker — duplicate does not consume budget', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    // Guard returns null on second call (duplicate)
+    let callCount = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => { callCount++; return callCount <= 1 ? `key-${callCount}` : null; },
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 1 } },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    // First call: succeeds (uses budget 1/1)
+    await handler({ type: 'stream_cutoff', streamId: 'stream-dup', identity: { name: 'echo', callId: 'c1', arguments: '{}' } });
+    // Second call: duplicate (guard returns null) — should NOT consume budget
+    await handler({ type: 'stream_cutoff', streamId: 'stream-dup', identity: { name: 'echo', callId: 'c1', arguments: '{}' } });
+
+    assert.strictEqual(mockClient._calls.length, 1, 'only first call executes');
+    assert.ok(events.some(e => e.status === 'duplicate'), 'duplicate detected');
+    assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip from duplicate');
+  });
+
+  // --- Gate 5: Error Auto-Injection Tests ---
+
+  test('59. error auto-injection — callTool error + autoInsert=true + empty input → error result injected', async () => {
+    const mockClient = createMockMcpClient({ callToolError: 'Tool crashed' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-ei' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Error result should be injected
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1);
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="error"'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('Tool crashed'));
+
+    // Should emit error_inject event
+    const injectEvent = events.find(e => e.phase === 'error_inject');
+    assert.ok(injectEvent, 'should emit error_inject event');
+    assert.strictEqual(injectEvent.errorCode, 'RESULT_INJECTED');
+  });
+
+  test('60. error auto-injection — callTool error + user draft → error NOT injected', async () => {
+    const mockClient = createMockMcpClient({ callToolError: 'Tool crashed' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-draft' });
+    const mockAdapter = createMockAdapter({ hasContent: true });
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Should NOT inject (user has draft)
+    assert.strictEqual(mockAdapter._calls.insertText.length, 0);
+
+    const injectEvent = events.find(e => e.phase === 'error_inject');
+    assert.ok(injectEvent);
+    assert.strictEqual(injectEvent.errorCode, 'INJECT_SKIPPED_DRAFT');
+  });
+
+  test('61. error auto-injection — callTool error + autoInsert=false → no injection', async () => {
+    const mockClient = createMockMcpClient({ callToolError: 'Tool crashed' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-ni' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // No injection when autoInsert=false
+    assert.strictEqual(mockAdapter._calls.insertText.length, 0);
+    assert.ok(!events.some(e => e.phase === 'error_inject'));
+  });
+
+  test('62. error auto-injection — callTool error + autoSubmit=true → error injected AND submitted', async () => {
+    const mockClient = createMockMcpClient({ callToolError: 'API rate limit' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-es' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: true, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Error result injected
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1);
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="error"'));
+    // submitForm called
+    assert.strictEqual(mockAdapter._calls.submitForm.length, 1);
+
+    const injectEvent = events.find(e => e.phase === 'error_inject');
+    assert.ok(injectEvent);
+    assert.strictEqual(injectEvent.errorCode, 'RESULT_SUBMITTED');
+  });
+
+  test('63. error auto-injection — timeout + autoInsert=true → timeout error injected', async () => {
+    const mockClient = createMockMcpClient({ callToolDelay: 100, callToolResult: 'late' });
+    const mockGuard = createMockGuard({ reserveResult: 'key-to' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 20 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+    await new Promise(r => setTimeout(r, 150));
+
+    // Timeout error injected
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1);
+    assert.ok(mockAdapter._calls.insertText[0].includes('status="error"'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('timeout'));
+
+    const injectEvent = events.find(e => e.phase === 'error_inject');
+    assert.ok(injectEvent);
+    assert.strictEqual(injectEvent.errorCode, 'RESULT_INJECTED');
+  });
+
+  // --- Gate 5: injectResultIfSafe unit tests ---
+
+  test('64. injectResultIfSafe — no adapter → INJECT_SKIPPED_NO_ADAPTER', async () => {
+    const { outcome } = await injectResultIfSafe({
+      callId: 'c1', name: 'test', status: 'success', result: 'data',
+      autoSubmit: false, adapter: () => null,
+    });
+    assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_ADAPTER');
+  });
+
+  test('65. injectResultIfSafe — no getInputContent → INJECT_SKIPPED_NO_INSPECT', async () => {
+    const adapter: AdapterLike = { insertText: async () => true };
+    const { outcome } = await injectResultIfSafe({
+      callId: 'c1', name: 'test', status: 'success', result: 'data',
+      autoSubmit: false, adapter: () => adapter,
+    });
+    assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_INSPECT');
+  });
+
+  test('66. injectResultIfSafe — user draft → INJECT_SKIPPED_DRAFT', async () => {
+    const adapter: AdapterLike = {
+      insertText: async () => true,
+      getInputContent: () => 'some draft',
+    };
+    const { outcome } = await injectResultIfSafe({
+      callId: 'c1', name: 'test', status: 'success', result: 'data',
+      autoSubmit: false, adapter: () => adapter,
+    });
+    assert.strictEqual(outcome, 'INJECT_SKIPPED_DRAFT');
+  });
+
+  test('67. injectResultIfSafe — success + autoSubmit=true → RESULT_SUBMITTED', async () => {
+    const calls: string[] = [];
+    const adapter: AdapterLike = {
+      insertText: async (text) => { calls.push(text); return true; },
+      submitForm: async () => true,
+      getInputContent: () => '',
+    };
+    const { outcome } = await injectResultIfSafe({
+      callId: 'c1', name: 'echo', status: 'success', result: { msg: 'hi' },
+      autoSubmit: true, adapter: () => adapter,
+    });
+    assert.strictEqual(outcome, 'RESULT_SUBMITTED');
+    assert.strictEqual(calls.length, 1);
+    assert.ok(calls[0].includes('status="success"'));
+  });
+
+  test('68. injectResultIfSafe — insertText throws → INSERT_FAILED with error message', async () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { throw new Error('DOM gone'); },
+      getInputContent: () => '',
+    };
+    const { outcome, error } = await injectResultIfSafe({
+      callId: 'c1', name: 'test', status: 'error', result: 'oops',
+      autoSubmit: false, adapter: () => adapter,
+    });
+    assert.strictEqual(outcome, 'INSERT_FAILED');
+    assert.strictEqual(error, 'DOM gone');
   });
 
 });
