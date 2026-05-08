@@ -8,6 +8,8 @@
  * Tests: streamToolBridge.test.ts imports directly from this file.
  */
 
+import { formatFunctionResult } from './functionResultFormatter.ts';
+
 // --- Constants ---
 
 /** Maximum allowed size for raw arguments string (64KB). Reject before parse to prevent DoS. */
@@ -20,6 +22,10 @@ export interface StreamToolBridgeConfig {
   autoInsert: boolean;
   autoSubmit: boolean;
   toolTimeoutMs: number;
+  // Reserved for Gate 5. No runtime enforcement in Gate 3C-prep.
+  circuitBreaker?: {
+    maxToolCallsPerStream?: number;
+  };
 }
 
 export interface StreamToolExecutionEvent {
@@ -77,6 +83,54 @@ export interface StreamEvent {
   type?: string;
   streamId?: string;
   identity?: FunctionCallIdentityLike;
+}
+
+// --- Adapter Diagnostic (P0-3) ---
+
+export type AdapterStatus = 'ok' | 'partial' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
+
+export interface AdapterDiagnostic {
+  adapterAvailable: boolean;
+  adapterStatus: AdapterStatus;
+  inputEmpty: boolean | null;
+  inputTextLength: number | null;
+}
+
+/**
+ * Pure diagnostic function — inspects an adapter and returns health info.
+ * Does not expose input content, only length and emptiness.
+ */
+export function getAdapterDiagnostic(adapter: AdapterLike | null): AdapterDiagnostic {
+  if (!adapter) {
+    return { adapterAvailable: false, adapterStatus: 'input_not_found', inputEmpty: null, inputTextLength: null };
+  }
+
+  if (typeof adapter.insertText !== 'function') {
+    return { adapterAvailable: true, adapterStatus: 'input_not_editable', inputEmpty: null, inputTextLength: null };
+  }
+
+  if (typeof adapter.submitForm !== 'function') {
+    // Can insert but cannot submit
+    const inputInfo = getInputInfo(adapter);
+    return { adapterAvailable: true, adapterStatus: 'submit_not_found', ...inputInfo };
+  }
+
+  const inputInfo = getInputInfo(adapter);
+  // 'partial' if we cannot inspect input content (getInputContent missing or throws)
+  const status: AdapterStatus = inputInfo.inputEmpty === null ? 'partial' : 'ok';
+  return { adapterAvailable: true, adapterStatus: status, ...inputInfo };
+}
+
+function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; inputTextLength: number | null } {
+  if (typeof adapter.getInputContent !== 'function') {
+    return { inputEmpty: null, inputTextLength: null };
+  }
+  try {
+    const content = adapter.getInputContent();
+    return { inputEmpty: !content, inputTextLength: content ? content.length : 0 };
+  } catch {
+    return { inputEmpty: null, inputTextLength: null };
+  }
 }
 
 // --- Implementation ---
@@ -276,7 +330,12 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
       // P0-4 fix: try/catch around insert with structured error
       try {
-        const formattedResult = `<function_result call_id="${callId}">\n${typeof result === 'string' ? result : JSON.stringify(result)}\n</function_result>`;
+        const formattedResult = formatFunctionResult({
+          callId,
+          name: identity.name!,
+          status: 'ok',
+          result,
+        });
         await currentAdapter.insertText(formattedResult);
       } catch (e) {
         emit(streamId, identity, 'failed', {

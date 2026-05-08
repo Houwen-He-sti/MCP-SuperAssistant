@@ -14,10 +14,11 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   createStreamToolHandler,
-  MAX_ARGS_SIZE,
+  getAdapterDiagnostic,
   type AdapterLike,
   type ExecutionGuardLike,
   type McpClientLike,
+  type StreamToolBridgeConfig,
   type StorageLike,
   type StreamEvent,
   type StreamToolExecutionEvent
@@ -218,7 +219,7 @@ describe('streamToolBridge', () => {
 
     // Verify adapter.insertText called with formatted result
     assert.strictEqual(mockAdapter._calls.insertText.length, 1);
-    assert.ok(mockAdapter._calls.insertText[0].includes('<function_result call_id="call_abc123">'));
+    assert.ok(mockAdapter._calls.insertText[0].includes('<function_result call_id="call_abc123" name="mcp__web_search" status="ok">'));
     assert.ok(mockAdapter._calls.insertText[0].includes('search results'));
 
     // Verify succeeded event emitted
@@ -482,7 +483,7 @@ describe('streamToolBridge', () => {
 
     assert.strictEqual(mockAdapter._calls.insertText.length, 1);
     const inserted = mockAdapter._calls.insertText[0];
-    assert.ok(inserted.startsWith('<function_result call_id="call_abc123">'));
+    assert.ok(inserted.startsWith('<function_result call_id="call_abc123" name="mcp__web_search" status="ok">'));
     assert.ok(inserted.endsWith('</function_result>'));
     assert.strictEqual(mockAdapter._calls.submitForm.length, 0, 'submitForm should NOT be called');
   });
@@ -1111,7 +1112,7 @@ describe('streamToolBridge', () => {
 
     // Create args exactly at MAX_ARGS_SIZE (65536) code units
     // {"x":"AAA..."} — key "x" takes 5 chars for {"x":"}, closing "} takes 2, value fills the rest
-    const overhead = '{"x":"'  .length + '"}'.length; // 6 + 2 = 8
+    const overhead = '{"x":"'.length + '"}'.length; // 6 + 2 = 8
     const valueLen = 65_536 - overhead;
     const boundaryArgs = '{"x":"' + 'A'.repeat(valueLen) + '"}';
     assert.strictEqual(boundaryArgs.length, 65_536);
@@ -1152,6 +1153,203 @@ describe('streamToolBridge', () => {
     const failEvent = events.find(e => e.status === 'failed');
     assert.ok(failEvent);
     assert.strictEqual(failEvent.errorCode, 'ARGS_TOO_LARGE');
+  });
+
+  // --- P0-4: circuitBreaker interface reservation tests ---
+
+  test('37. config with circuitBreaker field — handler still works normally', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: { content: 'ok' } });
+    const mockGuard = createMockGuard({ reserveResult: 'key-cb' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: {
+        enabled: true,
+        autoInsert: true,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 10 },
+      },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Should execute normally — circuitBreaker is reserved, no runtime enforcement
+    assert.strictEqual(mockClient._calls.length, 1);
+    const successEvent = events.find(e => e.status === 'succeeded');
+    assert.ok(successEvent, 'Should succeed with circuitBreaker in config');
+  });
+
+  test('38. config with circuitBreaker undefined — backward compatible', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: { content: 'ok' } });
+    const mockGuard = createMockGuard({ reserveResult: 'key-compat' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const handler = createStreamToolHandler({
+      config: {
+        enabled: true,
+        autoInsert: true,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        // No circuitBreaker field — should work identically
+      },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: (evt) => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    assert.strictEqual(mockClient._calls.length, 1);
+    const successEvent = events.find(e => e.status === 'succeeded');
+    assert.ok(successEvent, 'Should succeed without circuitBreaker in config');
+  });
+
+  // --- P0-3: adapter diagnostic tests ---
+
+  test('39. getAdapterDiagnostic — null adapter → input_not_found', () => {
+    const diag = getAdapterDiagnostic(null);
+    assert.strictEqual(diag.adapterAvailable, false);
+    assert.strictEqual(diag.adapterStatus, 'input_not_found');
+    assert.strictEqual(diag.inputEmpty, null);
+    assert.strictEqual(diag.inputTextLength, null);
+  });
+
+  test('40. getAdapterDiagnostic — full adapter, empty input → ok, inputEmpty=true, length=0', () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { },
+      submitForm: async () => { },
+      getInputContent: () => '',
+    };
+    const diag = getAdapterDiagnostic(adapter);
+    assert.strictEqual(diag.adapterAvailable, true);
+    assert.strictEqual(diag.adapterStatus, 'ok');
+    assert.strictEqual(diag.inputEmpty, true);
+    assert.strictEqual(diag.inputTextLength, 0);
+  });
+
+  test('41. getAdapterDiagnostic — full adapter, input has content → ok, inputEmpty=false', () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { },
+      submitForm: async () => { },
+      getInputContent: () => 'user draft text here',
+    };
+    const diag = getAdapterDiagnostic(adapter);
+    assert.strictEqual(diag.adapterAvailable, true);
+    assert.strictEqual(diag.adapterStatus, 'ok');
+    assert.strictEqual(diag.inputEmpty, false);
+    assert.strictEqual(diag.inputTextLength, 20);
+  });
+
+  test('42. getAdapterDiagnostic — adapter without getInputContent → partial, input fields null', () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { },
+      submitForm: async () => { },
+      // no getInputContent
+    };
+    const diag = getAdapterDiagnostic(adapter);
+    assert.strictEqual(diag.adapterAvailable, true);
+    assert.strictEqual(diag.adapterStatus, 'partial');
+    assert.strictEqual(diag.inputEmpty, null);
+    assert.strictEqual(diag.inputTextLength, null);
+  });
+
+  test('43. getAdapterDiagnostic — adapter without submitForm → submit_not_found', () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { },
+      getInputContent: () => 'draft',
+      // no submitForm
+    };
+    const diag = getAdapterDiagnostic(adapter);
+    assert.strictEqual(diag.adapterAvailable, true);
+    assert.strictEqual(diag.adapterStatus, 'submit_not_found');
+    assert.strictEqual(diag.inputEmpty, false);
+    assert.strictEqual(diag.inputTextLength, 5);
+  });
+
+  test('44. getAdapterDiagnostic — getInputContent throws → partial, input fields null gracefully', () => {
+    const adapter: AdapterLike = {
+      insertText: async () => { },
+      submitForm: async () => { },
+      getInputContent: () => { throw new Error('DOM detached'); },
+    };
+    const diag = getAdapterDiagnostic(adapter);
+    assert.strictEqual(diag.adapterAvailable, true);
+    assert.strictEqual(diag.adapterStatus, 'partial');
+    assert.strictEqual(diag.inputEmpty, null);
+    assert.strictEqual(diag.inputTextLength, null);
+  });
+
+  // --- P1-2: circuitBreaker config roundtrip (simulates configureStreamToolBridge path) ---
+
+  test('45. circuitBreaker config survives object-spread roundtrip (configureStreamToolBridge semantics)', () => {
+    // This tests the exact pattern used by configureStreamToolBridge():
+    //   currentConfig = { ...currentConfig, ...partialConfig };
+    // Verifying circuitBreaker is preserved through spread, as getStreamToolBridgeInfo() returns { ...currentConfig }.
+
+    const baseConfig: StreamToolBridgeConfig = {
+      enabled: false,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 30_000,
+    };
+
+    // Simulate: configureStreamToolBridge({ circuitBreaker: { maxToolCallsPerStream: 10 } })
+    const updated = { ...baseConfig, circuitBreaker: { maxToolCallsPerStream: 10 } };
+
+    assert.deepStrictEqual(updated.circuitBreaker, { maxToolCallsPerStream: 10 });
+    assert.strictEqual(updated.enabled, false);
+    assert.strictEqual(updated.toolTimeoutMs, 30_000);
+
+    // Simulate: getStreamToolBridgeInfo() returns { config: { ...currentConfig } }
+    const returned = { ...updated };
+    assert.deepStrictEqual(returned.circuitBreaker, { maxToolCallsPerStream: 10 });
+
+    // Verify mutation safety — mutating returned copy doesn't affect original
+    returned.circuitBreaker = { maxToolCallsPerStream: 999 };
+    assert.strictEqual(updated.circuitBreaker.maxToolCallsPerStream, 10);
+  });
+
+  test('46. circuitBreaker config — partial update preserves existing circuitBreaker', () => {
+    // Simulate successive configureStreamToolBridge calls
+    let config: StreamToolBridgeConfig = {
+      enabled: false,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 30_000,
+      circuitBreaker: { maxToolCallsPerStream: 5 },
+    };
+
+    // Second configure call that only changes enabled — should NOT drop circuitBreaker
+    config = { ...config, enabled: true };
+
+    assert.strictEqual(config.enabled, true);
+    assert.deepStrictEqual(config.circuitBreaker, { maxToolCallsPerStream: 5 });
+  });
+
+  test('47. circuitBreaker config — explicit undefined removes it', () => {
+    let config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 30_000,
+      circuitBreaker: { maxToolCallsPerStream: 10 },
+    };
+
+    // Explicit override to undefined
+    config = { ...config, circuitBreaker: undefined };
+    assert.strictEqual(config.circuitBreaker, undefined);
   });
 
 });
