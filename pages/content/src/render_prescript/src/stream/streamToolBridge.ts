@@ -8,6 +8,11 @@
  * Tests: streamToolBridge.test.ts imports directly from this file.
  */
 
+// --- Constants ---
+
+/** Maximum allowed size for raw arguments string (64KB). Reject before parse to prevent DoS. */
+export const MAX_ARGS_SIZE = 65_536;
+
 // --- Interfaces ---
 
 export interface StreamToolBridgeConfig {
@@ -115,6 +120,17 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Accept null/undefined as empty args — no-arg tools (e.g. get_bridge_info) are valid
     let parsedArgs: Record<string, unknown>;
     const rawArgs = identity.arguments ?? '{}';
+
+    // Step 2a: Reject oversized arguments BEFORE parse (prevent DoS on JSON.parse)
+    if (rawArgs.length > MAX_ARGS_SIZE) {
+      emit(streamId, identity, 'failed', {
+        phase: 'parse',
+        error: `Arguments too large: ${rawArgs.length} bytes (max ${MAX_ARGS_SIZE})`,
+        errorCode: 'ARGS_TOO_LARGE',
+      });
+      return;
+    }
+
     try {
       parsedArgs = JSON.parse(rawArgs);
     } catch (e) {
@@ -122,6 +138,16 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
         phase: 'parse',
         error: `JSON parse failed: ${(e as Error).message}`,
         errorCode: 'PARSE_ERROR',
+      });
+      return;
+    }
+
+    // Step 2b: Validate parsed type is a plain object (not array, null, number, string)
+    if (parsedArgs === null || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
+      emit(streamId, identity, 'failed', {
+        phase: 'parse',
+        error: `Arguments must be a plain object, got ${Array.isArray(parsedArgs) ? 'array' : typeof parsedArgs}`,
+        errorCode: 'ARGS_NOT_OBJECT',
       });
       return;
     }
