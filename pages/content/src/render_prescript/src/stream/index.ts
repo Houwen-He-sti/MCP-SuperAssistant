@@ -8,9 +8,8 @@
 
 export { configureCutoff, installStreamInterceptor, isStreamInterceptorActive, onStreamEvent } from './interceptor';
 export { detectFunctionCall, extractFunctionCallIdentity, extractTextFromChunk, tryParseNDJSON } from './parser';
-export { createStreamToolHandler } from './streamToolBridge';
-export { configureStreamToolBridge, initStreamToolBridge } from './streamToolBridgeInit';
 export type { FunctionCallIdentity } from './parser';
+export { createStreamToolHandler } from './streamToolBridge';
 export type {
     AdapterLike,
     ExecutionGuardLike,
@@ -18,8 +17,9 @@ export type {
     StorageLike,
     StreamToolBridgeConfig,
     StreamToolBridgeDeps,
-    StreamToolExecutionEvent,
+    StreamToolExecutionEvent
 } from './streamToolBridge';
+export { configureStreamToolBridge, getStreamToolBridgeInfo, initStreamToolBridge } from './streamToolBridgeInit';
 export type {
     StreamCutoffConfig,
     StreamCutoffEvent,
