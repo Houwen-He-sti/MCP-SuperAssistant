@@ -479,8 +479,8 @@ async function runE2E(sentinel, evidence) {
         // Store latest events for evidence (MUST be before break)
         evidence.events = events;
 
-        // PASS condition: full bridge pipeline worked (tool executed + result injected + form submitted)
-        // Sentinel echo by AI is bonus evidence, not a gating criterion — AI behavior is not our system.
+        // PIPELINE_PASS condition: full bridge pipeline worked (tool executed + result injected + form submitted)
+        // AI consumption (sentinel echo) is Gate 5c scope — not tracked here.
         if (toolExecuted && resultInserted && formSubmitted) {
             consumed = true;
             evidence.sentinelAfter = sentinelCount;
@@ -521,10 +521,10 @@ async function runE2E(sentinel, evidence) {
     };
 
     if (consumed && submitMethod === 'adapter.submitForm') {
-        evidence.result = 'PASS';
+        evidence.result = 'PIPELINE_PASS';
         const sentinelNote = (evidence.sentinelAfter || 0) >= 2
-            ? 'AI also echoed sentinel (bonus verification)'
-            : 'Sentinel echo not detected (AI behavior — not a system issue)';
+            ? 'AI also echoed sentinel (bonus verification for future Gate 5c)'
+            : 'Sentinel echo not tracked — AI consumption is Gate 5c scope';
         evidence.diagnostics.sentinelNote = sentinelNote;
     } else if (consumed && submitMethod !== 'adapter.submitForm') {
         evidence.result = 'DIAGNOSTIC';

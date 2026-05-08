@@ -1,10 +1,12 @@
-# Gate 5b: Live Notion/CDP Auto-Submit Consumption E2E
+# Gate 5b: Live Notion/CDP Bridge Pipeline E2E
 
 > PR branch: `feat/gate-5b`
-> PR: 待确认
+> PR: #21
 > Issue: https://github.com/Houwen-He-sti/MCP-SuperAssistant/issues/20
 > Author: Opus/Claude
 > Depends on: Gate 5 (PR #19, MERGED)
+> Scope: Bridge pipeline verification (stream detect → callTool → insertText → submitForm)
+> Note: AI consumption / sentinel verification is deferred to Gate 5c
 
 ---
 
@@ -12,7 +14,9 @@
 
 验证 Gate 5 auto-submit loop 在 **真实 Notion 浏览器环境** 中端到端工作。
 
-Gate 5 证明了 runtime 代码的正确性（112 tests, mocked integration）。Gate 5b 的目标是补充 **live evidence**：从 AI 输出 function_call → stream_cutoff → bridge 执行 tool → 注入 result → 自动提交 → AI 消费 result，全流程在真实浏览器中观测。
+Gate 5 证明了 runtime 代码的正确性（112 tests, mocked integration）。Gate 5b 的目标是补充 **live evidence**：从 AI 输出 function_call → stream_cutoff → bridge 执行 tool → 注入 result → 自动提交，全流程在真实浏览器中观测。
+
+> **Rescope note (PR #21 review consensus)**：Gate 5b 验证的是"我们的代码"（extension bridge pipeline）的正确性。AI 是否消费注入结果属于 AI 行为验证，不在 extension 系统边界内，归入 Gate 5c。
 
 ---
 
