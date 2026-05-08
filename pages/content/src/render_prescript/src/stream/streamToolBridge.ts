@@ -26,6 +26,8 @@ export interface StreamToolBridgeConfig {
   circuitBreaker?: {
     maxToolCallsPerStream?: number;
   };
+  // Gate 3C: tool name allowlist. undefined/empty = allow all (backward compatible).
+  toolAllowlist?: string[];
 }
 
 export interface StreamToolExecutionEvent {
@@ -170,6 +172,19 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       });
       return;
     }
+
+    // Step 1b: Tool allowlist check (before parse to save work on rejected tools)
+    if (config.toolAllowlist && config.toolAllowlist.length > 0) {
+      if (!config.toolAllowlist.includes(identity.name)) {
+        emit(streamId, identity, 'failed', {
+          phase: 'identity',
+          error: `Tool "${identity.name}" not in allowlist`,
+          errorCode: 'TOOL_NOT_ALLOWED',
+        });
+        return;
+      }
+    }
+
     // Step 2: Parse arguments (BEFORE reserve)
     // Accept null/undefined as empty args — no-arg tools (e.g. get_bridge_info) are valid
     let parsedArgs: Record<string, unknown>;

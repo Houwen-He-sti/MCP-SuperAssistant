@@ -18,9 +18,9 @@ import {
   type AdapterLike,
   type ExecutionGuardLike,
   type McpClientLike,
-  type StreamToolBridgeConfig,
   type StorageLike,
   type StreamEvent,
+  type StreamToolBridgeConfig,
   type StreamToolExecutionEvent
 } from './streamToolBridge.ts';
 
@@ -1350,6 +1350,153 @@ describe('streamToolBridge', () => {
     // Explicit override to undefined
     config = { ...config, circuitBreaker: undefined };
     assert.strictEqual(config.circuitBreaker, undefined);
+  });
+
+  // --- Tool Allowlist Tests (Gate 3C P0-1) ---
+
+  test('48. allowlist undefined — all tools allowed', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 5000,
+      // toolAllowlist: undefined — not set
+    };
+
+    const handler = createStreamToolHandler({
+      config,
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    await handler(makeCutoffEvent());
+
+    // Should proceed to execution (not blocked by allowlist)
+    assert.ok(mockClient._calls.length === 1, 'callTool should be called');
+    assert.ok(!events.some(e => e.errorCode === 'TOOL_NOT_ALLOWED'));
+  });
+
+  test('49. allowlist empty array — all tools allowed', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 5000,
+      toolAllowlist: [],
+    };
+
+    const handler = createStreamToolHandler({
+      config,
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    await handler(makeCutoffEvent());
+
+    assert.ok(mockClient._calls.length === 1, 'callTool should be called');
+    assert.ok(!events.some(e => e.errorCode === 'TOOL_NOT_ALLOWED'));
+  });
+
+  test('50. allowlist with matching tool — tool executes', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 5000,
+      toolAllowlist: ['mcp__web_search', 'echo'],
+    };
+
+    const handler = createStreamToolHandler({
+      config,
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    await handler(makeCutoffEvent()); // identity.name = 'mcp__web_search'
+
+    assert.ok(mockClient._calls.length === 1, 'callTool should be called for allowed tool');
+    assert.ok(!events.some(e => e.errorCode === 'TOOL_NOT_ALLOWED'));
+  });
+
+  test('51. allowlist without matching tool — TOOL_NOT_ALLOWED before reserve', async () => {
+    const mockClient = createMockMcpClient();
+    const mockGuard = createMockGuard();
+    const mockAdapter = createMockAdapter();
+    const events: StreamToolExecutionEvent[] = [];
+
+    const config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 5000,
+      toolAllowlist: ['echo', 'read_file'],  // mcp__web_search NOT in list
+    };
+
+    const handler = createStreamToolHandler({
+      config,
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    await handler(makeCutoffEvent()); // identity.name = 'mcp__web_search'
+
+    // Should NOT execute
+    assert.strictEqual(mockClient._calls.length, 0, 'callTool should NOT be called');
+    // Should NOT reserve
+    assert.strictEqual(mockGuard._calls.reserve.length, 0, 'reserve should NOT be called');
+    // Should emit TOOL_NOT_ALLOWED
+    const failedEvent = events.find(e => e.errorCode === 'TOOL_NOT_ALLOWED');
+    assert.ok(failedEvent, 'should emit TOOL_NOT_ALLOWED event');
+    assert.strictEqual(failedEvent!.status, 'failed');
+    assert.strictEqual(failedEvent!.phase, 'identity');
+    assert.ok(failedEvent!.error!.includes('mcp__web_search'));
+  });
+
+  test('52. allowlist config roundtrip — preserved via spread', () => {
+    const config: StreamToolBridgeConfig = {
+      enabled: true,
+      autoInsert: true,
+      autoSubmit: false,
+      toolTimeoutMs: 30_000,
+      toolAllowlist: ['echo', 'read_file'],
+    };
+
+    // Simulate configureStreamToolBridge spread
+    const updated = { ...config, enabled: false };
+
+    assert.deepStrictEqual(updated.toolAllowlist, ['echo', 'read_file']);
+    assert.strictEqual(updated.enabled, false);
+
+    // Simulate partial update (only change autoSubmit, should preserve allowlist)
+    const updated2 = { ...updated, autoSubmit: true };
+    assert.deepStrictEqual(updated2.toolAllowlist, ['echo', 'read_file']);
   });
 
 });
