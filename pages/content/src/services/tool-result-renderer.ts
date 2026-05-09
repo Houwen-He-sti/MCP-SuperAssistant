@@ -11,12 +11,15 @@ import {
     extractRenderData,
     type ToolResultRenderData,
 } from './tool-result-renderer-utils';
+import { SUPERASSISTANT_BRIDGE_PROMPT } from '../config/superassistant-bridge-prompt';
 import { createLogger } from '@extension/shared/lib/logger';
 
 const logger = createLogger('ToolResultRenderer');
 export { stringifyToolResult, truncatePreview, extractRenderData, type ToolResultRenderData };
 
 const STYLE_TAG_ID = 'mcp-tool-result-renderer-styles';
+const TOOL_EVENT = 'mcp:tool-execution-complete';
+const PROMPT_EVENT = 'mcp:render-prompt-card';
 
 const TOOL_RESULT_CSS = `
 .mcp-tool-result-card {
@@ -32,6 +35,7 @@ const TOOL_RESULT_CSS = `
   background: var(--mcp-tr-bg, #111827);
   color: var(--mcp-tr-fg, #f9fafb);
 }
+.mcp-tool-result-card[data-mcp-card-kind="prompt"] { border-style: dashed; }
 .mcp-tool-result-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; user-select: none; }
 .mcp-tool-result-header:hover { background: var(--mcp-tr-hover, rgba(255,255,255,0.06)); }
 .mcp-tool-result-title { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -133,19 +137,34 @@ export class ToolResultRenderer {
     cleanup(): void {
         if (!this.isInitialized) return;
         if (this.eventListener) {
-            document.removeEventListener('mcp:tool-execution-complete', this.eventListener);
+            document.removeEventListener(TOOL_EVENT, this.eventListener);
+            document.removeEventListener(PROMPT_EVENT, this.eventListener);
             this.eventListener = null;
         }
         this.isInitialized = false;
     }
 
     private setupEventListener(): void {
-        if (this.eventListener) document.removeEventListener('mcp:tool-execution-complete', this.eventListener);
+        if (this.eventListener) {
+            document.removeEventListener(TOOL_EVENT, this.eventListener);
+            document.removeEventListener(PROMPT_EVENT, this.eventListener);
+        }
         this.eventListener = (event: Event) => {
-            const detail = (event as CustomEvent<ToolExecutionCompleteDetail>).detail;
-            this.handleToolExecutionComplete(detail);
+            const customEvent = event as CustomEvent<any>;
+            if (event.type === PROMPT_EVENT) {
+                this.handleToolExecutionComplete({
+                    kind: 'prompt',
+                    callId: 'superassistant-bridge-prompt',
+                    title: 'SuperAssistant Bridge prompt',
+                    prompt: customEvent.detail?.prompt || SUPERASSISTANT_BRIDGE_PROMPT,
+                    result: customEvent.detail?.prompt || SUPERASSISTANT_BRIDGE_PROMPT,
+                } as any);
+                return;
+            }
+            this.handleToolExecutionComplete(customEvent.detail);
         };
-        document.addEventListener('mcp:tool-execution-complete', this.eventListener);
+        document.addEventListener(TOOL_EVENT, this.eventListener);
+        document.addEventListener(PROMPT_EVENT, this.eventListener);
     }
 
     private async handleToolExecutionComplete(detail: ToolExecutionCompleteDetail): Promise<void> {
@@ -163,7 +182,7 @@ export class ToolResultRenderer {
             if (this.getActiveAdapterFn) {
                 const adapterState = await this.getActiveAdapterFn();
                 const plugin = adapterState?.plugin;
-                if (plugin?.findToolResultMountPoint) mountPoint = plugin.findToolResultMountPoint({ callId: data.callId } as any);
+                if (plugin?.findToolResultMountPoint) mountPoint = plugin.findToolResultMountPoint({ callId: data.callId, kind: data.kind } as any);
             }
         } catch (e) {
             logger.warn('[ToolResultRenderer] Error getting mount point:', e);
