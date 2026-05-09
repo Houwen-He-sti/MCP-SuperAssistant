@@ -329,16 +329,21 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
 
   /**
    * Find where to inject a tool result card in the ChatGPT conversation UI.
-   * Targets the last conversation turn (assistant message) in the chat.
+   * Inserts AFTER the last conversation turn (not inside it) to avoid
+   * React reconciliation removing the injected card.
    */
   findToolResultMountPoint(_event?: { callId?: string }) {
-    // Find all conversation turns, target the last one (most recent)
     const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
     if (turns.length === 0) {
       logger.debug('findToolResultMountPoint: no conversation turns found');
       return null;
     }
     const lastTurn = turns[turns.length - 1] as HTMLElement;
+    // Insert after the turn wrapper, not inside it
+    if (lastTurn.parentElement) {
+      return { container: lastTurn.parentElement, anchor: lastTurn, mode: 'after' as const };
+    }
+    // Fallback: append inside (less safe but better than nothing)
     return { container: lastTurn, mode: 'append' as const };
   }
 

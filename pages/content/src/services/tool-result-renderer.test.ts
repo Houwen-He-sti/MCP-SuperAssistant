@@ -183,7 +183,7 @@ describe('extractRenderData', () => {
         assert.ok(data.resultPreview.includes('(truncated)'));
     });
 
-    test('confirmationText used as preview when no result', () => {
+    test('confirmationText used as preview when no result → still success', () => {
         const data = extractRenderData({
             callId: 'call-confirm',
             functionName: 'file_tool',
@@ -191,6 +191,20 @@ describe('extractRenderData', () => {
         });
         assert.ok(data);
         assert.equal(data.resultPreview, 'File attached successfully');
+        assert.equal(data.status, 'success', 'confirmationText means success');
+        assert.equal(data.error, undefined);
+    });
+
+    test('empty string result → success (not error)', () => {
+        const data = extractRenderData({
+            result: '',
+            callId: 'call-empty',
+            functionName: 'empty_tool',
+        });
+        assert.ok(data);
+        // empty string is a valid result (not null/undefined)
+        assert.equal(data.status, 'success');
+        assert.equal(data.error, undefined);
     });
 
     test('rawResult also truncated at MAX_RAW_LENGTH', () => {

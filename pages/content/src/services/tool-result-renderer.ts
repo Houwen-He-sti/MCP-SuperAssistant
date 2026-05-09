@@ -8,6 +8,7 @@
  */
 
 import type { ToolResultMountPoint } from '../types/tool-result-ui';
+import type { AdapterPlugin } from '../plugins/plugin-types';
 import type { ToolExecutionCompleteDetail } from './automation.service';
 import {
     stringifyToolResult,
@@ -154,7 +155,7 @@ export class ToolResultRenderer {
     private static instance: ToolResultRenderer | null = null;
     private isInitialized = false;
     private eventListener: ((event: Event) => void) | null = null;
-    private getActiveAdapterFn: (() => Promise<{ plugin?: { findToolResultMountPoint?: (event?: { callId?: string }) => ToolResultMountPoint | null } } | null>) | null = null;
+    private getActiveAdapterFn: (() => Promise<{ plugin?: AdapterPlugin } | null>) | null = null;
 
     private constructor() { }
 
@@ -187,7 +188,7 @@ export class ToolResultRenderer {
             this.getActiveAdapterFn = async () => {
                 const state = useAdapterStore.getState();
                 const registration = state.getActiveAdapter();
-                return registration ? { plugin: registration.plugin as any } : null;
+                return registration ? { plugin: registration.plugin } : null;
             };
         } catch (e) {
             logger.warn('[ToolResultRenderer] Could not import adapter store:', e);
@@ -200,6 +201,12 @@ export class ToolResultRenderer {
         logger.debug('[ToolResultRenderer] Initialized successfully');
     }
 
+    /**
+     * Cleanup: removes event listener only.
+     * Injected style tags and card DOM elements are intentionally left in place
+     * because they are part of the page's visible conversation history.
+     * Cards remain visible until the page is reloaded.
+     */
     cleanup(): void {
         if (!this.isInitialized) return;
         if (this.eventListener) {

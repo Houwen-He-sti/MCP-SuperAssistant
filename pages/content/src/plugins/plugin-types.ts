@@ -1,4 +1,5 @@
 import type { DetectedTool } from '../types/stores';
+import type { ToolResultMountPoint } from '../types/tool-result-ui';
 export type { DetectedTool };
 // EventMap, EventCallback, UnsubscribeFunction will be imported from '../../events/index.ts'
 // which exports them from '../../events/event-types.ts'
@@ -101,6 +102,9 @@ export interface AdapterPlugin {
   onToolDetected?(tools: DetectedTool[]): void;
   onPageChanged?(url: string, oldUrl?: string): void;
   onHostChanged?(newHost: string, oldHost?: string): void;
+
+  // Tool result UI
+  findToolResultMountPoint?(event?: { callId?: string }): ToolResultMountPoint | null;
 }
 
 export interface AdapterConfig {

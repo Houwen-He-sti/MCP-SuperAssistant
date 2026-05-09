@@ -371,21 +371,24 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
 
   /**
    * Find where to inject a tool result card in the DeepSeek conversation UI.
-   * Targets the last message in the chat message list.
+   * Targets the last top-level message element in the chat container.
+   * Note: DeepSeek's class names are obfuscated and may change across builds.
+   * The selectors here are best-effort for v1.
    */
   findToolResultMountPoint(_event?: { callId?: string }) {
     // DeepSeek uses a chat message list container
-    const messageList = document.querySelector('.chat-message-list, .conversation-container, .chat-container');
+    const messageList = document.querySelector('.chat-message-list, .conversation-container');
     if (!messageList) {
       logger.debug('findToolResultMountPoint: no message list found');
       return null;
     }
-    // Find the last message bubble
-    const messages = messageList.querySelectorAll('.chat-message, .message-item, [class*="message"]');
+    // Find top-level direct child message elements (avoid nested decorative nodes)
+    const messages = messageList.querySelectorAll(':scope > .chat-message, :scope > .message-item, :scope > [class*="ds-chat"]');
     if (messages.length > 0) {
       const lastMessage = messages[messages.length - 1] as HTMLElement;
       return { container: messageList as HTMLElement, anchor: lastMessage, mode: 'after' as const };
     }
+    // Fallback: append to container
     return { container: messageList as HTMLElement, mode: 'append' as const };
   }
 

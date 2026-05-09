@@ -76,20 +76,25 @@ export function extractRenderData(
 
     const callId = detail.callId || `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const functionName = detail.functionName || 'unknown_tool';
-    const hasResult = !!detail.result;
+    const hasResult = detail.result !== undefined && detail.result !== null;
+    const hasConfirmation = !!detail.confirmationText;
 
     const rawResult = hasResult ? stringifyToolResult(detail.result) : undefined;
     const resultPreview = rawResult
         ? truncatePreview(rawResult, MAX_PREVIEW_LENGTH)
         : (detail.confirmationText || '');
 
+    // mcp:tool-execution-complete is already a completion event.
+    // Only mark as error if there's no result AND no confirmation AND no explicit success signal.
+    const isError = !hasResult && !hasConfirmation;
+
     return {
         callId,
         functionName,
-        status: hasResult ? 'success' : 'error',
+        status: isError ? 'error' : 'success',
         resultPreview,
         rawResult: rawResult ? truncatePreview(rawResult, MAX_RAW_LENGTH) : undefined,
-        error: hasResult ? undefined : 'No result returned',
+        error: isError ? 'No result returned' : undefined,
         timestamp: Date.now(),
     };
 }
