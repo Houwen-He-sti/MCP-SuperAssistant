@@ -27,31 +27,24 @@ const TOOL_RESULT_CSS = `
   width: min(100%, 820px);
   max-width: 820px;
   margin: 10px auto;
-  border: 1px solid var(--mcp-tr-border, #e5e7eb);
-  border-radius: 8px;
-  overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 14px;
-  background: var(--mcp-tr-bg, #f9fafb);
 }
 .mcp-tool-result-header {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 0 0 8px 0;
   cursor: pointer;
   user-select: none;
+  font-weight: 500;
 }
-.mcp-tool-result-header:hover {
-  background: var(--mcp-tr-hover, #f3f4f6);
-}
-.mcp-tool-result-title { flex: 1; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mcp-tool-result-status { font-size: 13px; opacity: 0.86; }
-.mcp-tool-result-chevron { transition: transform 0.2s; }
-.mcp-tool-result-chevron[data-expanded="true"] { transform: rotate(90deg); }
+.mcp-tool-result-title { font-weight: 500; }
+.mcp-tool-result-status { display: none; }
+.mcp-tool-result-chevron { font-size: 13px; line-height: 1; }
 .mcp-tool-result-preview {
   display: none;
-  padding: 12px;
+  padding: 12px 0 0 0;
   border-top: 1px solid var(--mcp-tr-border, #e5e7eb);
   max-height: 400px;
   overflow-y: auto;
@@ -66,11 +59,7 @@ const TOOL_RESULT_CSS = `
   line-height: 1.5;
 }
 @media (prefers-color-scheme: dark) {
-  .mcp-tool-result-card {
-    --mcp-tr-border: #374151;
-    --mcp-tr-bg: #1f2937;
-    --mcp-tr-hover: #374151;
-  }
+  .mcp-tool-result-card { --mcp-tr-border: #374151; }
 }
 `;
 
@@ -85,23 +74,21 @@ export function buildCardElement(data: ToolResultRenderData): HTMLElement {
     const header = document.createElement('div');
     header.className = 'mcp-tool-result-header';
 
-    const chevron = document.createElement('span');
-    chevron.className = 'mcp-tool-result-chevron';
-    chevron.textContent = '▸';
-    chevron.setAttribute('data-expanded', 'false');
-
     const title = document.createElement('span');
     title.className = 'mcp-tool-result-title';
-    title.textContent = data.kind === 'prompt'
-        ? 'prompt: SuperAssistant Bridge 协作协议'
-        : `MCP tool ${data.functionName} 调用结果`;
+    title.textContent = '已收到应用响应';
+
+    const chevron = document.createElement('span');
+    chevron.className = 'mcp-tool-result-chevron';
+    chevron.textContent = '⌄';
+    chevron.setAttribute('data-expanded', 'false');
 
     const status = document.createElement('span');
     status.className = 'mcp-tool-result-status';
     status.textContent = data.kind === 'prompt' ? 'config' : data.status;
 
-    header.appendChild(chevron);
     header.appendChild(title);
+    header.appendChild(chevron);
     header.appendChild(status);
 
     const preview = document.createElement('div');
@@ -115,7 +102,7 @@ export function buildCardElement(data: ToolResultRenderData): HTMLElement {
     header.addEventListener('click', () => {
         const isExpanded = chevron.getAttribute('data-expanded') === 'true';
         chevron.setAttribute('data-expanded', String(!isExpanded));
-        chevron.textContent = isExpanded ? '▸' : '▾';
+        chevron.textContent = isExpanded ? '⌄' : '⌃';
         preview.setAttribute('data-visible', String(!isExpanded));
     });
 
