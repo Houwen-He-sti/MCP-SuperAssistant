@@ -500,3 +500,99 @@ describe('createFunctionCallScanner — buffer cap', () => {
         assert.equal(MAX_PATCH_BUFFER_SIZE, 128 * 1024);
     });
 });
+
+// ============================================================================
+// Regression tests for Gate 5d bug fixes
+// ============================================================================
+
+describe('Gate 5d regression: metadata patch false-positive (Bug C)', () => {
+    // These tests reproduce the exact false-positive scenario from Gate 5d:
+    // Notion metadata patches (agent-inference block creation) contain
+    // "function_call" and "name" keywords in their metadata fields, which
+    // triggered detectFunctionCall() but produced identity: null.
+
+    const METADATA_PATCH_BLOCK_TYPE = JSON.stringify({
+        type: 'patch',
+        v: [{
+            o: 'a',
+            p: '/s/-',
+            v: {
+                id: 'abc123',
+                type: 'agent-inference',
+                name: 'function_call response',
+            },
+        }],
+    });
+
+    const METADATA_PATCH_WITH_FC_KEYWORD = JSON.stringify({
+        type: 'patch',
+        v: [{
+            o: 'a',
+            p: '/s/11/properties',
+            v: {
+                description: 'This block contains a function_call result with name mapping',
+            },
+        }],
+    });
+
+    test('metadata patch with "function_call" and "name" in values → detected: false', () => {
+        const scanner = createFunctionCallScanner();
+        const result = scanner.processLine(METADATA_PATCH_BLOCK_TYPE);
+        assert.equal(result.detected, false, 'metadata patch should NOT be detected as function call');
+        assert.equal(result.identity, null);
+        assert.equal(result.accumulating, false);
+    });
+
+    test('metadata patch with "function_call" keyword in description → detected: false', () => {
+        const scanner = createFunctionCallScanner();
+        const result = scanner.processLine(METADATA_PATCH_WITH_FC_KEYWORD);
+        assert.equal(result.detected, false, 'metadata description should NOT trigger detection');
+        assert.equal(result.identity, null);
+    });
+
+    test('metadata patch during accumulation does not abort accumulation', () => {
+        const scanner = createFunctionCallScanner();
+
+        // Start accumulating with a real function_call_start content patch
+        const startPatch = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/5/value/0/content',
+                v: '{"type":"function_call_start","name":"echo","call_id":"gate5d-1"}\n',
+            }],
+        });
+        const r1 = scanner.processLine(startPatch);
+        assert.equal(r1.accumulating, true, 'should start accumulating');
+
+        // Metadata patch arrives mid-accumulation — must NOT abort
+        const r2 = scanner.processLine(METADATA_PATCH_BLOCK_TYPE);
+        assert.equal(r2.accumulating, true, 'metadata patch should not interrupt accumulation');
+        assert.equal(r2.detected, false);
+
+        // Content patch completes the function call
+        const endPatch = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/5/value/0/content',
+                v: '{"type":"function_call_end","call_id":"gate5d-1"}\n',
+            }],
+        });
+        const r3 = scanner.processLine(endPatch);
+        assert.equal(r3.detected, true, 'should detect after end patch');
+        assert.ok(r3.identity !== null);
+        assert.equal(r3.identity!.name, 'echo');
+        assert.equal(r3.identity!.callId, 'gate5d-1');
+    });
+
+    test('unknown-format fallback only fires for non-patch lines', () => {
+        // A non-patch line with function_call keywords but no parseable identity
+        // should still produce detected: true with identity: null (legacy behavior)
+        const scanner = createFunctionCallScanner();
+        const weirdLine = '{"data":"contains function_call and name keywords but not a real call"}';
+        const result = scanner.processLine(weirdLine);
+        assert.equal(result.detected, true, 'non-patch unknown format should still detect');
+        assert.equal(result.identity, null, 'but identity should be null');
+    });
+});
