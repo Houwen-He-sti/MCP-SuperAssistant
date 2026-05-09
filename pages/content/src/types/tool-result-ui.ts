@@ -11,7 +11,8 @@ export type ToolResultUiEventType =
     | 'tool_execution_completed'
     | 'tool_result_submitted'
     | 'model_ack_confirmed'
-    | 'model_ack_timeout';
+    | 'model_ack_timeout'
+    | 'prompt_config';
 
 export interface ToolResultUiEvent {
     type: ToolResultUiEventType;
@@ -21,6 +22,7 @@ export interface ToolResultUiEvent {
     nonce?: string;
     latencyMs?: number;
     details?: unknown;
+    kind?: 'tool_result' | 'prompt';
 }
 
 /**
@@ -48,4 +50,6 @@ export interface ToolResultRenderData {
     rawResult?: string;
     error?: string;
     timestamp: number;
+    kind?: 'tool_result' | 'prompt';
+    title?: string;
 }
