@@ -2,8 +2,13 @@
 
 ## 目标
 
-证明 AI 模型在下一轮回复中**实际消费了**注入的 tool result。  
-Gate 5c 已证明 bridge pipeline 能 submit result，但无法确认 model 是否真的基于该 result 继续推理。
+### Gate 5c.1: Bridge Handoff ACK (已完成)
+在工具结果提交后附带 nonce + 指令，让 bridge 层能追踪 handoff 事件。
+Production wiring 已完成：`streamToolBridgeInit.ts` 创建 ackTracker 并注入 handler。
+
+### Gate 5d: Cross-Turn Model ACK (foundation only)
+提供 `ackTracker.scanText()` 能力，用于在模型下一轮输出中检测 ACK nonce。
+**生产 stream scanning 尚未接入** — interceptor 不 emit raw text chunk，需后续 PR。
 
 ## 非目标
 
@@ -135,9 +140,9 @@ interface ModelAckEvent {
 ### Gate 5d
 
 5. ✅ ACK tracker 注册 pending nonce
-6. ✅ 下一轮 stream 输出中检测到 nonce → emit `model_ack_confirmed`
+6. ✅ scanText 检测到 nonce → emit `model_ack_confirmed`（foundation 层面已验证）
 7. ✅ 超时后 → emit `model_ack_timeout`
-8. ✅ E2E: 用真实 Notion AI 验证 ACK 出现率
+8. ⬜ E2E: 用真实 Notion AI 验证 ACK 出现率（需先接入 scanText 到生产 stream）
 
 ---
 
@@ -156,7 +161,7 @@ interface ModelAckEvent {
 ## 测试矩阵 (per testing-strategy.md)
 
 Unit tests:
-- `ackTracker.test.ts`: 14 tests — nonce 生成、pending 注册/确认/超时、scanText、dispose
+- `ackTracker.test.ts`: 17 tests — nonce 生成（前缀/长度/唯一性/XML-safety）、pending 注册/确认/超时、scanText、dispose
 - `streamToolBridge.test.ts`: 73 existing tests — zero regressions (backward compat)
 
 Integration tests:
@@ -170,13 +175,14 @@ Integration tests:
   - ACK 超时: 配置时间后 emit timeout
 
 E2E / smoke tests:
-- 待 wiring 完成后用真实 Notion AI 验证 ACK 出现率
+- 待 scanText 接入生产 stream 后用真实 Notion AI 验证 ACK 出现率
 
 Manual verification:
-- 待 E2E script 实现
+- `getStreamToolBridgeInfo()` 可在 devtools 中确认 ackTrackerActive + ackPendingCount
 
 Known gaps / deferred tests:
-- streamToolBridgeInit wiring（tracker 注入到 production handler）— 需要单独 PR
+- ~~streamToolBridgeInit wiring — 已完成 (commit d41e1a9)~~
+- scanText 接入生产 stream — interceptor 需新增 `stream_chunk` 事件或 DOM Observer（后续 PR）
 - 真实 model 的 ACK 出现率统计 — 依赖 E2E infra
 
 ---
