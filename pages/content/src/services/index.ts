@@ -16,6 +16,8 @@ export {
   type ToolExecutionCompleteDetail
 } from './automation.service';
 
+export { ToolResultRenderer } from './tool-result-renderer';
+
 // Export initialization function for all services
 export async function initializeAllServices(): Promise<void> {
   logger.debug('[Services] Initializing all application services...');
@@ -24,6 +26,10 @@ export async function initializeAllServices(): Promise<void> {
     // Initialize automation service
     const { initializeAutomationService } = await import('./automation.service');
     initializeAutomationService();
+
+    // Initialize tool result renderer (independent from automation service)
+    const { ToolResultRenderer } = await import('./tool-result-renderer');
+    await ToolResultRenderer.getInstance().initialize();
     
     logger.debug('[Services] All services initialized successfully');
   } catch (error) {
@@ -40,6 +46,10 @@ export async function cleanupAllServices(): Promise<void> {
     // Cleanup automation service
     const { cleanupAutomationService } = await import('./automation.service');
     cleanupAutomationService();
+
+    // Cleanup tool result renderer
+    const { ToolResultRenderer } = await import('./tool-result-renderer');
+    ToolResultRenderer.getInstance().cleanup();
     
     logger.debug('[Services] All services cleaned up successfully');
   } catch (error) {

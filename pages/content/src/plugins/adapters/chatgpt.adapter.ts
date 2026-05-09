@@ -1,6 +1,6 @@
-import { BaseAdapterPlugin } from './base.adapter';
-import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { createLogger } from '@extension/shared/lib/logger';
+import type { AdapterCapability, PluginContext } from '../plugin-types';
+import { BaseAdapterPlugin } from './base.adapter';
 
 /**
  * ChatGPT Adapter for OpenAI ChatGPT (chatgpt.com)
@@ -56,16 +56,16 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
   private mcpPopoverRoot: any = null; // Store React root to prevent multiple roots
   private mutationObserver: MutationObserver | null = null;
   private popoverCheckInterval: NodeJS.Timeout | null = null;
-  
+
   // Setup state tracking
   private storeEventListenersSetup: boolean = false;
   private domObserversSetup: boolean = false;
   private uiIntegrationSetup: boolean = false;
-  
+
   // Instance tracking for debugging
   private static instanceCount = 0;
   private instanceId: number;
-  
+
   // Styling state tracking
   private chatgptStylesInjected: boolean = false;
 
@@ -163,14 +163,14 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
     // Final cleanup
     this.cleanupUIIntegration();
     this.cleanupDOMObservers();
-    
+
     // Remove injected ChatGPT styles
     const styleElement = document.getElementById('mcp-chatgpt-button-styles');
     if (styleElement) {
       styleElement.remove();
       this.chatgptStylesInjected = false;
     }
-    
+
     // Reset all setup flags
     this.storeEventListenersSetup = false;
     this.domObserversSetup = false;
@@ -223,7 +223,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
 
       // Create a new paragraph element with the text
       const newContent = originalContent ? originalContent + '\n' + text : text;
-      
+
       // Clear existing content and insert new content
       targetElement.innerHTML = '';
       const paragraph = document.createElement('p');
@@ -328,6 +328,30 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
   }
 
   /**
+   * [EXPERIMENTAL] Find where to inject a tool result card in the ChatGPT conversation UI.
+   * Inserts AFTER the last conversation turn (not inside it) to avoid
+   * React reconciliation removing the injected card.
+   *
+   * ⚠️ Not yet E2E verified. MCP tool interception flow has only been
+   * validated on Notion. Selectors are based on DOM analysis but may
+   * not work at runtime until ChatGPT E2E is validated.
+   */
+  findToolResultMountPoint(_event?: { callId?: string }) {
+    const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+    if (turns.length === 0) {
+      logger.debug('findToolResultMountPoint: no conversation turns found');
+      return null;
+    }
+    const lastTurn = turns[turns.length - 1] as HTMLElement;
+    // Insert after the turn wrapper, not inside it
+    if (lastTurn.parentElement) {
+      return { container: lastTurn.parentElement, anchor: lastTurn, mode: 'after' as const };
+    }
+    // Fallback: append inside (less safe but better than nothing)
+    return { container: lastTurn, mode: 'append' as const };
+  }
+
+  /**
    * Attach a file to the ChatGPT chat input
    * Enhanced with better error handling and integration with new architecture
    */
@@ -349,7 +373,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
 
       // Try to find file input element
       let fileInput: HTMLInputElement | null = options?.inputElement || null;
-      
+
       if (!fileInput) {
         fileInput = document.querySelector(this.selectors.FILE_INPUT) as HTMLInputElement;
       }
@@ -804,7 +828,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
       childList: true,
       subtree: true
     });
-    
+
     this.domObserversSetup = true;
   }
 
@@ -834,7 +858,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
     return new Promise((resolve, reject) => {
       let attempts = 0;
       const maxAttempts = 5; // Maximum 10 seconds (20 * 500ms)
-      
+
       const checkReady = () => {
         attempts++;
         const insertionPoint = this.findButtonInsertionPoint();
@@ -1024,7 +1048,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
       const reactContainer = document.createElement('div');
       reactContainer.id = 'mcp-popover-container';
       reactContainer.style.display = 'inline-block';
-      
+
       // Adjust margin based on container type
       const { container, insertAfter } = insertionPoint;
       if (container.matches('[grid-area="leading"]') || container.closest('[grid-area="leading"]')) {
@@ -1144,7 +1168,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
         try {
           // Get state from UI store - MCP enabled state should be the persistent MCP toggle state
           const uiState = context.stores.ui;
-          
+
           // Get the persistent MCP enabled state and other preferences
           const mcpEnabled = uiState?.mcpEnabled ?? false;
           const autoSubmitEnabled = uiState?.preferences?.autoSubmit ?? false;
@@ -1179,7 +1203,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
             context.logger.debug(`MCP state set to: ${enabled} via UI store`);
           } else {
             context.logger.warn('UI store setMCPEnabled method not available');
-            
+
             // Fallback: Control sidebar visibility directly if MCP state setter not available
             if (context.stores.ui?.setSidebarVisibility) {
               context.stores.ui.setSidebarVisibility(enabled, 'mcp-popover-toggle-fallback');
@@ -1279,7 +1303,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
       // Find drop zone
       const dropZoneSelectors = this.selectors.DROP_ZONE.split(', ');
       let dropZone: Element | null = null;
-      
+
       for (const selector of dropZoneSelectors) {
         dropZone = document.querySelector(selector.trim());
         if (dropZone) break;
@@ -1369,7 +1393,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
     try {
       // Check if there's an active sidebar manager
       const activeSidebarManager = (window as any).activeSidebarManager;
-      
+
       if (!activeSidebarManager) {
         this.context.logger.warn('No active sidebar manager found after navigation');
         return;
@@ -1377,7 +1401,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
 
       // Sidebar manager exists, just ensure MCP popover connection is working
       this.ensureMCPPopoverConnection();
-      
+
     } catch (error) {
       this.context.logger.error('Error checking sidebar state after navigation:', error);
     }
@@ -1388,7 +1412,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
    */
   private ensureMCPPopoverConnection(): void {
     this.context.logger.debug('Ensuring MCP popover connection after navigation');
-    
+
     try {
       // Check if MCP popover is still injected
       if (!this.isMCPPopoverInjected()) {
@@ -1414,7 +1438,7 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
     if (stillSupported) {
       // Re-inject styles after page change
       this.injectChatGPTButtonStyles();
-      
+
       // Re-setup UI integration after page change
       setTimeout(() => {
         this.setupUIIntegration();

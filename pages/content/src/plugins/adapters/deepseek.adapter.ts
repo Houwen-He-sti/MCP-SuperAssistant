@@ -1,6 +1,6 @@
-import { BaseAdapterPlugin } from './base.adapter';
-import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { createLogger } from '@extension/shared/lib/logger';
+import type { AdapterCapability, PluginContext } from '../plugin-types';
+import { BaseAdapterPlugin } from './base.adapter';
 
 /**
  * DeepSeek Adapter for DeepSeek Chat (chat.deepseek.com)
@@ -154,12 +154,12 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
       }
     }
   `;
-  
+
   // Setup state tracking
   private storeEventListenersSetup: boolean = false;
   private domObserversSetup: boolean = false;
   private uiIntegrationSetup: boolean = false;
-  
+
   // Instance tracking for debugging
   private static instanceCount = 0;
   private instanceId: number;
@@ -255,7 +255,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
     // Final cleanup
     this.cleanupUIIntegration();
     this.cleanupDOMObservers();
-    
+
     // Reset all setup flags
     this.storeEventListenersSetup = false;
     this.domObserversSetup = false;
@@ -299,7 +299,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
       if (targetElement.tagName === 'TEXTAREA') {
         const textarea = targetElement as HTMLTextAreaElement;
         const currentText = textarea.value;
-        
+
         // Append the text to the original value on a new line if there's existing content
         const newContent = currentText ? currentText + '\n\n' + text : text;
         textarea.value = newContent;
@@ -315,7 +315,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
       } else if (targetElement.getAttribute('contenteditable') === 'true') {
         // Handle contenteditable div
         const currentText = targetElement.textContent || '';
-        
+
         // Move cursor to the end
         const selection = window.getSelection();
         const range = document.createRange();
@@ -339,7 +339,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
         // Fallback for other element types
         const originalValue = (targetElement as any).value || targetElement.textContent || '';
         const newContent = originalValue ? originalValue + '\n\n' + text : text;
-        
+
         if ('value' in targetElement) {
           (targetElement as any).value = newContent;
         } else {
@@ -367,6 +367,33 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
       this.emitExecutionFailed('insertText', errorMessage);
       return false;
     }
+  }
+
+  /**
+   * [EXPERIMENTAL] Find where to inject a tool result card in the DeepSeek conversation UI.
+   * Targets the last top-level message element in the chat container.
+   * Note: DeepSeek's class names are obfuscated and may change across builds.
+   * The selectors here are best-effort for v1.
+   *
+   * ⚠️ Not yet E2E verified. MCP tool interception flow has only been
+   * validated on Notion. Selectors are based on DOM analysis but may
+   * not work at runtime until DeepSeek E2E is validated.
+   */
+  findToolResultMountPoint(_event?: { callId?: string }) {
+    // DeepSeek uses a chat message list container
+    const messageList = document.querySelector('.chat-message-list, .conversation-container');
+    if (!messageList) {
+      logger.debug('findToolResultMountPoint: no message list found');
+      return null;
+    }
+    // Find top-level direct child message elements (avoid nested decorative nodes)
+    const messages = messageList.querySelectorAll(':scope > .chat-message, :scope > .message-item, :scope > [class*="ds-chat"]');
+    if (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1] as HTMLElement;
+      return { container: messageList as HTMLElement, anchor: lastMessage, mode: 'after' as const };
+    }
+    // Fallback: append to container
+    return { container: messageList as HTMLElement, mode: 'append' as const };
   }
 
   /**
@@ -438,7 +465,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
     try {
       // Find the chat input element
       const chatInput = document.querySelector(this.selectors.CHAT_INPUT.split(', ')[0].trim()) as HTMLElement;
-      
+
       if (!chatInput) {
         this.context.logger.error('Cannot find chat input for Enter key submission');
         this.emitExecutionFailed('submitForm', 'Chat input not found for Enter key submission');
@@ -497,7 +524,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
 
       // Try to find file input element
       let fileInput: HTMLInputElement | null = null;
-      
+
       if (options?.inputElement) {
         fileInput = options.inputElement;
       } else {
@@ -778,7 +805,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
       childList: true,
       subtree: true
     });
-    
+
     this.domObserversSetup = true;
   }
 
@@ -808,7 +835,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
     return new Promise((resolve, reject) => {
       let attempts = 0;
       const maxAttempts = 5; // Maximum 10 seconds (20 * 500ms)
-      
+
       const checkReady = () => {
         attempts++;
         const insertionPoint = this.findButtonInsertionPoint();
@@ -1077,7 +1104,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
         try {
           // Get state from UI store - MCP enabled state should be the persistent MCP toggle state
           const uiState = context.stores.ui;
-          
+
           // Get the persistent MCP enabled state and other preferences
           const mcpEnabled = uiState?.mcpEnabled ?? false;
           const autoSubmitEnabled = uiState?.preferences?.autoSubmit ?? false;
@@ -1112,7 +1139,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
             context.logger.debug(`MCP state set to: ${enabled} via UI store`);
           } else {
             context.logger.warn('UI store setMCPEnabled method not available');
-            
+
             // Fallback: Control sidebar visibility directly if MCP state setter not available
             if (context.stores.ui?.setSidebarVisibility) {
               context.stores.ui.setSidebarVisibility(enabled, 'mcp-popover-toggle-fallback');
@@ -1241,7 +1268,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
     try {
       // Check if there's an active sidebar manager
       const activeSidebarManager = (window as any).activeSidebarManager;
-      
+
       if (!activeSidebarManager) {
         this.context.logger.warn('No active sidebar manager found after navigation');
         return;
@@ -1249,7 +1276,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
 
       // Sidebar manager exists, just ensure MCP popover connection is working
       this.ensureMCPPopoverConnection();
-      
+
     } catch (error) {
       this.context.logger.error('Error checking sidebar state after navigation:', error);
     }
@@ -1260,7 +1287,7 @@ export class DeepSeekAdapter extends BaseAdapterPlugin {
    */
   private ensureMCPPopoverConnection(): void {
     this.context.logger.debug('Ensuring MCP popover connection after navigation');
-    
+
     try {
       // Check if MCP popover is still injected
       if (!this.isMCPPopoverInjected()) {
