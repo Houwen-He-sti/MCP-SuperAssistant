@@ -8,13 +8,10 @@
  * - model_ack_timeout
  */
 export type ToolResultUiEventType =
-    | 'tool_execution_pending'
-    | 'tool_execution_running'
     | 'tool_execution_completed'
     | 'tool_result_submitted'
     | 'model_ack_confirmed'
-    | 'model_ack_timeout'
-    | 'prompt_config';
+    | 'model_ack_timeout';
 
 export interface ToolResultUiEvent {
     type: ToolResultUiEventType;
@@ -24,7 +21,6 @@ export interface ToolResultUiEvent {
     nonce?: string;
     latencyMs?: number;
     details?: unknown;
-    kind?: 'tool_result' | 'prompt';
 }
 
 /**
@@ -47,11 +43,9 @@ export interface ToolResultMountPoint {
 export interface ToolResultRenderData {
     callId: string;
     functionName: string;
-    status: 'pending' | 'running' | 'success' | 'error';
+    status: 'success' | 'error';
     resultPreview: string;
     rawResult?: string;
     error?: string;
     timestamp: number;
-    kind?: 'tool_result' | 'prompt';
-    title?: string;
 }
