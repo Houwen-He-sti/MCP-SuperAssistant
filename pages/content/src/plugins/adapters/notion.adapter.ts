@@ -787,15 +787,14 @@ export class NotionAdapter extends BaseAdapterPlugin {
         if (!input) return null;
 
         let current: HTMLElement | null = input.parentElement;
-        let best: HTMLElement | null = null;
         for (let depth = 0; depth < 8 && current && current !== root; depth++) {
             const rect = current.getBoundingClientRect();
             if (rect.width >= 500 && rect.width <= 900 && rect.height >= 80) {
-                best = current;
+                return current;
             }
             current = current.parentElement;
         }
-        return best;
+        return null;
     }
 
     /**
