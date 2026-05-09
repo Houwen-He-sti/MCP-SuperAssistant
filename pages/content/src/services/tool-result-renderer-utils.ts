@@ -10,9 +10,26 @@
 export const MAX_PREVIEW_LENGTH = 500;
 export const MAX_RAW_LENGTH = 10_000;
 
-export type ToolResultDisplayStatus = 'pending' | 'running' | 'success' | 'error';
-
 // ── Types ──
+
+interface ExecutionLike {
+    id?: string;
+    callId?: string;
+    toolCallId?: string;
+    functionName?: string;
+    toolName?: string;
+    name?: string;
+    result?: unknown;
+}
+
+interface ToolCallLike {
+    call_id?: string;
+    callId?: string;
+    id?: string;
+    name?: string;
+    functionName?: string;
+    toolName?: string;
+}
 
 /** Input detail from mcp:tool-execution-complete event */
 export interface ToolExecutionDetail {
@@ -23,34 +40,25 @@ export interface ToolExecutionDetail {
     confirmationText?: string;
     skipAutoInsertCheck?: boolean;
 
-    // Optional lifecycle status for future pending/running UI events.
-    status?: ToolResultDisplayStatus;
-
-    // Known identity aliases across the browser bridge / local MCP paths.
+    // Known identity aliases across direct and nested browser bridge payloads.
     callId?: string;
     toolCallId?: string;
-    id?: string;
     functionName?: string;
     toolName?: string;
     name?: string;
-
-    // Optional prompt-card path. Prompt cards use the same frame renderer.
-    prompt?: string;
-    title?: string;
-    kind?: 'tool_result' | 'prompt';
+    execution?: ExecutionLike;
+    toolCall?: ToolCallLike;
 }
 
 /** Validated and extracted data ready for rendering */
 export interface ToolResultRenderData {
     callId: string;
     functionName: string;
-    status: ToolResultDisplayStatus;
+    status: 'success' | 'error';
     resultPreview: string;
     rawResult?: string;
     error?: string;
     timestamp: number;
-    kind?: 'tool_result' | 'prompt';
-    title?: string;
 }
 
 // ── Pure functions ──
@@ -82,7 +90,12 @@ export function truncatePreview(text: string, maxLength: number = MAX_PREVIEW_LE
 export function extractCallId(detail: ToolExecutionDetail): string {
     return detail.callId
         || detail.toolCallId
-        || detail.id
+        || detail.execution?.callId
+        || detail.execution?.toolCallId
+        || detail.execution?.id
+        || detail.toolCall?.callId
+        || detail.toolCall?.call_id
+        || detail.toolCall?.id
         || `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -90,11 +103,18 @@ export function extractFunctionName(detail: ToolExecutionDetail): string {
     return detail.functionName
         || detail.toolName
         || detail.name
+        || detail.execution?.functionName
+        || detail.execution?.toolName
+        || detail.execution?.name
+        || detail.toolCall?.functionName
+        || detail.toolCall?.toolName
+        || detail.toolCall?.name
         || 'unknown_tool';
 }
 
-function isDisplayStatus(value: unknown): value is ToolResultDisplayStatus {
-    return value === 'pending' || value === 'running' || value === 'success' || value === 'error';
+export function extractResult(detail: ToolExecutionDetail): unknown {
+    if (detail.result !== undefined && detail.result !== null) return detail.result;
+    return detail.execution?.result;
 }
 
 /**
@@ -110,42 +130,28 @@ export function extractRenderData(
         return null;
     }
 
-    const kind = detail.kind || (detail.prompt ? 'prompt' : 'tool_result');
     const callId = extractCallId(detail);
-    const functionName = kind === 'prompt'
-        ? (detail.title || 'SuperAssistant Bridge prompt')
-        : extractFunctionName(detail);
-
-    const hasPrompt = detail.prompt !== undefined && detail.prompt !== null;
-    const hasResult = detail.result !== undefined && detail.result !== null;
+    const functionName = extractFunctionName(detail);
+    const result = extractResult(detail);
+    const hasResult = result !== undefined && result !== null;
     const hasConfirmation = !!detail.confirmationText;
 
-    const rawSource = hasPrompt
-        ? detail.prompt
-        : hasResult
-            ? stringifyToolResult(detail.result)
-            : undefined;
-
-    const rawResult = rawSource !== undefined ? stringifyToolResult(rawSource) : undefined;
+    const rawResult = hasResult ? stringifyToolResult(result) : undefined;
     const resultPreview = rawResult !== undefined
         ? truncatePreview(rawResult, MAX_PREVIEW_LENGTH)
         : (detail.confirmationText || '');
 
-    // mcp:tool-execution-complete is normally a completion event, but future
-    // renderer events may explicitly pass pending/running for pre-result UI.
-    const explicitStatus = isDisplayStatus(detail.status) ? detail.status : undefined;
-    const inferredError = !hasResult && !hasPrompt && !hasConfirmation;
-    const status = explicitStatus || (inferredError ? 'error' : 'success');
+    // mcp:tool-execution-complete is already a completion event.
+    // Only mark as error if there's no result AND no confirmation.
+    const isError = !hasResult && !hasConfirmation;
 
     return {
         callId,
         functionName,
-        status,
+        status: isError ? 'error' : 'success',
         resultPreview,
         rawResult: rawResult !== undefined ? truncatePreview(rawResult, MAX_RAW_LENGTH) : undefined,
-        error: status === 'error' ? 'No result returned' : undefined,
+        error: isError ? 'No result returned' : undefined,
         timestamp: Date.now(),
-        kind,
-        title: detail.title,
     };
 }
