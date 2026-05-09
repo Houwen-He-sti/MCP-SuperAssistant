@@ -49,7 +49,10 @@ const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
 let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG };
 let bridgeHandler: ((event: unknown) => Promise<void>) | null = null;
 let unsubscribe: (() => void) | null = null;
+let unsubscribeTextScan: (() => void) | null = null;
 let ackTrackerInstance: AckTracker | null = null;
+/** StreamId of the last bridge handoff — text scan skips this stream (GPT P1-4). */
+let lastHandoffStreamId: string | null = null;
 
 /** Default ACK timeout (ms) — how long to wait for model to echo nonce. */
 const ACK_TIMEOUT_MS = 30_000;
@@ -117,6 +120,15 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     unsubscribe = null;
   }
 
+  // Unsubscribe previous text scan listener if any
+  if (unsubscribeTextScan) {
+    unsubscribeTextScan();
+    unsubscribeTextScan = null;
+  }
+
+  // Reset handoff stream tracking
+  lastHandoffStreamId = null;
+
   // Dispose previous ackTracker if any (clears pending timeouts)
   if (ackTrackerInstance) {
     ackTrackerInstance.dispose();
@@ -150,6 +162,8 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     onEvent: (event: BridgeEvent) => {
       // Log bridge events to console for observability
       if (event.type === 'bridge_handoff_ack') {
+        // Track the stream that triggered handoff — text scan skips this stream
+        lastHandoffStreamId = event.streamId;
         console.debug('[StreamToolBridge]', 'bridge_handoff_ack', event.nonce, event.functionName);
       } else {
         const level = event.status === 'failed' ? 'warn' : 'debug';
@@ -163,13 +177,33 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     // Install the MAIN world bridge listener if not already done
     installMainWorldStreamBridge();
     // Send cutoff config to MAIN world (independent of execution enabled)
+    // Gate 5d: enable stream_chunk_text emission for ACK scanning
     sendConfigToMainWorld({
       enabled: currentConfig.cutoffEnabled,
       mode: undefined, // cutoff mode managed by bridge config, not tool bridge
+      emitChunkText: true,
     });
     unsubscribe = onStreamEventBridge(bridgeHandler);
   } else {
     unsubscribe = onStreamEventIsolated(bridgeHandler);
+  }
+
+  // Gate 5d: Register text scan listener for ACK nonce detection
+  // Scans stream_chunk_text events for pending nonces in raw NDJSON text.
+  // Skips the handoff stream (same-stream echo) per GPT P1-4.
+  const textScanHandler = (event: unknown): void => {
+    const e = event as { type?: string; streamId?: string; text?: string };
+    if (e?.type !== 'stream_chunk_text' || typeof e.text !== 'string') return;
+    if (!ackTrackerInstance || ackTrackerInstance.getPendingCount() === 0) return;
+    // Skip scanning the same stream that triggered the handoff
+    if (e.streamId && e.streamId === lastHandoffStreamId) return;
+    ackTrackerInstance.scanRawText(e.text);
+  };
+
+  if (isNotionHost()) {
+    unsubscribeTextScan = onStreamEventBridge(textScanHandler as any);
+  } else {
+    unsubscribeTextScan = onStreamEventIsolated(textScanHandler as any);
   }
 }
 

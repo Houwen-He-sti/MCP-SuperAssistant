@@ -49,6 +49,7 @@ const VALID_EVENT_TYPES = new Set([
   'function_call',
   'stream_cutoff',
   'stream_drain_complete',
+  'stream_chunk_text',
 ]);
 
 /** Max raw line length we'll accept */
@@ -148,6 +149,21 @@ function validateStreamEvent(raw: Record<string, unknown>): StreamEvent | null {
         droppedBytes: typeof raw.droppedBytes === 'number' ? raw.droppedBytes : 0,
         drainDurationMs: typeof raw.drainDurationMs === 'number' ? raw.drainDurationMs : 0,
         timedOut: typeof raw.timedOut === 'boolean' ? raw.timedOut : false,
+      };
+    }
+
+    case 'stream_chunk_text': {
+      const text = raw.text;
+      if (typeof text !== 'string' || text.length === 0 || text.length > MAX_RAW_LINE_LENGTH) {
+        logger.warn('Rejected stream_chunk_text: invalid text');
+        return null;
+      }
+      return {
+        type: 'stream_chunk_text',
+        streamId,
+        text,
+        chunkIndex: typeof raw.chunkIndex === 'number' ? raw.chunkIndex : 0,
+        truncated: typeof raw.truncated === 'boolean' ? raw.truncated : false,
       };
     }
 
@@ -260,6 +276,7 @@ export function sendConfigToMainWorld(config: Partial<StreamCutoffConfig>): void
         cutoffMode: config.mode,
         requireStructuredIdentity: config.requireStructuredIdentity,
         maxDrainMs: config.maxDrainMs,
+        emitChunkText: config.emitChunkText,
       },
     },
     window.location.origin,

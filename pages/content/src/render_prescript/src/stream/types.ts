@@ -60,6 +60,18 @@ export interface StreamLifecycleEvent {
   totalChunks?: number;
 }
 
+/** Event emitted for raw NDJSON line text (Gate 5d — ACK scanning) */
+export interface StreamChunkTextEvent {
+  type: 'stream_chunk_text';
+  streamId: string;
+  /** Raw NDJSON line text (bounded, may be truncated) */
+  text: string;
+  /** Chunk index within the stream */
+  chunkIndex: number;
+  /** Whether the text was truncated to fit MAX_RAW_LINE_LENGTH */
+  truncated: boolean;
+}
+
 /** Configuration for Phase 2 stream cutoff */
 export interface StreamCutoffConfig {
   /** Whether cutoff is enabled */
@@ -71,8 +83,10 @@ export interface StreamCutoffConfig {
   requireStructuredIdentity: boolean;
   /** Max milliseconds to drain background stream before force-cancel. Default: 30000 */
   maxDrainMs: number;
+  /** Gate 5d: emit stream_chunk_text events for ACK scanning. Default: false */
+  emitChunkText?: boolean;
 }
 
-export type StreamEvent = StreamFunctionCallEvent | StreamCutoffEvent | StreamDrainCompleteEvent | StreamLifecycleEvent;
+export type StreamEvent = StreamFunctionCallEvent | StreamCutoffEvent | StreamDrainCompleteEvent | StreamLifecycleEvent | StreamChunkTextEvent;
 
 export type StreamEventListener = (event: StreamEvent) => void;

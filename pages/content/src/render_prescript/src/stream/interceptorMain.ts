@@ -71,7 +71,8 @@ if ((window as any)[INSTALL_KEY]) {
         | 'stream_error'
         | 'function_call'
         | 'stream_cutoff'
-        | 'stream_drain_complete';
+        | 'stream_drain_complete'
+        | 'stream_chunk_text';
 
     interface StreamEventPayload {
         type: StreamEventType;
@@ -92,6 +93,8 @@ if ((window as any)[INSTALL_KEY]) {
         cutoffMode: 'drain-drop' | 'cancel';
         requireStructuredIdentity: boolean;
         maxDrainMs: number;
+        /** Gate 5d: emit stream_chunk_text events for ACK scanning. Default: false */
+        emitChunkText: boolean;
     }
 
     // ============================================================================
@@ -111,6 +114,7 @@ if ((window as any)[INSTALL_KEY]) {
         cutoffMode: 'drain-drop',
         requireStructuredIdentity: true,
         maxDrainMs: 30000,
+        emitChunkText: false,
     };
 
     // ============================================================================
@@ -174,6 +178,7 @@ if ((window as any)[INSTALL_KEY]) {
                 if (cfg.cutoffMode === 'drain-drop' || cfg.cutoffMode === 'cancel') config.cutoffMode = cfg.cutoffMode;
                 if (typeof cfg.requireStructuredIdentity === 'boolean') config.requireStructuredIdentity = cfg.requireStructuredIdentity;
                 if (typeof cfg.maxDrainMs === 'number' && cfg.maxDrainMs > 0) config.maxDrainMs = cfg.maxDrainMs;
+                if (typeof cfg.emitChunkText === 'boolean') config.emitChunkText = cfg.emitChunkText;
                 lastAppliedConfigSeq = incomingSeq;
                 // eslint-disable-next-line no-console
                 console.log('[MCP-SA/MAIN] Config applied (seq=%d):', lastAppliedConfigSeq, config);
@@ -186,6 +191,29 @@ if ((window as any)[INSTALL_KEY]) {
     // Parser / Scanner — imported from ./functionCallScanner.ts
     // (pure logic module, bundled by Vite into the IIFE)
     // ============================================================================
+
+    // ============================================================================
+    // Gate 5d: Chunk Text Emission Helper (shared by both stream paths)
+    // Emits raw NDJSON line text for ACK scanning. Fire-and-forget — does not
+    // affect stream data flow, function_call detection, or cutoff behavior.
+    // ============================================================================
+
+    function maybeEmitChunkText(
+        streamId: string,
+        chunkIndex: number,
+        line: string,
+    ): void {
+        if (!config.emitChunkText) return;
+        const truncated = line.length > MAX_RAW_LINE_LENGTH;
+        const text = truncated ? line.slice(0, MAX_RAW_LINE_LENGTH) : line;
+        emit({
+            type: 'stream_chunk_text',
+            streamId,
+            text,
+            chunkIndex,
+            truncated,
+        });
+    }
 
     // ============================================================================
     // Background Drain (Phase 2)
@@ -319,6 +347,8 @@ if ((window as any)[INSTALL_KEY]) {
                             if (trimmed.length === 0) continue;
                             if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
+                            maybeEmitChunkText(streamId, chunkIndex, trimmed);
+
                             const result = scanner.processLine(trimmed);
                             if (result.accumulating) continue; // Need more patches
                             if (result.detected) {
@@ -423,6 +453,8 @@ if ((window as any)[INSTALL_KEY]) {
                             const trimmed = line.trim();
                             if (trimmed.length === 0) continue;
                             if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
+
+                            maybeEmitChunkText(streamId, chunkIndex, trimmed);
 
                             const result = scanner.processLine(trimmed);
                             if (result.accumulating) continue; // Need more patches
