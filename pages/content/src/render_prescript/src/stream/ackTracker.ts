@@ -38,6 +38,8 @@ export interface AckTracker {
     confirmAck(nonce: string): void;
     hasPending(nonce: string): boolean;
     scanText(text: string): void;
+    /** Scan raw NDJSON text for pending nonces via substring match (handles JSON escaping). */
+    scanRawText(text: string): void;
     getPendingCount(): number;
     dispose(): void;
 }
@@ -124,6 +126,15 @@ export function createAckTracker(config: AckTrackerConfig): AckTracker {
         }
     }
 
+    function scanRawText(text: string): void {
+        if (pending.size === 0) return;
+        for (const nonce of pending.keys()) {
+            if (text.includes(nonce)) {
+                confirmAck(nonce);
+            }
+        }
+    }
+
     function getPendingCount(): number {
         return pending.size;
     }
@@ -135,5 +146,5 @@ export function createAckTracker(config: AckTrackerConfig): AckTracker {
         pending.clear();
     }
 
-    return { registerPending, confirmAck, hasPending, scanText, getPendingCount, dispose };
+    return { registerPending, confirmAck, hasPending, scanText, scanRawText, getPendingCount, dispose };
 }

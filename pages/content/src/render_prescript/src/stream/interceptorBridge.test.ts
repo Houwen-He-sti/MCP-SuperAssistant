@@ -20,6 +20,7 @@ const SOURCE_ID = 'notion-main-fetch-interceptor';
 const VALID_EVENT_TYPES = new Set([
   'stream_start', 'stream_end', 'stream_error',
   'function_call', 'stream_cutoff', 'stream_drain_complete',
+  'stream_chunk_text',
 ]);
 const MAX_RAW_LINE_LENGTH = 65536;
 
@@ -56,6 +57,10 @@ function isValidStreamEvent(raw: Record<string, unknown>): boolean {
     case 'stream_cutoff':
     case 'stream_drain_complete':
       return true;
+
+    case 'stream_chunk_text':
+      return typeof raw.text === 'string' && raw.text.length > 0 && raw.text.length <= MAX_RAW_LINE_LENGTH
+        && typeof raw.chunkIndex === 'number' && Number.isSafeInteger(raw.chunkIndex) && (raw.chunkIndex as number) >= 0;
 
     default:
       return false;
@@ -218,6 +223,74 @@ describe('interceptorBridge validation', () => {
         identity: null, chunkIndex: 1, elapsedMs: 10,
       });
       assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), true);
+    });
+
+    test('accepts stream_chunk_text with valid text', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'notion-ai-5',
+        text: '{"type":"text","value":"hello world"}',
+        chunkIndex: 3, truncated: false,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), true);
+    });
+
+    test('accepts stream_chunk_text with nonce in text', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'notion-ai-5',
+        text: '{"type":"text","value":"<mcp_ack nonce=\\"ack_call123_1a\\" />"}',
+        chunkIndex: 5, truncated: false,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), true);
+    });
+  });
+
+  describe('stream_chunk_text validation', () => {
+    test('rejects stream_chunk_text with empty text', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: '', chunkIndex: 0,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with oversized text', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 'a'.repeat(MAX_RAW_LINE_LENGTH + 1), chunkIndex: 0,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text without text field', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        chunkIndex: 0,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with non-string text', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 12345, chunkIndex: 0,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with negative chunkIndex', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 'valid text', chunkIndex: -1,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with missing chunkIndex', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 'valid text',
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
     });
   });
 

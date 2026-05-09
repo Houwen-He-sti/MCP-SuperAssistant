@@ -212,4 +212,86 @@ describe('createAckTracker', () => {
         tracker.confirmAck('ack_a');
         assert.equal(tracker.getPendingCount(), 1);
     });
+
+    // --- scanRawText tests (Gate 5d) ---
+
+    test('scanRawText confirms pending nonce found in raw NDJSON text', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        tracker.registerPending('ack_call123_1a', 'call_123', 'get_weather');
+
+        // Simulate raw NDJSON line with JSON-escaped quotes
+        const rawLine = '{"type":"text","value":"<mcp_ack nonce=\\"ack_call123_1a\\" />"}';
+        tracker.scanRawText(rawLine);
+
+        assert.equal(events.length, 1);
+        assert.equal(events[0].type, 'model_ack_confirmed');
+        assert.equal(events[0].nonce, 'ack_call123_1a');
+    });
+
+    test('scanRawText confirms nonce in unescaped text', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        tracker.registerPending('ack_testcall_5', 'test_call', 'search');
+
+        const plainText = 'The model output contains ack_testcall_5 in its response.';
+        tracker.scanRawText(plainText);
+
+        assert.equal(events.length, 1);
+        assert.equal(events[0].type, 'model_ack_confirmed');
+        assert.equal(events[0].nonce, 'ack_testcall_5');
+    });
+
+    test('scanRawText no-op when no pending nonces', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        // No registerPending — getPendingCount() === 0
+        tracker.scanRawText('some text with ack_whatever_1');
+
+        assert.equal(events.length, 0);
+    });
+
+    test('scanRawText no-op when text has no matching nonce', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        tracker.registerPending('ack_abc_1', 'call_abc', 'tool_x');
+
+        tracker.scanRawText('This text has no nonce in it at all.');
+
+        assert.equal(events.length, 0);
+        assert.ok(tracker.hasPending('ack_abc_1'));
+    });
+
+    test('scanRawText confirms multiple pending nonces in one text', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        tracker.registerPending('ack_first_0', 'call_1', 'tool_a');
+        tracker.registerPending('ack_second_1', 'call_2', 'tool_b');
+
+        const text = 'Found ack_first_0 and also ack_second_1 here.';
+        tracker.scanRawText(text);
+
+        assert.equal(events.length, 2);
+        const nonces = events.map(e => e.nonce).sort();
+        assert.deepEqual(nonces, ['ack_first_0', 'ack_second_1']);
+    });
+
+    test('scanRawText ignores non-pending ack-like strings', () => {
+        const events: ModelAckEvent[] = [];
+        const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+        tracker.registerPending('ack_real_1', 'call_r', 'tool_r');
+
+        // Text contains a different ack_ string that is not pending
+        const text = 'Text has ack_fake_999 but not the real one.';
+        tracker.scanRawText(text);
+
+        assert.equal(events.length, 0);
+        assert.ok(tracker.hasPending('ack_real_1'));
+    });
 });
