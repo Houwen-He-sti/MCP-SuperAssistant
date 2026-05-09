@@ -16,6 +16,7 @@
     "build:interceptor-main": "vite build --config vite.interceptor-main.config.mts",
     "dev": "vite build --mode development",
     "test:render-prescript": "node --test --experimental-strip-types src/render_prescript/src/parser/functionCallValidator.test.mjs src/render_prescript/src/stream/functionCallScanner.test.ts",
+    "test:tool-result-renderer": "node --test --experimental-strip-types src/services/tool-result-renderer.test.ts",
     "lint": "eslint .",
     "lint:fix": "pnpm lint --fix",
     "prettier": "prettier . --write --ignore-path ../../.prettierignore",

@@ -328,6 +328,21 @@ export class ChatGPTAdapter extends BaseAdapterPlugin {
   }
 
   /**
+   * Find where to inject a tool result card in the ChatGPT conversation UI.
+   * Targets the last conversation turn (assistant message) in the chat.
+   */
+  findToolResultMountPoint(_event?: { callId?: string }) {
+    // Find all conversation turns, target the last one (most recent)
+    const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+    if (turns.length === 0) {
+      logger.debug('findToolResultMountPoint: no conversation turns found');
+      return null;
+    }
+    const lastTurn = turns[turns.length - 1] as HTMLElement;
+    return { container: lastTurn, mode: 'append' as const };
+  }
+
+  /**
    * Attach a file to the ChatGPT chat input
    * Enhanced with better error handling and integration with new architecture
    */

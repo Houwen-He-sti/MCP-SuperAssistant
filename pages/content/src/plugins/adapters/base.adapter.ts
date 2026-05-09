@@ -4,6 +4,7 @@ import type {
   AdapterCapability, 
   DetectedTool 
 } from '../plugin-types';
+import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 
 /**
  * BaseAdapterPlugin provides a foundational class for all adapter plugins.
@@ -122,6 +123,15 @@ export abstract class BaseAdapterPlugin implements AdapterPlugin {
     this.context.logger.debug(`onHostChanged (Base): from ${oldHost || 'N/A'} to ${newHost}`);
     // Base implementation could re-check isSupported or trigger adapter re-evaluation
     // For example, if an adapter is only for a specific path on a host.
+  }
+
+  /**
+   * Find where to inject a tool result card in the conversation UI.
+   * Override in concrete adapters to provide platform-specific mount points.
+   * Returns null if no suitable mount point is found (fail-soft).
+   */
+  findToolResultMountPoint(_event?: { callId?: string }): ToolResultMountPoint | null {
+    return null;
   }
 
   /**
