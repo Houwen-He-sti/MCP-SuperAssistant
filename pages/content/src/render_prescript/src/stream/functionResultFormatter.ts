@@ -87,3 +87,13 @@ export function formatFunctionResult(opts: FormatResultOptions): string {
   }
   return formatSuccess(callId, name, body);
 }
+
+// --- ACK Instruction (Gate 5c.1) ---
+
+/**
+ * Append an ACK instruction block to a formatted function result.
+ * The model is asked to echo the nonce in its next response to confirm consumption.
+ */
+export function appendAckInstruction(formatted: string, nonce: string): string {
+  return `${formatted}\n<result_nonce>${nonce}</result_nonce>\n<instruction>In your next response, include verbatim: <mcp_ack nonce="${nonce}" /></instruction>`;
+}

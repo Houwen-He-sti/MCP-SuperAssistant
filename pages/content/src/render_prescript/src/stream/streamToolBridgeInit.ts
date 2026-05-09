@@ -9,14 +9,15 @@ import { executionGuardStore, reserveExecution } from '../mcpexecute/executionGu
 import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/storage';
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
 import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
+import { createAckTracker, type AckTracker } from './ackTracker';
 import {
   createStreamToolHandler,
   getAdapterDiagnostic,
   type AdapterLike,
   type AdapterStatus,
+  type BridgeEvent,
   type McpClientLike,
   type StreamToolBridgeConfig,
-  type StreamToolExecutionEvent,
 } from './streamToolBridge';
 
 /**
@@ -48,6 +49,10 @@ const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
 let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG };
 let bridgeHandler: ((event: unknown) => Promise<void>) | null = null;
 let unsubscribe: (() => void) | null = null;
+let ackTrackerInstance: AckTracker | null = null;
+
+/** Default ACK timeout (ms) — how long to wait for model to echo nonce. */
+const ACK_TIMEOUT_MS = 30_000;
 
 /**
  * Resolve the current adapter from MAIN-world globals.
@@ -57,10 +62,16 @@ function resolveCurrentAdapter(): AdapterLike | null {
   const win = window as Record<string, unknown>;
 
   // 1. pluginRegistry path
-  const registry = win.pluginRegistry as { getActivePlugin?: () => { adapter?: AdapterLike } | null } | undefined;
+  const registry = win.pluginRegistry as { getActivePlugin?: () => Record<string, unknown> | null } | undefined;
   if (registry?.getActivePlugin) {
     const plugin = registry.getActivePlugin();
-    if (plugin?.adapter) return plugin.adapter;
+    if (plugin) {
+      // 1a. plugin.adapter property (legacy shape)
+      const nested = plugin.adapter as AdapterLike | undefined;
+      if (nested && typeof nested.insertText === 'function') return nested;
+      // 1b. plugin IS the adapter (BaseAdapterPlugin pattern)
+      if (typeof plugin.insertText === 'function') return plugin as unknown as AdapterLike;
+    }
   }
 
   // 2. mcpAdapter global
@@ -106,6 +117,21 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     unsubscribe = null;
   }
 
+  // Dispose previous ackTracker if any (clears pending timeouts)
+  if (ackTrackerInstance) {
+    ackTrackerInstance.dispose();
+    ackTrackerInstance = null;
+  }
+
+  // Create ACK tracker for cross-turn nonce tracking (Gate 5c.1)
+  ackTrackerInstance = createAckTracker({
+    timeoutMs: ACK_TIMEOUT_MS,
+    onEvent: (event) => {
+      const level = event.type === 'model_ack_timeout' ? 'warn' : 'debug';
+      console[level]('[AckTracker]', event.type, event.nonce, event.functionName);
+    },
+  });
+
   // Create handler with direct module imports for guard/storage,
   // lazy resolution for mcpClient and adapter (may not be available at init time)
   bridgeHandler = createStreamToolHandler({
@@ -120,10 +146,15 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
       storeExecutedFunction,
       generateContentSignature,
     },
-    onEvent: (event: StreamToolExecutionEvent) => {
+    ackTracker: ackTrackerInstance,
+    onEvent: (event: BridgeEvent) => {
       // Log bridge events to console for observability
-      const level = event.status === 'failed' ? 'warn' : 'debug';
-      console[level]('[StreamToolBridge]', event.status, event.phase || '', event.errorCode || '');
+      if (event.type === 'bridge_handoff_ack') {
+        console.debug('[StreamToolBridge]', 'bridge_handoff_ack', event.nonce, event.functionName);
+      } else {
+        const level = event.status === 'failed' ? 'warn' : 'debug';
+        console[level]('[StreamToolBridge]', event.status, event.phase || '', event.errorCode || '');
+      }
     },
   });
 
@@ -166,6 +197,8 @@ export function getStreamToolBridgeInfo(): {
   adapterStatus: AdapterStatus;
   inputEmpty: boolean | null;
   inputTextLength: number | null;
+  ackTrackerActive: boolean;
+  ackPendingCount: number;
 } {
   const mcpClient = resolveMcpClient();
   const currentAdapter = resolveCurrentAdapter();
@@ -178,5 +211,7 @@ export function getStreamToolBridgeInfo(): {
     mcpClientAvailable: mcpClient !== null,
     mcpClientReady: mcpClient !== null && mcpClient.isReady(),
     ...adapterDiag,
+    ackTrackerActive: ackTrackerInstance !== null,
+    ackPendingCount: ackTrackerInstance?.getPendingCount() ?? 0,
   };
 }
