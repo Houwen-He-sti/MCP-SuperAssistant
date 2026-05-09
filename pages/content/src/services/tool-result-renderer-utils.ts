@@ -10,6 +10,8 @@
 export const MAX_PREVIEW_LENGTH = 500;
 export const MAX_RAW_LENGTH = 10_000;
 
+export type ToolResultDisplayStatus = 'pending' | 'running' | 'success' | 'error';
+
 // ── Types ──
 
 /** Input detail from mcp:tool-execution-complete event */
@@ -20,6 +22,9 @@ export interface ToolExecutionDetail {
     fileName?: string;
     confirmationText?: string;
     skipAutoInsertCheck?: boolean;
+
+    // Optional lifecycle status for future pending/running UI events.
+    status?: ToolResultDisplayStatus;
 
     // Known identity aliases across the browser bridge / local MCP paths.
     callId?: string;
@@ -39,7 +44,7 @@ export interface ToolExecutionDetail {
 export interface ToolResultRenderData {
     callId: string;
     functionName: string;
-    status: 'success' | 'error';
+    status: ToolResultDisplayStatus;
     resultPreview: string;
     rawResult?: string;
     error?: string;
@@ -88,6 +93,10 @@ export function extractFunctionName(detail: ToolExecutionDetail): string {
         || 'unknown_tool';
 }
 
+function isDisplayStatus(value: unknown): value is ToolResultDisplayStatus {
+    return value === 'pending' || value === 'running' || value === 'success' || value === 'error';
+}
+
 /**
  * Extract and validate render data from a tool execution complete detail.
  * Returns null if the detail is invalid.
@@ -122,17 +131,19 @@ export function extractRenderData(
         ? truncatePreview(rawResult, MAX_PREVIEW_LENGTH)
         : (detail.confirmationText || '');
 
-    // mcp:tool-execution-complete is already a completion event.
-    // Only mark as error if there's no result, no prompt, and no confirmation.
-    const isError = !hasResult && !hasPrompt && !hasConfirmation;
+    // mcp:tool-execution-complete is normally a completion event, but future
+    // renderer events may explicitly pass pending/running for pre-result UI.
+    const explicitStatus = isDisplayStatus(detail.status) ? detail.status : undefined;
+    const inferredError = !hasResult && !hasPrompt && !hasConfirmation;
+    const status = explicitStatus || (inferredError ? 'error' : 'success');
 
     return {
         callId,
         functionName,
-        status: isError ? 'error' : 'success',
+        status,
         resultPreview,
         rawResult: rawResult !== undefined ? truncatePreview(rawResult, MAX_RAW_LENGTH) : undefined,
-        error: isError ? 'No result returned' : undefined,
+        error: status === 'error' ? 'No result returned' : undefined,
         timestamp: Date.now(),
         kind,
         title: detail.title,
