@@ -443,23 +443,26 @@ private injectResultBlock(data: ToolResultRenderData): boolean {
 7. collapsed details 默认关闭
 8. adapter method missing → renderer disabled
 
-手动验证：
-1. ChatGPT 页面工具执行完成后出现 card
+手动验证（Notion AI — 唯一 E2E 验证平台）：
+1. Notion AI /ai 页面工具执行完成后出现 card
 2. card 不影响输入框 insertText/submitForm
 3. 切换 dark/light 不刺眼
 4. React re-render 后不会无限重复插入
+
+ChatGPT/DeepSeek 手动验证待后续 E2E 打通后执行。
 
 ---
 
 ## 平台支持优先级
 
-| 优先级 | 平台 | adapter 文件 | 备注 |
+| 优先级 | 平台 | adapter 文件 | 状态 |
 |--------|------|-------------|------|
-| P0 | ChatGPT | `chatgpt.adapter.ts` | 必做 |
-| P0 | DeepSeek | `deepseek.adapter.ts` | adapter 已存在，实现 mount point |
-| P1 | Gemini | `gemini.adapter.ts` | v1 后续 |
-| P1 | Perplexity | `perplexity.adapter.ts` | v1 后续 |
-| P2 | 其他所有 | `base.adapter.ts` 默认实现兜底 | |
+| P0 | Notion AI | `notion.adapter.ts` | ✅ E2E 已验证（唯一验证平台） |
+| P1 | ChatGPT | `chatgpt.adapter.ts` | ⚠️ EXPERIMENTAL — mount point 已实现，E2E 未验证 |
+| P1 | DeepSeek | `deepseek.adapter.ts` | ⚠️ EXPERIMENTAL — mount point 已实现，E2E 未验证 |
+| P2 | Gemini | `gemini.adapter.ts` | v1 后续 |
+| P2 | Perplexity | `perplexity.adapter.ts` | v1 后续 |
+| P3 | 其他所有 | `base.adapter.ts` 默认实现兜底 | |
 
 ---
 
@@ -525,7 +528,7 @@ private injectResultBlock(data: ToolResultRenderData): boolean {
 
 ## 验收标准
 
-1. ✅ 在 ChatGPT 页面上，工具执行完成后，对话区域内出现可视化结果 card
+1. ✅ 在 Notion AI 页面上，工具执行完成后，对话区域内出现可视化结果 card（E2E 验证平台）
 2. ✅ Card 显示工具名称和执行状态（completed / error）
 3. ✅ Card 可折叠/展开，默认折叠
 4. ✅ 展开后以 `<pre>` + `textContent` 显示结果预览
@@ -533,6 +536,6 @@ private injectResultBlock(data: ToolResultRenderData): boolean {
 6. ✅ 现有的 autoInsert + autoSubmit 流程不受影响
 7. ✅ ToolResultRenderer 异常不影响 AutomationService
 8. ✅ 暗色主题下正常显示
-9. ✅ 在 DeepSeek 页面上同样工作
+9. ⚠️ ChatGPT/DeepSeek mount point 已实现但标记 EXPERIMENTAL（E2E 未验证）
 10. ✅ 同一 callId 不重复注入 card
 11. ✅ mount point 不存在时 fail-soft + warn 日志
