@@ -8,6 +8,8 @@
  * - model_ack_timeout
  */
 export type ToolResultUiEventType =
+    | 'tool_execution_pending'
+    | 'tool_execution_running'
     | 'tool_execution_completed'
     | 'tool_result_submitted'
     | 'model_ack_confirmed'
@@ -45,7 +47,7 @@ export interface ToolResultMountPoint {
 export interface ToolResultRenderData {
     callId: string;
     functionName: string;
-    status: 'success' | 'error';
+    status: 'pending' | 'running' | 'success' | 'error';
     resultPreview: string;
     rawResult?: string;
     error?: string;
