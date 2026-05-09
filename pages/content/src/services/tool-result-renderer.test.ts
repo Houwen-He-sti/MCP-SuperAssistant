@@ -16,7 +16,10 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
+    extractCallId,
+    extractFunctionName,
     extractRenderData,
+    extractResult,
     stringifyToolResult,
     truncatePreview,
 } from './tool-result-renderer-utils.ts';
@@ -248,5 +251,202 @@ describe('XSS safety in stringifyToolResult', () => {
         // JSON.stringify escapes inner quotes, but HTML structure is preserved
         assert.ok(result.includes('<img onerror='));
         assert.ok(result.includes('alert(1)'));
+    });
+});
+
+// ────────────────────────────────────────────
+// extractCallId — event field alias resolution
+// ────────────────────────────────────────────
+
+describe('extractCallId', () => {
+    test('direct callId → used', () => {
+        assert.equal(extractCallId({ callId: 'c1' }), 'c1');
+    });
+
+    test('toolCallId fallback', () => {
+        assert.equal(extractCallId({ toolCallId: 'tc1' }), 'tc1');
+    });
+
+    test('execution.callId fallback', () => {
+        assert.equal(extractCallId({ execution: { callId: 'ec1' } }), 'ec1');
+    });
+
+    test('execution.toolCallId fallback', () => {
+        assert.equal(extractCallId({ execution: { toolCallId: 'etc1' } }), 'etc1');
+    });
+
+    test('execution.id fallback', () => {
+        assert.equal(extractCallId({ execution: { id: 'eid1' } }), 'eid1');
+    });
+
+    test('toolCall.call_id fallback', () => {
+        assert.equal(extractCallId({ toolCall: { call_id: 'tci1' } }), 'tci1');
+    });
+
+    test('toolCall.id fallback', () => {
+        assert.equal(extractCallId({ toolCall: { id: 'tid1' } }), 'tid1');
+    });
+
+    test('no id anywhere → fallback generated', () => {
+        const result = extractCallId({});
+        assert.ok(result.startsWith('fallback-'));
+    });
+
+    test('priority: direct > execution > toolCall', () => {
+        assert.equal(extractCallId({
+            callId: 'direct',
+            execution: { callId: 'exec' },
+            toolCall: { callId: 'tc' },
+        }), 'direct');
+    });
+
+    test('priority: execution > toolCall when no direct', () => {
+        assert.equal(extractCallId({
+            execution: { callId: 'exec' },
+            toolCall: { callId: 'tc' },
+        }), 'exec');
+    });
+});
+
+// ────────────────────────────────────────────
+// extractFunctionName — event field alias resolution
+// ────────────────────────────────────────────
+
+describe('extractFunctionName', () => {
+    test('direct functionName → used', () => {
+        assert.equal(extractFunctionName({ functionName: 'read_file' }), 'read_file');
+    });
+
+    test('toolName fallback', () => {
+        assert.equal(extractFunctionName({ toolName: 'write_file' }), 'write_file');
+    });
+
+    test('name fallback', () => {
+        assert.equal(extractFunctionName({ name: 'echo' }), 'echo');
+    });
+
+    test('execution.functionName fallback', () => {
+        assert.equal(extractFunctionName({ execution: { functionName: 'git_diff' } }), 'git_diff');
+    });
+
+    test('execution.toolName fallback', () => {
+        assert.equal(extractFunctionName({ execution: { toolName: 'git_log' } }), 'git_log');
+    });
+
+    test('toolCall.name fallback', () => {
+        assert.equal(extractFunctionName({ toolCall: { name: 'git_show' } }), 'git_show');
+    });
+
+    test('no name anywhere → unknown_tool', () => {
+        assert.equal(extractFunctionName({}), 'unknown_tool');
+    });
+
+    test('priority: direct > execution > toolCall', () => {
+        assert.equal(extractFunctionName({
+            functionName: 'direct_fn',
+            execution: { functionName: 'exec_fn' },
+            toolCall: { name: 'tc_fn' },
+        }), 'direct_fn');
+    });
+});
+
+// ────────────────────────────────────────────
+// extractResult — result resolution
+// ────────────────────────────────────────────
+
+describe('extractResult', () => {
+    test('direct result → used', () => {
+        assert.equal(extractResult({ result: 'hello' }), 'hello');
+    });
+
+    test('execution.result fallback', () => {
+        assert.equal(extractResult({ execution: { result: 'from exec' } }), 'from exec');
+    });
+
+    test('direct result takes priority over execution.result', () => {
+        assert.equal(extractResult({
+            result: 'direct',
+            execution: { result: 'nested' },
+        }), 'direct');
+    });
+
+    test('empty string result is valid (not null)', () => {
+        assert.equal(extractResult({ result: '' }), '');
+    });
+
+    test('no result anywhere → undefined', () => {
+        assert.equal(extractResult({}), undefined);
+    });
+
+    test('null result → falls through to execution', () => {
+        assert.equal(extractResult({ result: null, execution: { result: 'fallback' } }), 'fallback');
+    });
+});
+
+// ────────────────────────────────────────────
+// extractRenderData with nested event payloads
+// ────────────────────────────────────────────
+
+describe('extractRenderData with event aliases', () => {
+    test('toolName alias → functionName field populated', () => {
+        const data = extractRenderData({
+            result: 'ok',
+            callId: 'c1',
+            toolName: 'web_search',
+        });
+        assert.ok(data);
+        assert.equal(data.functionName, 'web_search');
+    });
+
+    test('name alias → functionName field populated', () => {
+        const data = extractRenderData({
+            result: 'ok',
+            callId: 'c1',
+            name: 'echo',
+        });
+        assert.ok(data);
+        assert.equal(data.functionName, 'echo');
+    });
+
+    test('nested execution.result used when direct result absent', () => {
+        const data = extractRenderData({
+            callId: 'c1',
+            functionName: 'test',
+            execution: { result: 'nested result' },
+        });
+        assert.ok(data);
+        assert.equal(data.status, 'success');
+        assert.ok(data.resultPreview.includes('nested result'));
+    });
+
+    test('nested execution identity used when direct absent', () => {
+        const data = extractRenderData({
+            result: 'ok',
+            execution: { callId: 'ex-call', functionName: 'ex-fn' },
+        });
+        assert.ok(data);
+        assert.equal(data.callId, 'ex-call');
+        assert.equal(data.functionName, 'ex-fn');
+    });
+
+    test('toolCall identity used when direct and execution absent', () => {
+        const data = extractRenderData({
+            result: 'ok',
+            toolCall: { call_id: 'tc-id', name: 'tc-fn' },
+        });
+        assert.ok(data);
+        assert.equal(data.callId, 'tc-id');
+        assert.equal(data.functionName, 'tc-fn');
+    });
+
+    test('object result is stringified', () => {
+        const data = extractRenderData({
+            result: { content: [{ type: 'text', text: 'hello' }] },
+            callId: 'c1',
+            functionName: 'test',
+        });
+        assert.ok(data);
+        assert.equal(data.status, 'success');
+        assert.ok(data.resultPreview.includes('hello'));
     });
 });
