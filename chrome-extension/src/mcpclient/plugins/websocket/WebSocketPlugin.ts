@@ -224,28 +224,37 @@ export class WebSocketPlugin implements ITransportPlugin {
       const primitives: any[] = [];
       const promises: Promise<void>[] = [];
 
-      if (capabilities?.resources) {
-        promises.push(
-          client.listResources().then(({ resources }) => {
-            resources.forEach(item => primitives.push({ type: 'resource', value: item }));
-          }),
-        );
+      // When capabilities explicitly declare a type, call the list method
+      // and let errors propagate (they indicate real failures).
+      // When capabilities are empty or missing (e.g. proxy bug), probe
+      // with error catching — Method not found is expected and safe to ignore.
+      const isProbing = !capabilities || Object.keys(capabilities).length === 0;
+
+      if (capabilities?.resources || isProbing) {
+        const p = client.listResources().then(({ resources }) => {
+          resources.forEach(item => primitives.push({ type: 'resource', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[WebSocketPlugin] listResources probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.tools) {
-        promises.push(
-          client.listTools().then(({ tools }) => {
-            tools.forEach(item => primitives.push({ type: 'tool', value: item }));
-          }),
-        );
+      if (capabilities?.tools || isProbing) {
+        const p = client.listTools().then(({ tools }) => {
+          tools.forEach(item => primitives.push({ type: 'tool', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[WebSocketPlugin] listTools probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.prompts) {
-        promises.push(
-          client.listPrompts().then(({ prompts }) => {
-            prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
-          }),
-        );
+      if (capabilities?.prompts || isProbing) {
+        const p = client.listPrompts().then(({ prompts }) => {
+          prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[WebSocketPlugin] listPrompts probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
       await Promise.all(promises);

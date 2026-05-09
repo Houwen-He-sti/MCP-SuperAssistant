@@ -154,34 +154,37 @@ export class StreamableHttpPlugin implements ITransportPlugin {
       const primitives: any[] = [];
       const promises: Promise<void>[] = [];
 
-      if (capabilities?.resources) {
-        promises.push(
-          client.listResources().then(({ resources }) => {
-            resources.forEach(item => primitives.push({ type: 'resource', value: item }));
-          }).catch(error => {
-            logger.warn('[StreamableHttpPlugin] Failed to list resources:', error);
-          }),
-        );
+      // When capabilities explicitly declare a type, call the list method
+      // and let errors propagate (they indicate real failures).
+      // When capabilities are empty or missing (e.g. proxy bug), probe
+      // with error catching — Method not found is expected and safe to ignore.
+      const isProbing = !capabilities || Object.keys(capabilities).length === 0;
+
+      if (capabilities?.resources || isProbing) {
+        const p = client.listResources().then(({ resources }) => {
+          resources.forEach(item => primitives.push({ type: 'resource', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[StreamableHttpPlugin] listResources probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.tools) {
-        promises.push(
-          client.listTools().then(({ tools }) => {
-            tools.forEach(item => primitives.push({ type: 'tool', value: item }));
-          }).catch(error => {
-            logger.warn('[StreamableHttpPlugin] Failed to list tools:', error);
-          }),
-        );
+      if (capabilities?.tools || isProbing) {
+        const p = client.listTools().then(({ tools }) => {
+          tools.forEach(item => primitives.push({ type: 'tool', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[StreamableHttpPlugin] listTools probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.prompts) {
-        promises.push(
-          client.listPrompts().then(({ prompts }) => {
-            prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
-          }).catch(error => {
-            logger.warn('[StreamableHttpPlugin] Failed to list prompts:', error);
-          }),
-        );
+      if (capabilities?.prompts || isProbing) {
+        const p = client.listPrompts().then(({ prompts }) => {
+          prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[StreamableHttpPlugin] listPrompts probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
       await Promise.all(promises);
@@ -189,7 +192,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
       return primitives;
     } catch (error) {
       logger.error('[StreamableHttpPlugin] Failed to get primitives:', error);
-      return [];
+      throw error;
     }
   }
 }
