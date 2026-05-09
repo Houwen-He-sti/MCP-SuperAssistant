@@ -87,15 +87,28 @@ interface ModelAckEvent {
 ### 改动最小化策略
 
 1. **不修改 `injectResultIfSafe` 签名** — nonce 在调用点生成，append 到 formatted result 后再传入
-2. **不修改 `createStreamToolHandler` 签名** — handoff ACK 通过现有 `onEvent` channel emit，只是新增事件 type
-3. **ACK tracker 独立模块** — 不耦合 bridge core 逻辑
+2. `createStreamToolHandler` 新增可选参数 `ackTracker?: AckTracker | null` — 向后兼容，不传则不触发 ACK 逻辑
+3. `onEvent` 类型从 `StreamToolExecutionEvent` 扩展为 `BridgeEvent` union — 支持新的 `bridge_handoff_ack` 事件
+4. **ACK tracker 独立模块** — 不耦合 bridge core 逻辑
+5. **Nonce XML-safe** — 使用 `[A-Za-z0-9_-]` 字符集，strip unsafe chars from callId
 
 ### 关键约束
 
 - Nonce 长度 < 50 字符（避免占 token）
+- Nonce 只使用 XML-safe 字符（alphanumeric + underscore + hyphen）
 - ACK instruction 用 XML tag 标记，便于正则匹配
 - 不依赖模型一定输出 ACK — timeout 是正常路径
 - ACK scan 只检查 bridge submit 后的 **下一个** stream（不跨多轮）
+
+### 当前实现 scope
+
+- **Gate 5c.1 (完成)**: bridge handoff ACK — 生产 wiring 完成
+  - `streamToolBridgeInit.ts` 创建 ackTracker 实例并注入 bridge handler
+  - RESULT_SUBMITTED 时自动生成 nonce + 注册 pending + emit handoff ACK
+- **Gate 5d (foundation only)**: ackTracker.scanText() 可用但**未接入生产 stream listener**
+  - 原因: 当前 stream interceptor (`interceptor.ts`) 不 emit 原始文本 chunk 事件
+  - 接入需要: 在 interceptor 中新增 `stream_chunk` 事件类型，或使用 DOM MutationObserver
+  - 追踪: 后续 PR
 
 ---
 

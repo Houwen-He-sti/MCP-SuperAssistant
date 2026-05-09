@@ -8,8 +8,8 @@
  * Tests: streamToolBridge.test.ts imports directly from this file.
  */
 
-import { formatFunctionResult, appendAckInstruction } from './functionResultFormatter.ts';
 import { generateNonce, type AckTracker } from './ackTracker.ts';
+import { appendAckInstruction, formatFunctionResult } from './functionResultFormatter.ts';
 
 // --- Constants ---
 
@@ -499,8 +499,9 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       switch (outcome) {
         case 'RESULT_SUBMITTED':
           emit(streamId, identity, 'succeeded', { result, durationMs });
-          // Gate 5c.1: Emit bridge handoff ACK + register nonce for cross-turn tracking
+          // Gate 5c.1: Register nonce first, then emit bridge handoff ACK
           if (nonce && ackTracker) {
+            ackTracker.registerPending(nonce, callId, identity.name!);
             onEvent({
               type: 'bridge_handoff_ack',
               streamId,
@@ -510,7 +511,6 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
               timestamp: Date.now(),
               outcome: 'RESULT_SUBMITTED',
             });
-            ackTracker.registerPending(nonce, callId, identity.name!);
           }
           return;
         case 'RESULT_INJECTED':
