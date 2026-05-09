@@ -461,7 +461,17 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             if (typeof adapter.insertText === 'function') {
                 const origInsert = adapter.insertText.bind(adapter);
                 adapter.insertText = async (text) => {
-                    window.__gate5c_events.push({ type: 'insertText', textLen: text.length, preview: text.slice(0, 300), ts: Date.now() });
+                    // Record full payload metadata for verification
+                    const sentinel = window.__gate5c_sentinel || '';
+                    window.__gate5c_events.push({
+                        type: 'insertText',
+                        textLen: text.length,
+                        preview: text.slice(0, 500),
+                        containsSentinel: sentinel ? text.includes(sentinel) : false,
+                        containsErrorTag: text.includes('<error>') || text.includes('not registered'),
+                        isFunctionResultsBlock: text.includes('<function_results>') || text.includes('function_results'),
+                        ts: Date.now(),
+                    });
                     try {
                         const r = await origInsert(text);
                         window.__gate5c_events.push({ type: 'insertText_result', result: r, ts: Date.now() });
@@ -498,6 +508,9 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         return result;
     }
     console.log('✅ Wrappers installed');
+
+    // Set sentinel on window so insertText wrapper can check it
+    await evalIso(`window.__gate5c_sentinel = ${JSON.stringify(sentinel)}`, { awaitPromise: false });
 
     // --- Install MAIN world stream listener ---
     await evalMain(`(function() {
@@ -658,13 +671,17 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         }
         if (insertTextEvent && !resultInserted) {
             resultInserted = true;
-            // Check if success result: full text (not just preview) must contain sentinel and no <error>
-            // preview captures first 300 chars; also check resultPreview from callTool_result for full picture
-            const insertPreview = insertTextEvent.preview || '';
-            const toolResultPreview = callToolResultEvent?.resultPreview || '';
-            const isSuccessInsert = (insertPreview.includes(sentinel) || toolResultPreview.includes(sentinel))
-                && !insertPreview.includes('<error>') && !insertPreview.includes('not registered');
+            // Use actual insertText payload metadata (recorded by wrapper)
+            const isSuccessInsert = insertTextEvent.containsSentinel
+                && !insertTextEvent.containsErrorTag
+                && insertTextEvent.isFunctionResultsBlock;
             result.isSuccessInsert = isSuccessInsert;
+            result.insertPayloadMeta = {
+                containsSentinel: insertTextEvent.containsSentinel,
+                containsErrorTag: insertTextEvent.containsErrorTag,
+                isFunctionResultsBlock: insertTextEvent.isFunctionResultsBlock,
+                textLen: insertTextEvent.textLen,
+            };
             console.log(`  ${isSuccessInsert ? '✅' : '⚠️'} Result injected: ${insertTextEvent.textLen} chars ${isSuccessInsert ? '(SUCCESS path)' : '(ERROR path)'}`);
         }
         if (submitFormEvent && !formSubmitted) {
@@ -679,121 +696,95 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
 
         // After pipeline complete (success path), monitor for AI consumption
         if (pipelineDone && submitFormOk && result.isSuccessInsert) {
-            // Record submitForm timestamp for delta isolation
-            if (!result._submitTs) {
-                result._submitTs = Date.now();
+            // Take post-submit baseline on first detection of pipeline complete
+            // This is the KEY fix: only text appearing AFTER submitForm counts as assistant delta
+            if (!result._postSubmitBaseline) {
+                // Small delay to let submitForm result propagate
+                await new Promise(r => setTimeout(r, 1000));
+                const postSubmitSnap = await evalMain(`(function() {
+                    const bodyText = document.body.innerText;
+                    const blocks = document.querySelectorAll('[data-block-id]');
+                    return {
+                        bodyTextLength: bodyText.length,
+                        blockCount: blocks.length,
+                    };
+                })()`);
+                result._postSubmitBaseline = postSubmitSnap?.value || { bodyTextLength: 0, blockCount: 0 };
+                console.log(`  📸 Post-submit baseline: bodyLen=${result._postSubmitBaseline.bodyTextLength}, blocks=${result._postSubmitBaseline.blockCount}`);
             }
 
-            // Post-submit assistant delta check
-            // Key difference from body-level count: we take a snapshot of body text
-            // at submit time and only examine NEW text that appeared after submit.
-            const postSubmit = await evalMain(`(function() {
+            const psBaseline = result._postSubmitBaseline;
+
+            // Post-submit delta check: ONLY text after submitForm counts
+            const psBaselineLen = psBaseline.bodyTextLength;
+            const deltaCheck = await evalMain(`(function() {
                 const sentinel = ${JSON.stringify(sentinel)};
                 const bodyText = document.body.innerText;
                 const blocks = document.querySelectorAll('[data-block-id]');
 
-                // Isolate new content: text beyond baseline length
-                const baselineLen = ${baselineVal.bodyTextLength || 0};
-                const newText = bodyText.slice(baselineLen);
+                // Delta: ONLY text that appeared after submitForm completed
+                const deltaText = bodyText.slice(${psBaselineLen});
+                const deltaLen = deltaText.length;
 
-                // Find all occurrences of sentinel in the entire body
-                const sentinelCountTotal = (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
-
-                // Find occurrences ONLY in new text (post-baseline)
-                const sentinelCountInNewText = (newText.match(new RegExp(sentinel, 'g')) || []).length;
-
-                // New text contains: user prompt (1 sentinel) + injected result (1 sentinel)
-                // If AI consumed it: + AI response (≥1 sentinel)
-                // So sentinelCountInNewText ≥ 3 means AI referenced it
-
-                // Additionally: try to isolate the assistant response portion
-                // After submit, the page shows: [user msg] [injected tool result] [assistant response]
-                // The assistant response is the LAST block of new text
-                const newTextTail = newText.slice(-600);
+                // Sentinel in post-submit delta = AI consumed it
+                const sentinelCountInDelta = (deltaText.match(new RegExp(sentinel, 'g')) || []).length;
+                const deltaTail = deltaText.slice(-600);
+                const sentinelInDeltaTail = deltaTail.includes(sentinel);
 
                 return {
                     bodyTextLength: bodyText.length,
-                    newTextLength: newText.length,
-                    sentinelCountTotal,
-                    sentinelCountInNewText,
-                    sentinelInNewTextTail: newTextTail.includes(sentinel),
-                    newTextTail,
+                    deltaLength: deltaLen,
+                    sentinelCountInDelta,
+                    sentinelInDeltaTail,
+                    deltaTail,
                     blockCount: blocks.length,
+                    sentinelCountTotal: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
                 };
             })()`);
 
-            const postVal = postSubmit?.value || {};
-            const baselineSentinelCount = baselineVal.sentinelCountInBody || 0;
-            const bodyGrew = postVal.bodyTextLength > (baselineVal.bodyTextLength || 0) + 50;
-            const newBlocks = postVal.blockCount > (baselineVal.blockCount || 0);
+            const dv = deltaCheck?.value || {};
+            const deltaGrew = dv.deltaLength > 50;
+            const newBlocks = dv.blockCount > psBaseline.blockCount;
 
-            // New-text sentinel analysis:
-            // In newText: user prompt contributes 1, injected XML contributes 1
-            // If AI response contains sentinel: sentinelCountInNewText ≥ 3
-            const assistantDeltaConfirmed = postVal.sentinelCountInNewText >= 3 && bodyGrew;
-
-            // Stronger signal: sentinel appears in the TAIL of new text
-            // (tail is most likely the assistant's latest response, not injected XML)
-            const tailConfirmed = postVal.sentinelInNewTextTail && bodyGrew
-                && postVal.newTextLength > 200; // enough new text to have assistant response
-
-            if (round % 3 === 0 || assistantDeltaConfirmed) {
-                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: newText sentinel=${postVal.sentinelCountInNewText} (total=${postVal.sentinelCountTotal}), tailHas=${postVal.sentinelInNewTextTail}, blocks=${postVal.blockCount}, newLen=${postVal.newTextLength}`);
+            if (round % 3 === 0 || dv.sentinelCountInDelta > 0) {
+                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: delta=${dv.deltaLength}chars, deltaSentinel=${dv.sentinelCountInDelta}, tailHas=${dv.sentinelInDeltaTail}, blocks=${dv.blockCount}`);
             }
 
-            if (assistantDeltaConfirmed && tailConfirmed) {
-                // Strongest evidence: sentinel in new-text count ≥ 3 AND in tail
+            // PASS: sentinel found in post-submit delta (strongest evidence)
+            if (dv.sentinelCountInDelta >= 1 && deltaGrew && dv.sentinelInDeltaTail) {
                 consumptionDetected = true;
                 evidenceQuality = 'assistant_delta';
                 result.consumptionEvidence = {
-                    sentinelBeforePrompt: baselineSentinelCount,
-                    sentinelCountTotal: postVal.sentinelCountTotal,
-                    sentinelCountInNewText: postVal.sentinelCountInNewText,
-                    sentinelInNewTextTail: true,
-                    bodyGrew,
-                    newBlocks,
-                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
+                    postSubmitBaselineLen: psBaselineLen,
+                    deltaLength: dv.deltaLength,
+                    sentinelCountInDelta: dv.sentinelCountInDelta,
+                    sentinelInDeltaTail: true,
+                    sentinelCountTotal: dv.sentinelCountTotal,
+                    deltaTailSnippet: dv.deltaTail?.slice(-300),
                     consumptionEvidenceQuality: 'assistant_delta',
                 };
-                console.log(`  🎉 CONSUMPTION DETECTED (assistant_delta): sentinel in new-text tail, count=${postVal.sentinelCountInNewText}`);
+                console.log(`  🎉 CONSUMPTION DETECTED (assistant_delta): sentinel in post-submit delta tail, count=${dv.sentinelCountInDelta}`);
                 break;
             }
 
-            if (assistantDeltaConfirmed && !tailConfirmed) {
-                // sentinel count ≥ 3 in new text but not confirmed in tail
+            // Weaker: sentinel in delta but not in tail
+            if (dv.sentinelCountInDelta >= 1 && deltaGrew) {
                 consumptionDetected = true;
                 evidenceQuality = 'transcript_diff';
                 result.consumptionEvidence = {
-                    sentinelBeforePrompt: baselineSentinelCount,
-                    sentinelCountTotal: postVal.sentinelCountTotal,
-                    sentinelCountInNewText: postVal.sentinelCountInNewText,
-                    sentinelInNewTextTail: false,
-                    bodyGrew,
-                    newBlocks,
-                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
+                    postSubmitBaselineLen: psBaselineLen,
+                    deltaLength: dv.deltaLength,
+                    sentinelCountInDelta: dv.sentinelCountInDelta,
+                    sentinelInDeltaTail: false,
+                    sentinelCountTotal: dv.sentinelCountTotal,
+                    deltaTailSnippet: dv.deltaTail?.slice(-300),
                     consumptionEvidenceQuality: 'transcript_diff',
                 };
-                console.log(`  ✅ Consumption evidence (transcript_diff): sentinel in new text (count=${postVal.sentinelCountInNewText}) but not in tail`);
+                console.log(`  ✅ Consumption evidence (transcript_diff): sentinel in post-submit delta (count=${dv.sentinelCountInDelta})`);
                 break;
             }
 
-            // Body grew + new blocks but sentinel not yet in new text (AI still responding)
-            if (bodyGrew && newBlocks && round >= 15 && postVal.sentinelInNewTextTail) {
-                consumptionDetected = true;
-                evidenceQuality = 'transcript_diff';
-                result.consumptionEvidence = {
-                    sentinelBeforePrompt: baselineSentinelCount,
-                    sentinelCountTotal: postVal.sentinelCountTotal,
-                    sentinelCountInNewText: postVal.sentinelCountInNewText,
-                    sentinelInNewTextTail: true,
-                    bodyGrew,
-                    newBlocks,
-                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
-                    consumptionEvidenceQuality: 'transcript_diff',
-                };
-                console.log(`  ✅ Consumption evidence (transcript_diff): tail contains sentinel after ${round + 1} polls`);
-                break;
-            }
+            // Delta grew but no sentinel yet — AI is still responding, keep polling
         }
 
         // Store events
@@ -815,34 +806,35 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         result.consumptionResult = 'CONSUMPTION_PASS';
         result.evidenceQuality = 'transcript_diff';
     } else if (result.pipelineOk && !consumptionDetected) {
-        // Pipeline worked (success path) but AI didn't reference sentinel
-        // Do one final deep check with new-text isolation
+        // Pipeline worked (success path) but AI didn't reference sentinel in post-submit delta
+        // Do one final deep check using post-submit baseline
+        const psBaselineLen = result._postSubmitBaseline?.bodyTextLength || 0;
         const finalCheck = await evalMain(`(function() {
             const sentinel = ${JSON.stringify(sentinel)};
             const bodyText = document.body.innerText;
-            const baselineLen = ${baselineVal.bodyTextLength || 0};
-            const newText = bodyText.slice(baselineLen);
-            const sentinelCountInNewText = (newText.match(new RegExp(sentinel, 'g')) || []).length;
-            const newTextTail = newText.slice(-600);
+            const deltaText = bodyText.slice(${psBaselineLen});
+            const sentinelCountInDelta = (deltaText.match(new RegExp(sentinel, 'g')) || []).length;
+            const deltaTail = deltaText.slice(-600);
             return {
                 sentinelCountTotal: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
-                sentinelCountInNewText,
-                sentinelInTail: newTextTail.includes(sentinel),
-                newTextTail,
-                bodyLen: bodyText.length,
+                sentinelCountInDelta,
+                sentinelInDeltaTail: deltaTail.includes(sentinel),
+                deltaTail,
+                deltaLength: deltaText.length,
             };
         })()`);
         const finalVal = finalCheck?.value || {};
         result.consumptionEvidence = {
-            sentinelBeforePrompt: baselineVal.sentinelCountInBody || 0,
+            postSubmitBaselineLen: psBaselineLen,
             sentinelCountTotal: finalVal.sentinelCountTotal || 0,
-            sentinelCountInNewText: finalVal.sentinelCountInNewText || 0,
-            sentinelInTail: finalVal.sentinelInTail || false,
-            finalNewTextTail: finalVal.newTextTail,
-            consumptionEvidenceQuality: (finalVal.sentinelCountInNewText || 0) >= 3 ? 'body_count_only' : 'none',
+            sentinelCountInDelta: finalVal.sentinelCountInDelta || 0,
+            sentinelInDeltaTail: finalVal.sentinelInDeltaTail || false,
+            deltaLength: finalVal.deltaLength || 0,
+            deltaTail: finalVal.deltaTail,
+            consumptionEvidenceQuality: (finalVal.sentinelCountInDelta || 0) >= 1 ? 'body_count_only' : 'none',
         };
 
-        if ((finalVal.sentinelCountInNewText || 0) >= 3) {
+        if ((finalVal.sentinelCountInDelta || 0) >= 1) {
             result.consumptionResult = 'CONSUMPTION_PARTIAL';
             result.evidenceQuality = 'body_count_only';
         } else {
