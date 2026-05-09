@@ -7,10 +7,9 @@
 
 import { executionGuardStore, reserveExecution } from '../mcpexecute/executionGuard';
 import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/storage';
+import { createAckTracker, type AckTracker } from './ackTracker';
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
 import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
-import { createAckTracker, type AckTracker } from './ackTracker';
-import type { StreamEvent } from './types';
 import {
   createStreamToolHandler,
   getAdapterDiagnostic,
@@ -20,6 +19,7 @@ import {
   type McpClientLike,
   type StreamToolBridgeConfig,
 } from './streamToolBridge';
+import type { StreamEvent } from './types';
 
 /**
  * Full init config: extends handler config with cutoff activation flag.
@@ -195,6 +195,7 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     sendConfigToMainWorld({
       enabled: currentConfig.cutoffEnabled,
       mode: undefined, // cutoff mode managed by bridge config, not tool bridge
+      requireStructuredIdentity: false, // Notion's patch format may not always produce structured identity
       emitChunkText: true,
     });
     unsubscribe = onStreamEventBridge(bridgeHandler);

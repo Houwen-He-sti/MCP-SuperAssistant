@@ -201,6 +201,17 @@ export function createFunctionCallScanner() {
     let isAccumulating = false;
     let firstDetectionLine = '';
 
+    /** Check if a raw NDJSON line is a Notion patch (type: "patch") */
+    function isNotionPatchLine(line: string): boolean {
+        if (!line.includes('"patch"')) return false;
+        try {
+            const obj = JSON.parse(line);
+            return obj?.type === 'patch';
+        } catch {
+            return false;
+        }
+    }
+
     function processLine(trimmedLine: string): ScanResult {
         // If accumulating patch content for a cross-patch function_call
         if (isAccumulating) {
@@ -224,6 +235,11 @@ export function createFunctionCallScanner() {
                     return { detected: true, identity, rawLine, accumulating: false };
                 }
                 // Still accumulating — need more patches
+                return { detected: false, identity: null, rawLine: '', accumulating: true };
+            }
+            // Patch line with no extractable text content (metadata-only patch) —
+            // don't abort accumulation, continue waiting for content patches
+            if (isNotionPatchLine(trimmedLine)) {
                 return { detected: false, identity: null, rawLine: '', accumulating: true };
             }
             // Non-patch line while accumulating — abort accumulation, try best-effort
@@ -260,6 +276,13 @@ export function createFunctionCallScanner() {
             // Need to accumulate more patches
             isAccumulating = true;
             return { detected: false, identity: null, rawLine: '', accumulating: true };
+        }
+
+        // If this is a Notion patch line (type: "patch"), keyword matches are from
+        // metadata fields (e.g., agent-inference block "name") — not an actual function call.
+        // Don't trigger the unknown-format fallback which would produce identity: null.
+        if (isNotionPatchLine(trimmedLine)) {
+            return { detected: false, identity: null, rawLine: '', accumulating: false };
         }
 
         // Unknown format — emit with null identity (legacy behavior)
