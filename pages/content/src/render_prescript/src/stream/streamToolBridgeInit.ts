@@ -131,6 +131,7 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
 
   // Reset handoff stream tracking
   lastHandoffStreamId = null;
+  lastModelAckEvent = null;
 
   // Dispose previous ackTracker if any (clears pending timeouts)
   if (ackTrackerInstance) {
