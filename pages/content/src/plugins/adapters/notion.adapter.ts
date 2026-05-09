@@ -1,5 +1,6 @@
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
+import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 
 /**
  * Notion AI Adapter for Notion AI Chat (notion.so/ai)
@@ -741,6 +742,48 @@ export class NotionAdapter extends BaseAdapterPlugin {
         }
 
         this.mcpPopoverContainer = null;
+    }
+
+    // ── Tool result mount point ────────────────────────────────────────
+
+    /**
+     * Find where to inject a tool result card in the Notion AI conversation UI.
+     *
+     * Notion AI's /ai page uses `.notion-app-inner` as the main chat content
+     * area. Conversation messages appear as direct children (or within a
+     * scrollable container) inside this element.
+     *
+     * Strategy: find the main content area and append after the last
+     * visible message element, or fall back to appending at the bottom.
+     */
+    findToolResultMountPoint(_event?: { callId?: string }): ToolResultMountPoint | null {
+        if (!this.isSupported()) return null;
+
+        // Primary: find .notion-app-inner chat area
+        const chatContent = document.querySelector(this.selectors.CHAT_CONTENT) as HTMLElement | null;
+        if (!chatContent) return null;
+
+        // Look for a scrollable conversation container inside .notion-app-inner
+        // Notion AI typically has a scroll container with message blocks
+        const scrollContainer = chatContent.querySelector(
+            '[class*="scroller"], [class*="scroll"], [style*="overflow"]'
+        ) as HTMLElement | null;
+
+        const container = scrollContainer || chatContent;
+
+        // Find the last message-like element to insert after
+        // Notion AI messages are typically contenteditable blocks or divs with specific attributes
+        const messages = container.querySelectorAll(
+            ':scope > [data-block-id], :scope > [class*="message"], :scope > [class*="agent"]'
+        );
+
+        if (messages.length > 0) {
+            const lastMessage = messages[messages.length - 1] as HTMLElement;
+            return { container, anchor: lastMessage, mode: 'after' as const };
+        }
+
+        // Fallback: append at end of container
+        return { container, mode: 'append' as const };
     }
 
     private handleToolExecutionCompleted(data: any): void {
