@@ -23,7 +23,7 @@ Gate 5b 已证明 bridge pipeline 正确工作（stream detect → callTool → 
 
 - 不修改 bridge pipeline 代码（已在 Gate 5b 验证）
 - 不追求 100% 确定性的 AI 行为断言（AI 行为本质上是非确定性的）
-- 不实现自动化 prompt 注入（保持 semi-automated，人工触发 AI）
+- 不实现自动化 prompt 注入（~~保持 semi-automated，人工触发 AI~~ 实际实现为全自动：CDP 注入 prompt 并提交，与 Gate 5b 一致）
 - 不要求 multi-turn 验证（单次 tool call → consumption 即可）
 
 ---

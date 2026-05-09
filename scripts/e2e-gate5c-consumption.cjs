@@ -246,9 +246,12 @@ async function runPhase0() {
         }
     }
 
-    // Fallback: probe echo directly
-    if (tools.length === 0) {
-        console.log('⚠️ No tool list API found. Probing echo tool directly...');
+    // Probe echo if tool list is empty OR doesn't contain echo
+    const hasEchoInList = tools.some(t => typeof t === 'string' && t.includes('echo'));
+    if (tools.length === 0 || !hasEchoInList) {
+        console.log(tools.length === 0
+            ? '⚠️ No tool list API found. Probing echo tool directly...'
+            : `⚠️ echo not in tool list (${tools.length} tools found). Probing directly...`);
         const probeResult = await evalIso(`(async function() {
             try {
                 const result = await window.mcpClient.callTool('echo', { message: 'phase0_probe' });
@@ -280,10 +283,10 @@ async function runPhase0() {
         }
     }
 
-    const hasEcho = tools.some(t => typeof t === 'string' && t.includes('echo'));
+    const hasEchoFinal = tools.some(t => typeof t === 'string' && t.includes('echo'));
     console.log(`\nTool discovery (${toolDiscoveryMethod}): ${tools.length} tools found`);
     console.log('Tools:', tools.join(', '));
-    console.log(`Echo registered: ${hasEcho ? '✅' : '❌'}`);
+    console.log(`Echo registered: ${hasEchoFinal ? '✅' : '❌'}`);
 
     // Get server identity
     const serverInfo = await evalIso(`(function() {
@@ -295,14 +298,14 @@ async function runPhase0() {
     ws.close();
 
     return {
-        passed: hasEcho,
-        error: hasEcho ? null : 'echo tool not found in registry',
+        passed: hasEchoFinal,
+        error: hasEchoFinal ? null : 'echo tool not found in registry',
         runtimeSurface: surface,
         tools,
         toolCount: tools.length,
         toolDiscoveryMethod,
         serverIdentity: serverInfo?.value || null,
-        hasEcho,
+        hasEcho: hasEchoFinal,
     };
 }
 
@@ -420,10 +423,11 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
     }
     console.log('✅ Bridge configured');
 
-    // --- Install wrappers (same as Gate 5b, guard double-wrap) ---
+    // --- Install wrappers (clear events for each attempt, guard double-wrap of callTool) ---
     const wrapResult = await evalIso(`(function() {
-        if (window.__gate5c_wrapped) return { ok: true, alreadyWrapped: true };
+        // Always reset events for fresh attempt
         window.__gate5c_events = [];
+        if (window.__gate5c_wrapped) return { ok: true, alreadyWrapped: true };
         window.__gate5c_wrapped = true;
 
         // Wrap mcpClient.callTool
@@ -654,9 +658,14 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         }
         if (insertTextEvent && !resultInserted) {
             resultInserted = true;
-            // Check if success result (contains sentinel, no <error>)
-            const isSuccessInsert = insertTextEvent.preview.includes(sentinel) && !insertTextEvent.preview.includes('<error>');
-            console.log(`  ✅ Result injected: ${insertTextEvent.textLen} chars ${isSuccessInsert ? '(SUCCESS path)' : '(ERROR path)'}`);
+            // Check if success result: full text (not just preview) must contain sentinel and no <error>
+            // preview captures first 300 chars; also check resultPreview from callTool_result for full picture
+            const insertPreview = insertTextEvent.preview || '';
+            const toolResultPreview = callToolResultEvent?.resultPreview || '';
+            const isSuccessInsert = (insertPreview.includes(sentinel) || toolResultPreview.includes(sentinel))
+                && !insertPreview.includes('<error>') && !insertPreview.includes('not registered');
+            result.isSuccessInsert = isSuccessInsert;
+            console.log(`  ${isSuccessInsert ? '✅' : '⚠️'} Result injected: ${insertTextEvent.textLen} chars ${isSuccessInsert ? '(SUCCESS path)' : '(ERROR path)'}`);
         }
         if (submitFormEvent && !formSubmitted) {
             formSubmitted = true;
@@ -664,30 +673,52 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             console.log(`  ${submitFormOk ? '✅' : '⚠️'} submitForm called (result: ${submitFormResultEvent?.result})`);
         }
 
-        // Pipeline complete?
+        // Pipeline complete? Must be success path (not error inject)
         const pipelineDone = toolExecuted && resultInserted && formSubmitted;
-        result.pipelineOk = pipelineDone && submitFormOk && toolResultIsSuccess;
+        result.pipelineOk = pipelineDone && submitFormOk && toolResultIsSuccess && (result.isSuccessInsert !== false);
 
-        // After pipeline complete, monitor for AI consumption
-        if (pipelineDone && submitFormOk) {
-            // Post-submit delta check
+        // After pipeline complete (success path), monitor for AI consumption
+        if (pipelineDone && submitFormOk && result.isSuccessInsert) {
+            // Record submitForm timestamp for delta isolation
+            if (!result._submitTs) {
+                result._submitTs = Date.now();
+            }
+
+            // Post-submit assistant delta check
+            // Key difference from body-level count: we take a snapshot of body text
+            // at submit time and only examine NEW text that appeared after submit.
             const postSubmit = await evalMain(`(function() {
                 const sentinel = ${JSON.stringify(sentinel)};
                 const bodyText = document.body.innerText;
-                const sentinelCount = (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
                 const blocks = document.querySelectorAll('[data-block-id]');
 
-                // Try to find new text after the last occurrence of sentinel in injected content
-                // The key insight: sentinel appears in (1) user prompt, (2) injected tool result
-                // If it appears a 3rd time, that's likely the AI's response
-                // But more reliably: look at body text AFTER the inject point
-                const bodyTail = bodyText.slice(-500);
+                // Isolate new content: text beyond baseline length
+                const baselineLen = ${baselineVal.bodyTextLength || 0};
+                const newText = bodyText.slice(baselineLen);
+
+                // Find all occurrences of sentinel in the entire body
+                const sentinelCountTotal = (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
+
+                // Find occurrences ONLY in new text (post-baseline)
+                const sentinelCountInNewText = (newText.match(new RegExp(sentinel, 'g')) || []).length;
+
+                // New text contains: user prompt (1 sentinel) + injected result (1 sentinel)
+                // If AI consumed it: + AI response (≥1 sentinel)
+                // So sentinelCountInNewText ≥ 3 means AI referenced it
+
+                // Additionally: try to isolate the assistant response portion
+                // After submit, the page shows: [user msg] [injected tool result] [assistant response]
+                // The assistant response is the LAST block of new text
+                const newTextTail = newText.slice(-600);
 
                 return {
-                    sentinelCountInBody: sentinelCount,
-                    blockCount: blocks.length,
                     bodyTextLength: bodyText.length,
-                    bodyTail,
+                    newTextLength: newText.length,
+                    sentinelCountTotal,
+                    sentinelCountInNewText,
+                    sentinelInNewTextTail: newTextTail.includes(sentinel),
+                    newTextTail,
+                    blockCount: blocks.length,
                 };
             })()`);
 
@@ -696,58 +727,72 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             const bodyGrew = postVal.bodyTextLength > (baselineVal.bodyTextLength || 0) + 50;
             const newBlocks = postVal.blockCount > (baselineVal.blockCount || 0);
 
-            // Sentinel count analysis:
-            // baselineSentinelCount: before prompt (should be 0)
-            // After prompt submit: +1 (user prompt contains sentinel)
-            // After tool result inject: +1 (injected XML contains sentinel)
-            // After AI consumption: +1 (AI response references sentinel)
-            // So total ≥ 3 means AI consumed it
-            const sentinelInNewContent = postVal.sentinelCountInBody >= baselineSentinelCount + 3;
+            // New-text sentinel analysis:
+            // In newText: user prompt contributes 1, injected XML contributes 1
+            // If AI response contains sentinel: sentinelCountInNewText ≥ 3
+            const assistantDeltaConfirmed = postVal.sentinelCountInNewText >= 3 && bodyGrew;
 
-            // Better: check if body tail (new content) contains sentinel
-            // But we need to be smarter — check if bodyTail has content beyond the injected XML
-            const tailHasSentinel = postVal.bodyTail?.includes(sentinel);
+            // Stronger signal: sentinel appears in the TAIL of new text
+            // (tail is most likely the assistant's latest response, not injected XML)
+            const tailConfirmed = postVal.sentinelInNewTextTail && bodyGrew
+                && postVal.newTextLength > 200; // enough new text to have assistant response
 
-            if (round % 3 === 0 || sentinelInNewContent) {
-                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: sentinel=${postVal.sentinelCountInBody} (base=${baselineSentinelCount}), blocks=${postVal.blockCount}, bodyLen=${postVal.bodyTextLength}`);
+            if (round % 3 === 0 || assistantDeltaConfirmed) {
+                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: newText sentinel=${postVal.sentinelCountInNewText} (total=${postVal.sentinelCountTotal}), tailHas=${postVal.sentinelInNewTextTail}, blocks=${postVal.blockCount}, newLen=${postVal.newTextLength}`);
             }
 
-            if (sentinelInNewContent && bodyGrew) {
-                // Strong evidence: sentinel count increased by 3+ AND body grew
+            if (assistantDeltaConfirmed && tailConfirmed) {
+                // Strongest evidence: sentinel in new-text count ≥ 3 AND in tail
                 consumptionDetected = true;
                 evidenceQuality = 'assistant_delta';
                 result.consumptionEvidence = {
                     sentinelBeforePrompt: baselineSentinelCount,
-                    sentinelAfterSubmit: postVal.sentinelCountInBody,
+                    sentinelCountTotal: postVal.sentinelCountTotal,
+                    sentinelCountInNewText: postVal.sentinelCountInNewText,
+                    sentinelInNewTextTail: true,
                     bodyGrew,
                     newBlocks,
-                    bodyTailSnippet: postVal.bodyTail?.slice(-300),
+                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
                     consumptionEvidenceQuality: 'assistant_delta',
                 };
-                console.log(`  🎉 CONSUMPTION DETECTED (assistant_delta): sentinel ${baselineSentinelCount} → ${postVal.sentinelCountInBody}`);
+                console.log(`  🎉 CONSUMPTION DETECTED (assistant_delta): sentinel in new-text tail, count=${postVal.sentinelCountInNewText}`);
                 break;
             }
 
-            // Secondary check: body grew significantly + new blocks appeared
-            // (AI responded but might not have echoed sentinel verbatim)
-            if (bodyGrew && newBlocks && round >= 10) {
-                // Check if there's substantial new text after the inject
-                const newContentLen = postVal.bodyTextLength - (baselineVal.bodyTextLength || 0);
-                if (newContentLen > 100 && tailHasSentinel) {
-                    consumptionDetected = true;
-                    evidenceQuality = 'transcript_diff';
-                    result.consumptionEvidence = {
-                        sentinelBeforePrompt: baselineSentinelCount,
-                        sentinelAfterSubmit: postVal.sentinelCountInBody,
-                        bodyGrew,
-                        newBlocks,
-                        newContentLength: newContentLen,
-                        bodyTailSnippet: postVal.bodyTail?.slice(-300),
-                        consumptionEvidenceQuality: 'transcript_diff',
-                    };
-                    console.log(`  ✅ Consumption evidence (transcript_diff): new content ${newContentLen} chars, sentinel in tail`);
-                    break;
-                }
+            if (assistantDeltaConfirmed && !tailConfirmed) {
+                // sentinel count ≥ 3 in new text but not confirmed in tail
+                consumptionDetected = true;
+                evidenceQuality = 'transcript_diff';
+                result.consumptionEvidence = {
+                    sentinelBeforePrompt: baselineSentinelCount,
+                    sentinelCountTotal: postVal.sentinelCountTotal,
+                    sentinelCountInNewText: postVal.sentinelCountInNewText,
+                    sentinelInNewTextTail: false,
+                    bodyGrew,
+                    newBlocks,
+                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
+                    consumptionEvidenceQuality: 'transcript_diff',
+                };
+                console.log(`  ✅ Consumption evidence (transcript_diff): sentinel in new text (count=${postVal.sentinelCountInNewText}) but not in tail`);
+                break;
+            }
+
+            // Body grew + new blocks but sentinel not yet in new text (AI still responding)
+            if (bodyGrew && newBlocks && round >= 15 && postVal.sentinelInNewTextTail) {
+                consumptionDetected = true;
+                evidenceQuality = 'transcript_diff';
+                result.consumptionEvidence = {
+                    sentinelBeforePrompt: baselineSentinelCount,
+                    sentinelCountTotal: postVal.sentinelCountTotal,
+                    sentinelCountInNewText: postVal.sentinelCountInNewText,
+                    sentinelInNewTextTail: true,
+                    bodyGrew,
+                    newBlocks,
+                    newTextTailSnippet: postVal.newTextTail?.slice(-300),
+                    consumptionEvidenceQuality: 'transcript_diff',
+                };
+                console.log(`  ✅ Consumption evidence (transcript_diff): tail contains sentinel after ${round + 1} polls`);
+                break;
             }
         }
 
@@ -770,26 +815,34 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         result.consumptionResult = 'CONSUMPTION_PASS';
         result.evidenceQuality = 'transcript_diff';
     } else if (result.pipelineOk && !consumptionDetected) {
-        // Pipeline worked but AI didn't reference sentinel
-        // Do one final deep check
+        // Pipeline worked (success path) but AI didn't reference sentinel
+        // Do one final deep check with new-text isolation
         const finalCheck = await evalMain(`(function() {
             const sentinel = ${JSON.stringify(sentinel)};
             const bodyText = document.body.innerText;
-            const count = (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
-            const idx = bodyText.lastIndexOf(sentinel);
-            let context = '';
-            if (idx > -1) context = bodyText.slice(Math.max(0, idx - 200), Math.min(bodyText.length, idx + sentinel.length + 200));
-            return { count, context, bodyLen: bodyText.length };
+            const baselineLen = ${baselineVal.bodyTextLength || 0};
+            const newText = bodyText.slice(baselineLen);
+            const sentinelCountInNewText = (newText.match(new RegExp(sentinel, 'g')) || []).length;
+            const newTextTail = newText.slice(-600);
+            return {
+                sentinelCountTotal: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
+                sentinelCountInNewText,
+                sentinelInTail: newTextTail.includes(sentinel),
+                newTextTail,
+                bodyLen: bodyText.length,
+            };
         })()`);
         const finalVal = finalCheck?.value || {};
         result.consumptionEvidence = {
             sentinelBeforePrompt: baselineVal.sentinelCountInBody || 0,
-            sentinelAfterSubmit: finalVal.count || 0,
-            finalContext: finalVal.context,
-            consumptionEvidenceQuality: (finalVal.count || 0) >= 3 ? 'body_count_only' : 'none',
+            sentinelCountTotal: finalVal.sentinelCountTotal || 0,
+            sentinelCountInNewText: finalVal.sentinelCountInNewText || 0,
+            sentinelInTail: finalVal.sentinelInTail || false,
+            finalNewTextTail: finalVal.newTextTail,
+            consumptionEvidenceQuality: (finalVal.sentinelCountInNewText || 0) >= 3 ? 'body_count_only' : 'none',
         };
 
-        if ((finalVal.count || 0) >= (baselineVal.sentinelCountInBody || 0) + 3) {
+        if ((finalVal.sentinelCountInNewText || 0) >= 3) {
             result.consumptionResult = 'CONSUMPTION_PARTIAL';
             result.evidenceQuality = 'body_count_only';
         } else {
@@ -798,6 +851,9 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         }
     } else if (toolExecuted && !toolResultIsSuccess) {
         result.consumptionResult = 'TOOL_ERROR';
+    } else if (toolExecuted && resultInserted && !result.isSuccessInsert) {
+        result.consumptionResult = 'ERROR_PATH_ONLY';
+        result.diagnostics.note = 'Tool result was injected as error, not success. Echo may not be registered.';
     } else if (!toolExecuted) {
         result.consumptionResult = 'SCANNER_MISS';
     } else {
