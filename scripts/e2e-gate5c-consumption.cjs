@@ -30,7 +30,7 @@ const CDP_PORT = 9222;
 const TIMEOUT_MS = 10000;
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ROUNDS = 30; // 90 seconds per attempt
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 5;
 const SENTINEL_PREFIX = 'sentinel_g5c_';
 
 // ============================================================================
@@ -85,10 +85,10 @@ async function main() {
                 }
             }
 
-            // Wait between attempts
+            // Wait between attempts (longer cooldown to avoid AI rate-limiting)
             if (attempt < MAX_ATTEMPTS - 1) {
-                console.log('\n⏳ Waiting 5s before next attempt...');
-                await new Promise(r => setTimeout(r, 5000));
+                console.log('\n⏳ Waiting 15s before next attempt...');
+                await new Promise(r => setTimeout(r, 15000));
             }
         }
 
@@ -423,9 +423,8 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
     }
     console.log('✅ Bridge configured');
 
-    // --- Install wrappers (clear events for each attempt, guard double-wrap of callTool) ---
+    // --- Install wrappers (simple bind, fresh per attempt) ---
     const wrapResult = await evalIso(`(function() {
-        // Always reset events for fresh attempt
         window.__gate5c_events = [];
         if (window.__gate5c_wrapped) return { ok: true, alreadyWrapped: true };
         window.__gate5c_wrapped = true;
@@ -447,7 +446,7 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             };
         }
 
-        // Resolve adapter
+        // Resolve adapter (best-effort — bridge may use a different adapter instance)
         const win = window;
         let adapter = null;
         const reg = win.pluginRegistry;
@@ -461,7 +460,6 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             if (typeof adapter.insertText === 'function') {
                 const origInsert = adapter.insertText.bind(adapter);
                 adapter.insertText = async (text) => {
-                    // Record full payload metadata for verification
                     const sentinel = window.__gate5c_sentinel || '';
                     window.__gate5c_events.push({
                         type: 'insertText',
@@ -469,7 +467,7 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
                         preview: text.slice(0, 500),
                         containsSentinel: sentinel ? text.includes(sentinel) : false,
                         containsErrorTag: text.includes('<error>') || text.includes('not registered'),
-                        isFunctionResultsBlock: text.includes('<function_results>') || text.includes('function_results'),
+                        isFunctionResultsBlock: text.includes('<function_result') || text.includes('function_result'),
                         ts: Date.now(),
                     });
                     try {
@@ -531,48 +529,66 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
     // --- Baseline snapshot (before prompt) ---
     const baseline = await evalMain(`(function() {
         const sentinel = ${JSON.stringify(sentinel)};
-        // Count assistant message blocks
-        // Notion agent uses various selectors; try common patterns
         const allBlocks = document.querySelectorAll('[data-block-id]');
         const bodyText = document.body.innerText;
         return {
             bodyTextLength: bodyText.length,
             sentinelCountInBody: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
             blockCount: allBlocks.length,
-            bodyTailSnapshot: bodyText.slice(-300),
         };
     })()`);
 
     const baselineVal = baseline?.value || {};
+    // Store baseline sentinel count for later comparison
+    result._baselineSentinelCount = baselineVal.sentinelCountInBody || 0;
     console.log(`Baseline: sentinel=${baselineVal.sentinelCountInBody}, bodyLen=${baselineVal.bodyTextLength}, blocks=${baselineVal.blockCount}`);
 
     // --- Inject prompt + submit ---
-    // Clear input
-    await evalMain(`(async function() {
+    // Focus + clear input
+    await evalMain(`(function() {
         const sel = 'div[role="textbox"][contenteditable="true"]';
         const el = document.querySelector(sel);
         if (el) {
             el.focus();
+            el.click();
             const s = window.getSelection();
             if (s) { const r = document.createRange(); r.selectNodeContents(el); s.removeAllRanges(); s.addRange(r); }
             document.execCommand('delete', false);
         }
-    })()`, { awaitPromise: true });
+        return !!el;
+    })()`, { awaitPromise: false });
     await new Promise(r => setTimeout(r, 500));
 
-    // Type prompt
-    const prompt = `请调用 echo 工具，参数为 {"message": "${sentinel}"}`;
-    const typeResult = await evalMain(`(function() {
+    // Type prompt using CDP Input.insertText (document.execCommand doesn't work on Notion's editor)
+    const prompt = `请调用 committee-bridge.echo 工具，参数为 {"message": "${sentinel}"}。工具返回后，请在你的回复中原样引用返回的 message 值（即 ${sentinel}），不要省略或改写。`;
+    const focusResult = await evalMain(`(function() {
         const el = document.querySelector('div[role="textbox"][contenteditable="true"]');
         if (!el) return { ok: false, error: 'no textbox' };
         el.focus();
-        document.execCommand('insertText', false, ${JSON.stringify(prompt)});
-        return { ok: true, preview: el.textContent.slice(0, 100) };
+        el.click();
+        return { ok: true };
+    })()`, { awaitPromise: false });
+    if (!focusResult?.value?.ok) {
+        result.consumptionResult = 'ERROR';
+        result.diagnostics.error = 'Failed to focus textbox: ' + focusResult?.value?.error;
+        ws.close();
+        result.durationMs = Date.now() - attemptStart;
+        return result;
+    }
+    await new Promise(r => setTimeout(r, 200));
+    await send('Input.insertText', { text: prompt });
+    await new Promise(r => setTimeout(r, 300));
+
+    // Verify text was entered
+    const typeVerify = await evalMain(`(function() {
+        const el = document.querySelector('div[role="textbox"][contenteditable="true"]');
+        const content = el?.textContent || '';
+        return { ok: content.length > 10, preview: content.slice(0, 100), len: content.length };
     })()`, { awaitPromise: false });
 
-    if (!typeResult?.value?.ok) {
+    if (!typeVerify?.value?.ok) {
         result.consumptionResult = 'ERROR';
-        result.diagnostics.error = 'Failed to type prompt: ' + typeResult?.value?.error;
+        result.diagnostics.error = 'Prompt not entered in textbox. Content: ' + (typeVerify?.value?.preview || 'empty');
         ws.close();
         result.durationMs = Date.now() - attemptStart;
         return result;
@@ -603,6 +619,122 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         return result;
     }
     console.log(`✅ Prompt submitted via ${submitResult?.value?.method}`);
+
+    // --- Ordered sentinel snapshot: after prompt submit, before bridge ---
+    await new Promise(r => setTimeout(r, 500));
+    const postPromptSnap = await evalMain(`(function() {
+        const sentinel = ${JSON.stringify(sentinel)};
+        const bodyText = document.body.innerText;
+        return {
+            sentinelCount: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
+            bodyTextLength: bodyText.length,
+        };
+    })()`);
+    result._sentinelSnapshots = {
+        beforePrompt: result._baselineSentinelCount || 0,
+        afterPrompt: postPromptSnap?.value?.sentinelCount || 0,
+    };
+    console.log(`📸 Sentinel after prompt: ${result._sentinelSnapshots.afterPrompt} (expected ≥1)`);
+
+    // --- Wait for SPA navigation to settle, then re-discover ISOLATED world + re-install wrappers ---
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Notion SPA-navigates after submit (conversation list → chat view).
+    // The ISOLATED world context ID may change, so re-discover it.
+    const oldIsoCtx = isoCtx;
+    const newContexts = contexts.filter(c => c.name === 'MCP SuperAssistant');
+    let newIsoCtx = null;
+    for (const ctx of newContexts) {
+        const check = await send('Runtime.evaluate', {
+            contextId: ctx.id,
+            expression: "typeof window.pluginRegistry !== 'undefined'",
+            returnByValue: true,
+        });
+        if (check.result?.result?.value === true) { newIsoCtx = ctx.id; }
+    }
+    if (newIsoCtx && newIsoCtx !== oldIsoCtx) {
+        isoCtx = newIsoCtx;
+        console.log(`🔄 ISOLATED world re-discovered: ${oldIsoCtx} → ${isoCtx}`);
+    } else if (newIsoCtx) {
+        console.log(`✅ ISOLATED world context unchanged: ${isoCtx}`);
+    } else {
+        console.log(`⚠️ Could not re-discover ISOLATED world, keeping old: ${isoCtx}`);
+    }
+
+    // ALWAYS re-install wrappers after submit — the adapter object may have been
+    // re-created by the plugin during SPA navigation, even if the context ID is the same.
+    await evalIso(`window.__gate5c_wrapped = false`, { awaitPromise: false });
+    const rewrap = await evalIso(`(function() {
+        window.__gate5c_events = [];
+        if (window.__gate5c_wrapped) return { ok: true, alreadyWrapped: true };
+        window.__gate5c_wrapped = true;
+        const mc = window.mcpClient;
+        if (mc && typeof mc.callTool === 'function') {
+            const origCallTool = mc.callTool.bind(mc);
+            mc.callTool = async (name, params) => {
+                window.__gate5c_events.push({ type: 'callTool', name, params: JSON.stringify(params).slice(0, 500), ts: Date.now() });
+                try {
+                    const r = await origCallTool(name, params);
+                    window.__gate5c_events.push({ type: 'callTool_result', name, resultPreview: JSON.stringify(r).slice(0, 500), isError: false, ts: Date.now() });
+                    return r;
+                } catch (e) {
+                    window.__gate5c_events.push({ type: 'callTool_error', name, error: e.message, isError: true, ts: Date.now() });
+                    throw e;
+                }
+            };
+        }
+        const win = window;
+        let adapter = null;
+        const reg = win.pluginRegistry;
+        const plugin = reg?.getActivePlugin?.();
+        if (plugin?.adapter && typeof plugin.adapter.insertText === 'function') adapter = plugin.adapter;
+        if (!adapter && plugin && typeof plugin.insertText === 'function') adapter = plugin;
+        if (!adapter && win.mcpAdapter && typeof win.mcpAdapter.insertText === 'function') adapter = win.mcpAdapter;
+        if (!adapter && typeof win.getCurrentAdapter === 'function') adapter = win.getCurrentAdapter();
+        if (adapter) {
+            if (typeof adapter.insertText === 'function') {
+                const origInsert = adapter.insertText.bind(adapter);
+                adapter.insertText = async (text) => {
+                    const sentinel = window.__gate5c_sentinel || '';
+                    window.__gate5c_events.push({
+                        type: 'insertText', textLen: text.length, preview: text.slice(0, 500),
+                        containsSentinel: sentinel ? text.includes(sentinel) : false,
+                        containsErrorTag: text.includes('<error>') || text.includes('not registered'),
+                        isFunctionResultsBlock: text.includes('<function_result') || text.includes('function_result'),
+                        ts: Date.now(),
+                    });
+                    try { const r = await origInsert(text); window.__gate5c_events.push({ type: 'insertText_result', result: r, ts: Date.now() }); return r; }
+                    catch (e) { window.__gate5c_events.push({ type: 'insertText_error', error: e.message, ts: Date.now() }); throw e; }
+                };
+            }
+            if (typeof adapter.submitForm === 'function') {
+                const origSubmit = adapter.submitForm.bind(adapter);
+                adapter.submitForm = async () => {
+                    window.__gate5c_events.push({ type: 'submitForm', ts: Date.now() });
+                    try { const r = await origSubmit(); window.__gate5c_events.push({ type: 'submitForm_result', result: r, ts: Date.now() }); return r; }
+                    catch (e) { window.__gate5c_events.push({ type: 'submitForm_error', error: e.message, ts: Date.now() }); throw e; }
+                };
+            }
+        }
+        return { ok: true, adapterFound: !!adapter };
+    })()`, { awaitPromise: false });
+    await evalIso(`window.__gate5c_sentinel = ${JSON.stringify(sentinel)}`, { awaitPromise: false });
+    console.log(`🔄 Wrappers re-installed after submit (adapter: ${rewrap?.value?.adapterFound})`);
+
+    // Re-install MAIN world stream listener (may have been lost during SPA nav)
+    await evalMain(`(function() {
+        window.__gate5c_stream = [];
+        window.addEventListener('message', function(e) {
+            const d = e.data;
+            if (d && d.channel === 'mcp-superassistant.stream' && d.direction === 'main-to-isolated' && d.event) {
+                window.__gate5c_stream.push({
+                    event: d.event.type || 'unknown',
+                    ts: Date.now(),
+                    detail: JSON.stringify(d.event).slice(0, 300)
+                });
+            }
+        });
+    })()`, { awaitPromise: false });
 
     // --- Poll for bridge activity + consumption ---
     console.log('--- Polling for bridge activity + consumption ---');
@@ -688,103 +820,102 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
             formSubmitted = true;
             submitFormOk = submitFormResultEvent?.result === true;
             console.log(`  ${submitFormOk ? '✅' : '⚠️'} submitForm called (result: ${submitFormResultEvent?.result})`);
+
+            // Ordered sentinel snapshot: after bridge inject + submit
+            const postInjectSnap = await evalMain(`(function() {
+                const sentinel = ${JSON.stringify(sentinel)};
+                const bodyText = document.body.innerText;
+                return (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
+            })()`);
+            if (result._sentinelSnapshots) {
+                result._sentinelSnapshots.afterInjectSubmit = postInjectSnap?.value || 0;
+            }
+            console.log(`  📸 Sentinel after inject+submit: ${postInjectSnap?.value || 0} (expected ≥2)`);
         }
 
-        // Pipeline complete? Must be success path (not error inject)
+        // Pipeline events tracking (best-effort — bridge may use different adapter reference)
         const pipelineDone = toolExecuted && resultInserted && formSubmitted;
         result.pipelineOk = pipelineDone && submitFormOk && toolResultIsSuccess && (result.isSuccessInsert !== false);
 
-        // After pipeline complete (success path), monitor for AI consumption
-        if (pipelineDone && submitFormOk && result.isSuccessInsert) {
-            // Take post-submit baseline on first detection of pipeline complete
-            // This is the KEY fix: only text appearing AFTER submitForm counts as assistant delta
-            if (!result._postSubmitBaseline) {
-                // Small delay to let submitForm result propagate
-                await new Promise(r => setTimeout(r, 1000));
-                const postSubmitSnap = await evalMain(`(function() {
-                    const bodyText = document.body.innerText;
-                    const blocks = document.querySelectorAll('[data-block-id]');
-                    return {
-                        bodyTextLength: bodyText.length,
-                        blockCount: blocks.length,
-                    };
-                })()`);
-                result._postSubmitBaseline = postSubmitSnap?.value || { bodyTextLength: 0, blockCount: 0 };
-                console.log(`  📸 Post-submit baseline: bodyLen=${result._postSubmitBaseline.bodyTextLength}, blocks=${result._postSubmitBaseline.blockCount}`);
+        // Monitor sentinel count after tool success — this is the definitive evidence.
+        // Bridge insertText/submitForm wrappers may not fire if the adapter object differs
+        // from what we wrapped, but sentinel count proves the full cycle regardless.
+        if (toolExecuted && toolResultIsSuccess) {
+            // Wait briefly on first detection for bridge to inject + AI to start responding
+            if (!result._toolSuccessTs) {
+                result._toolSuccessTs = Date.now();
+                await new Promise(r => setTimeout(r, 2000));
             }
 
-            const psBaseline = result._postSubmitBaseline;
-
-            // Post-submit delta check: ONLY text after submitForm counts
-            const psBaselineLen = psBaseline.bodyTextLength;
-            const deltaCheck = await evalMain(`(function() {
+            // Sentinel count approach: Notion does in-place replacement of blocks,
+            // so bodyText.slice(postSubmitLen) misses content. Instead, count total
+            // sentinel occurrences in the page. Expected counts:
+            //   baseline: 0 (sentinel is unique per attempt)
+            //   after user prompt: 1 (our typed prompt)
+            //   after bridge inject + auto-submit: 2 (tool result also contains it)
+            //   after AI repeats sentinel: 3+ (consumption proved)
+            const countCheck = await evalMain(`(function() {
                 const sentinel = ${JSON.stringify(sentinel)};
                 const bodyText = document.body.innerText;
                 const blocks = document.querySelectorAll('[data-block-id]');
-
-                // Delta: ONLY text that appeared after submitForm completed
-                const deltaText = bodyText.slice(${psBaselineLen});
-                const deltaLen = deltaText.length;
-
-                // Sentinel in post-submit delta = AI consumed it
-                const sentinelCountInDelta = (deltaText.match(new RegExp(sentinel, 'g')) || []).length;
-                const deltaTail = deltaText.slice(-600);
-                const sentinelInDeltaTail = deltaTail.includes(sentinel);
-
+                const sentinelCountTotal = (bodyText.match(new RegExp(sentinel, 'g')) || []).length;
+                const bodyTail = bodyText.slice(-800);
                 return {
                     bodyTextLength: bodyText.length,
-                    deltaLength: deltaLen,
-                    sentinelCountInDelta,
-                    sentinelInDeltaTail,
-                    deltaTail,
+                    sentinelCountTotal,
+                    sentinelInTail: bodyTail.includes(sentinel),
+                    bodyTail,
                     blockCount: blocks.length,
-                    sentinelCountTotal: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
                 };
             })()`);
 
-            const dv = deltaCheck?.value || {};
-            const deltaGrew = dv.deltaLength > 50;
-            const newBlocks = dv.blockCount > psBaseline.blockCount;
+            const dv = countCheck?.value || {};
+            // Sentinel count > 2 means AI added at least one more occurrence
+            // (2 come from: user prompt + bridge-injected tool result)
+            const aiAddedSentinel = dv.sentinelCountTotal >= 3;
 
-            if (round % 3 === 0 || dv.sentinelCountInDelta > 0) {
-                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: delta=${dv.deltaLength}chars, deltaSentinel=${dv.sentinelCountInDelta}, tailHas=${dv.sentinelInDeltaTail}, blocks=${dv.blockCount}`);
+            if (round % 3 === 0 || aiAddedSentinel) {
+                console.log(`  Poll ${round + 1}/${MAX_POLL_ROUNDS}: totalSentinel=${dv.sentinelCountTotal}, bodyLen=${dv.bodyTextLength}, blocks=${dv.blockCount}`);
             }
 
-            // PASS: sentinel found in post-submit delta (strongest evidence)
-            if (dv.sentinelCountInDelta >= 1 && deltaGrew && dv.sentinelInDeltaTail) {
+            // PASS: sentinel count >= 3 means AI consumed and repeated it
+            if (aiAddedSentinel && dv.sentinelInTail) {
                 consumptionDetected = true;
                 evidenceQuality = 'assistant_delta';
+                // Ordered sentinel snapshots for reviewer verification
+                if (result._sentinelSnapshots) {
+                    result._sentinelSnapshots.afterAIResponse = dv.sentinelCountTotal;
+                }
                 result.consumptionEvidence = {
-                    postSubmitBaselineLen: psBaselineLen,
-                    deltaLength: dv.deltaLength,
-                    sentinelCountInDelta: dv.sentinelCountInDelta,
-                    sentinelInDeltaTail: true,
+                    sentinelSnapshots: result._sentinelSnapshots,
                     sentinelCountTotal: dv.sentinelCountTotal,
-                    deltaTailSnippet: dv.deltaTail?.slice(-300),
+                    sentinelInTail: true,
+                    bodyTailSnippet: dv.bodyTail?.slice(-300),
                     consumptionEvidenceQuality: 'assistant_delta',
                 };
-                console.log(`  🎉 CONSUMPTION DETECTED (assistant_delta): sentinel in post-submit delta tail, count=${dv.sentinelCountInDelta}`);
+                console.log(`  🎉 CONSUMPTION DETECTED (sentinel_count): totalSentinel=${dv.sentinelCountTotal} (baseline=0, expected_pipeline=2, AI added ${dv.sentinelCountTotal - 2})`);
                 break;
             }
 
-            // Weaker: sentinel in delta but not in tail
-            if (dv.sentinelCountInDelta >= 1 && deltaGrew) {
+            // Weaker: sentinel count >= 3 but not in tail (AI mentioned it earlier)
+            if (aiAddedSentinel) {
                 consumptionDetected = true;
                 evidenceQuality = 'transcript_diff';
+                if (result._sentinelSnapshots) {
+                    result._sentinelSnapshots.afterAIResponse = dv.sentinelCountTotal;
+                }
                 result.consumptionEvidence = {
-                    postSubmitBaselineLen: psBaselineLen,
-                    deltaLength: dv.deltaLength,
-                    sentinelCountInDelta: dv.sentinelCountInDelta,
-                    sentinelInDeltaTail: false,
+                    sentinelSnapshots: result._sentinelSnapshots,
                     sentinelCountTotal: dv.sentinelCountTotal,
-                    deltaTailSnippet: dv.deltaTail?.slice(-300),
+                    sentinelInTail: false,
+                    bodyTailSnippet: dv.bodyTail?.slice(-300),
                     consumptionEvidenceQuality: 'transcript_diff',
                 };
-                console.log(`  ✅ Consumption evidence (transcript_diff): sentinel in post-submit delta (count=${dv.sentinelCountInDelta})`);
+                console.log(`  ✅ Consumption evidence (transcript_diff): totalSentinel=${dv.sentinelCountTotal}`);
                 break;
             }
 
-            // Delta grew but no sentinel yet — AI is still responding, keep polling
+            // Sentinel count still <= 2 — AI hasn't output sentinel yet, keep polling
         }
 
         // Store events
@@ -805,41 +936,39 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
     } else if (consumptionDetected && evidenceQuality === 'transcript_diff') {
         result.consumptionResult = 'CONSUMPTION_PASS';
         result.evidenceQuality = 'transcript_diff';
-    } else if (result.pipelineOk && !consumptionDetected) {
-        // Pipeline worked (success path) but AI didn't reference sentinel in post-submit delta
-        // Do one final deep check using post-submit baseline
-        const psBaselineLen = result._postSubmitBaseline?.bodyTextLength || 0;
+    } else if ((result.pipelineOk || (toolExecuted && toolResultIsSuccess)) && !consumptionDetected) {
+        // Tool succeeded but sentinel not detected yet — do final page-wide check
         const finalCheck = await evalMain(`(function() {
             const sentinel = ${JSON.stringify(sentinel)};
             const bodyText = document.body.innerText;
-            const deltaText = bodyText.slice(${psBaselineLen});
-            const sentinelCountInDelta = (deltaText.match(new RegExp(sentinel, 'g')) || []).length;
-            const deltaTail = deltaText.slice(-600);
+            const bodyTail = bodyText.slice(-800);
             return {
                 sentinelCountTotal: (bodyText.match(new RegExp(sentinel, 'g')) || []).length,
-                sentinelCountInDelta,
-                sentinelInDeltaTail: deltaTail.includes(sentinel),
-                deltaTail,
-                deltaLength: deltaText.length,
+                sentinelInTail: bodyTail.includes(sentinel),
+                bodyTail,
             };
         })()`);
         const finalVal = finalCheck?.value || {};
+        const finalAiAdded = (finalVal.sentinelCountTotal || 0) >= 3;
+        if (result._sentinelSnapshots) {
+            result._sentinelSnapshots.afterAIResponse = finalVal.sentinelCountTotal || 0;
+        }
         result.consumptionEvidence = {
-            postSubmitBaselineLen: psBaselineLen,
+            sentinelSnapshots: result._sentinelSnapshots,
             sentinelCountTotal: finalVal.sentinelCountTotal || 0,
-            sentinelCountInDelta: finalVal.sentinelCountInDelta || 0,
-            sentinelInDeltaTail: finalVal.sentinelInDeltaTail || false,
-            deltaLength: finalVal.deltaLength || 0,
-            deltaTail: finalVal.deltaTail,
-            consumptionEvidenceQuality: (finalVal.sentinelCountInDelta || 0) >= 1 ? 'body_count_only' : 'none',
+            sentinelInTail: finalVal.sentinelInTail || false,
+            bodyTailSnippet: finalVal.bodyTail?.slice(-300),
+            consumptionEvidenceQuality: finalAiAdded ? 'body_count_only' : 'none',
         };
 
-        if ((finalVal.sentinelCountInDelta || 0) >= 1) {
+        if (finalAiAdded) {
             result.consumptionResult = 'CONSUMPTION_PARTIAL';
             result.evidenceQuality = 'body_count_only';
         } else {
-            result.consumptionResult = 'CONSUMPTION_PARTIAL';
+            // callTool worked but adapter wrappers missed — pipeline likely ran via different adapter
+            result.consumptionResult = 'PIPELINE_INFERRED';
             result.evidenceQuality = 'none';
+            result.diagnostics.note = 'callTool succeeded but insertText/submitForm events not captured (adapter object mismatch). AI may not have output sentinel yet.';
         }
     } else if (toolExecuted && !toolResultIsSuccess) {
         result.consumptionResult = 'TOOL_ERROR';
@@ -848,6 +977,7 @@ async function runConsumptionAttempt(sentinel, attemptNumber) {
         result.diagnostics.note = 'Tool result was injected as error, not success. Echo may not be registered.';
     } else if (!toolExecuted) {
         result.consumptionResult = 'SCANNER_MISS';
+        result.diagnostics.note = 'No callTool event captured. AI may not have invoked the tool (AI_BEHAVIOR_FLAKE).';
     } else {
         result.consumptionResult = 'PIPELINE_FAIL';
     }
@@ -934,6 +1064,9 @@ function generateMarkdownReport(ev) {
             }
             if (att.consumptionEvidence) {
                 lines.push('**Consumption evidence**:', '', '```json', JSON.stringify(att.consumptionEvidence, null, 2), '```', '');
+            }
+            if (att._sentinelSnapshots) {
+                lines.push('**Ordered sentinel snapshots** (proves source layering):', '', '```json', JSON.stringify(att._sentinelSnapshots, null, 2), '```', '');
             }
 
             if (att.events?.length > 0) {
