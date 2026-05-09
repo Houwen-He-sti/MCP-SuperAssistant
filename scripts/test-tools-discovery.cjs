@@ -114,6 +114,8 @@ async function main() {
   `);
   const toolsData = JSON.parse(toolsResult);
   
+  let failures = 0;
+  
   if (toolsData?.payload) {
     const tools = Array.isArray(toolsData.payload) ? toolsData.payload : (toolsData.payload.tools || []);
     console.log(`Tool count: ${tools.length}`);
@@ -123,14 +125,17 @@ async function main() {
     } else {
       console.log('FAIL: 0 tools returned');
       console.log('Full response:', JSON.stringify(toolsData, null, 2).substring(0, 500));
+      failures++;
     }
   } else {
     console.log('FAIL: Unexpected response format');
     console.log('Response:', JSON.stringify(toolsData, null, 2).substring(0, 500));
+    failures++;
   }
 
   // Step 3: Try calling a tool
-  const toolCount = Array.isArray(toolsData?.payload) ? toolsData.payload.length : 0;
+  const tools = Array.isArray(toolsData?.payload) ? toolsData.payload : (toolsData?.payload?.tools || []);
+  const toolCount = tools.length;
   if (toolCount > 0) {
     console.log('\n--- Step 3: Call tool ---');
     const callResult = await evalInIsolated(cdp, contextId, `
@@ -149,10 +154,19 @@ async function main() {
       console.log('\nSUCCESS: Tool call working!');
     } else {
       console.log('Tool call failed:', callData?.payload?.error || callData?.error || 'unknown');
+      failures++;
     }
+  } else {
+    console.log('\nSKIP: Step 3 (no tools discovered)');
+    failures++;
   }
 
   cdp.close();
+
+  if (failures > 0) {
+    console.log(`\n${failures} step(s) failed`);
+    process.exit(1);
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

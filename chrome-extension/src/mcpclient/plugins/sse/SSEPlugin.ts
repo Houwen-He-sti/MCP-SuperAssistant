@@ -171,37 +171,37 @@ export class SSEPlugin implements ITransportPlugin {
       const primitives: any[] = [];
       const promises: Promise<void>[] = [];
 
-      // Always attempt to list resources/tools/prompts even if capabilities
-      // are not explicitly declared. Some MCP proxies omit capability
-      // declarations while still supporting these methods.
-      if (capabilities?.resources !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
-        promises.push(
-          client.listResources().then(({ resources }) => {
-            resources.forEach(item => primitives.push({ type: 'resource', value: item }));
-          }).catch(error => {
-            logger.debug('[SSEPlugin] listResources not supported:', error);
-          }),
-        );
+      // When capabilities explicitly declare a type, call the list method
+      // and let errors propagate (they indicate real failures).
+      // When capabilities are empty or missing (e.g. proxy bug), probe
+      // with error catching — Method not found is expected and safe to ignore.
+      const isProbing = !capabilities || Object.keys(capabilities).length === 0;
+
+      if (capabilities?.resources || isProbing) {
+        const p = client.listResources().then(({ resources }) => {
+          resources.forEach(item => primitives.push({ type: 'resource', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[SSEPlugin] listResources probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.tools !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
-        promises.push(
-          client.listTools().then(({ tools }) => {
-            tools.forEach(item => primitives.push({ type: 'tool', value: item }));
-          }).catch(error => {
-            logger.debug('[SSEPlugin] listTools not supported:', error);
-          }),
-        );
+      if (capabilities?.tools || isProbing) {
+        const p = client.listTools().then(({ tools }) => {
+          tools.forEach(item => primitives.push({ type: 'tool', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[SSEPlugin] listTools probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
-      if (capabilities?.prompts !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
-        promises.push(
-          client.listPrompts().then(({ prompts }) => {
-            prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
-          }).catch(error => {
-            logger.debug('[SSEPlugin] listPrompts not supported:', error);
-          }),
-        );
+      if (capabilities?.prompts || isProbing) {
+        const p = client.listPrompts().then(({ prompts }) => {
+          prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
+        });
+        promises.push(isProbing ? p.catch(error => {
+          logger.debug('[SSEPlugin] listPrompts probe failed (expected if unsupported):', error);
+        }) : p);
       }
 
       await Promise.all(promises);
