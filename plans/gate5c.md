@@ -1,10 +1,12 @@
-# Gate 5c: AI Consumption / Sentinel Verification E2E
+# Gate 5c: Success-Path Tool Execution + Same-Turn Consumption Boundary Discovery
 
 > PR branch: `feat/gate-5c`
 > PR: #22
 > Issue: https://github.com/Houwen-He-sti/MCP-SuperAssistant/issues/20 (follow-up)
 > Author: Opus/Claude
 > Depends on: Gate 5b (PR #21, MERGED)
+> **Status: CLOSED — Redefined as pipeline proof + architecture discovery**
+> **Outcome: Same-turn consumption proved impossible. See retrospective at bottom.**
 
 ---
 
@@ -331,5 +333,44 @@ Gate 5c 的代码改动量很小：
 4. 确保 MCP 连接正确（需要诊断 echo 未注册的根因）
 
 **主要不确定性**: echo 未注册的根因——如果是 proxy 配置问题，可能需要额外调试。
+
+---
+
+## Retrospective: Outcome + Architecture Discovery (2026-05-11)
+
+### Final Status: PIPELINE_SUCCESS + SAME_TURN_CONSUMPTION_UNSUPPORTED
+
+Gate 5c originally aimed to prove AI consumption of tool results. After extensive testing (10+ E2E runs across sentinel and timestamp methods), we discovered:
+
+**What was proven:**
+1. ✅ callTool intercept works (~89% success; fails only when AI doesn't invoke tool)
+2. ✅ Tool execution + result return: 100% (when callTool triggers)
+3. ✅ callTool_result contains sentinel/timestamp: 100%
+
+**What was disproven:**
+4. ❌ Same-turn AI consumption of tool results: **architecturally impossible**
+
+### Root Cause
+
+The bridge injects results AFTER the AI finishes its current response. The AI can only see injected results in the NEXT turn. This is not a bug — it's the architecture of DOM next-turn injection.
+
+### Evidence
+
+- 5/5 timestamp verification attempts failed
+- AI explicitly states: "目前尚未收到返回，因此无法编造 timestamp"
+- Earlier sentinel PASS was AI echoing prompt text, not tool result consumption
+
+### Redefinition
+
+Gate 5c is now closed as:
+- **Pipeline proof**: success-path callTool → execution → result return works
+- **Boundary discovery**: same-turn consumption does not happen in this architecture
+- **Pointer to #24**: true consumption verification requires cross-turn ACK (VSCode-Dir Issue #24)
+
+### Follow-up
+
+- Gate 5c.1: Bridge-level result handoff ACK (production bridge emits event)
+- Gate 5d: Cross-turn model ACK (AI confirms receipt in next turn)
+- Full retrospective: `VSCode-Dir/docs/investigations/2026-05-11-gate5c-retrospective-methodology-failure.md`
 
 Author: Opus/Claude
