@@ -59,7 +59,8 @@ function isValidStreamEvent(raw: Record<string, unknown>): boolean {
       return true;
 
     case 'stream_chunk_text':
-      return typeof raw.text === 'string' && raw.text.length > 0 && raw.text.length <= MAX_RAW_LINE_LENGTH;
+      return typeof raw.text === 'string' && raw.text.length > 0 && raw.text.length <= MAX_RAW_LINE_LENGTH
+        && typeof raw.chunkIndex === 'number' && Number.isSafeInteger(raw.chunkIndex) && (raw.chunkIndex as number) >= 0;
 
     default:
       return false;
@@ -272,6 +273,22 @@ describe('interceptorBridge validation', () => {
       const data = validData({
         type: 'stream_chunk_text', streamId: 'x',
         text: 12345, chunkIndex: 0,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with negative chunkIndex', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 'valid text', chunkIndex: -1,
+      });
+      assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
+    });
+
+    test('rejects stream_chunk_text with missing chunkIndex', () => {
+      const data = validData({
+        type: 'stream_chunk_text', streamId: 'x',
+        text: 'valid text',
       });
       assert.equal(shouldAcceptMessage(mockWindow, ORIGIN, mockWindow, ORIGIN, data), false);
     });

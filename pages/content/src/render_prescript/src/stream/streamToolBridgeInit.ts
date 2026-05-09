@@ -10,6 +10,7 @@ import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/s
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
 import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
 import { createAckTracker, type AckTracker } from './ackTracker';
+import type { StreamEvent } from './types';
 import {
   createStreamToolHandler,
   getAdapterDiagnostic,
@@ -53,6 +54,8 @@ let unsubscribeTextScan: (() => void) | null = null;
 let ackTrackerInstance: AckTracker | null = null;
 /** StreamId of the last bridge handoff — text scan skips this stream (GPT P1-4). */
 let lastHandoffStreamId: string | null = null;
+/** Last model ACK event for diagnostic observability (GPT P1-2/P1-7). */
+let lastModelAckEvent: import('./ackTracker').ModelAckEvent | null = null;
 
 /** Default ACK timeout (ms) — how long to wait for model to echo nonce. */
 const ACK_TIMEOUT_MS = 30_000;
@@ -141,6 +144,16 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     onEvent: (event) => {
       const level = event.type === 'model_ack_timeout' ? 'warn' : 'debug';
       console[level]('[AckTracker]', event.type, event.nonce, event.functionName);
+
+      // Store for diagnostic polling (getStreamToolBridgeInfo)
+      lastModelAckEvent = event;
+
+      // Dispatch CustomEvent for E2E observability (GPT P1-2)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:model-ack', {
+          detail: { type: event.type, nonce: event.nonce, callId: event.callId, functionName: event.functionName, latencyMs: event.latencyMs },
+        }));
+      }
     },
   });
 
@@ -191,19 +204,18 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   // Gate 5d: Register text scan listener for ACK nonce detection
   // Scans stream_chunk_text events for pending nonces in raw NDJSON text.
   // Skips the handoff stream (same-stream echo) per GPT P1-4.
-  const textScanHandler = (event: unknown): void => {
-    const e = event as { type?: string; streamId?: string; text?: string };
-    if (e?.type !== 'stream_chunk_text' || typeof e.text !== 'string') return;
+  const textScanHandler = (event: StreamEvent): void => {
+    if (event.type !== 'stream_chunk_text') return;
     if (!ackTrackerInstance || ackTrackerInstance.getPendingCount() === 0) return;
     // Skip scanning the same stream that triggered the handoff
-    if (e.streamId && e.streamId === lastHandoffStreamId) return;
-    ackTrackerInstance.scanRawText(e.text);
+    if (event.streamId === lastHandoffStreamId) return;
+    ackTrackerInstance.scanRawText(event.text);
   };
 
   if (isNotionHost()) {
-    unsubscribeTextScan = onStreamEventBridge(textScanHandler as any);
+    unsubscribeTextScan = onStreamEventBridge(textScanHandler);
   } else {
-    unsubscribeTextScan = onStreamEventIsolated(textScanHandler as any);
+    unsubscribeTextScan = onStreamEventIsolated(textScanHandler);
   }
 }
 
@@ -233,6 +245,7 @@ export function getStreamToolBridgeInfo(): {
   inputTextLength: number | null;
   ackTrackerActive: boolean;
   ackPendingCount: number;
+  lastModelAckEvent: import('./ackTracker').ModelAckEvent | null;
 } {
   const mcpClient = resolveMcpClient();
   const currentAdapter = resolveCurrentAdapter();
@@ -247,5 +260,6 @@ export function getStreamToolBridgeInfo(): {
     ...adapterDiag,
     ackTrackerActive: ackTrackerInstance !== null,
     ackPendingCount: ackTrackerInstance?.getPendingCount() ?? 0,
+    lastModelAckEvent: lastModelAckEvent ? { ...lastModelAckEvent } : null,
   };
 }

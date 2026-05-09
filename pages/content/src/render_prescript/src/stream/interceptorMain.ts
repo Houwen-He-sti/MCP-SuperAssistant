@@ -302,6 +302,9 @@ if ((window as any)[INSTALL_KEY]) {
                         if (remaining) buffer += remaining;
 
                         const lastLine = buffer.trim();
+                        if (lastLine.length > 0) {
+                            maybeEmitChunkText(streamId, chunkIndex, lastLine);
+                        }
                         if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
                             const result = scanner.processLine(lastLine);
                             if (result.detected) {
@@ -345,9 +348,10 @@ if ((window as any)[INSTALL_KEY]) {
                         for (const line of lines) {
                             const trimmed = line.trim();
                             if (trimmed.length === 0) continue;
-                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
                             maybeEmitChunkText(streamId, chunkIndex, trimmed);
+
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
                             const result = scanner.processLine(trimmed);
                             if (result.accumulating) continue; // Need more patches
@@ -412,6 +416,9 @@ if ((window as any)[INSTALL_KEY]) {
                         if (remaining) buffer += remaining;
 
                         const lastLine = buffer.trim();
+                        if (lastLine.length > 0) {
+                            maybeEmitChunkText(streamId, chunkIndex, lastLine);
+                        }
                         if (lastLine.length > 0 && lastLine.length <= MAX_RAW_LINE_LENGTH && !functionCallDetected) {
                             const result = scanner.processLine(lastLine);
                             if (result.detected) {
@@ -452,9 +459,10 @@ if ((window as any)[INSTALL_KEY]) {
                         for (const line of lines) {
                             const trimmed = line.trim();
                             if (trimmed.length === 0) continue;
-                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
                             maybeEmitChunkText(streamId, chunkIndex, trimmed);
+
+                            if (trimmed.length > MAX_RAW_LINE_LENGTH) continue;
 
                             const result = scanner.processLine(trimmed);
                             if (result.accumulating) continue; // Need more patches

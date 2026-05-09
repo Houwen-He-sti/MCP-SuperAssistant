@@ -158,11 +158,16 @@ function validateStreamEvent(raw: Record<string, unknown>): StreamEvent | null {
         logger.warn('Rejected stream_chunk_text: invalid text');
         return null;
       }
+      const chunkIdx = raw.chunkIndex;
+      if (typeof chunkIdx !== 'number' || !Number.isSafeInteger(chunkIdx) || chunkIdx < 0) {
+        logger.warn('Rejected stream_chunk_text: invalid chunkIndex');
+        return null;
+      }
       return {
         type: 'stream_chunk_text',
         streamId,
         text,
-        chunkIndex: typeof raw.chunkIndex === 'number' ? raw.chunkIndex : 0,
+        chunkIndex: chunkIdx,
         truncated: typeof raw.truncated === 'boolean' ? raw.truncated : false,
       };
     }
