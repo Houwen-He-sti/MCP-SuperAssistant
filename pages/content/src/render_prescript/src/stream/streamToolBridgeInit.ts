@@ -195,7 +195,9 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     sendConfigToMainWorld({
       enabled: currentConfig.cutoffEnabled,
       mode: undefined, // cutoff mode managed by bridge config, not tool bridge
-      requireStructuredIdentity: false, // Notion's patch format may not always produce structured identity
+      requireStructuredIdentity: false, // Gate 5d: Notion NDJSON patches never produce standard function_call JSON,
+                                        // so MAIN world cutoff must fire without structured identity.
+                                        // Downstream handler still validates identity independently.
       emitChunkText: true,
     });
     unsubscribe = onStreamEventBridge(bridgeHandler);
