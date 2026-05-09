@@ -4,10 +4,11 @@
  * Tests the production cooperation between:
  * - createStreamToolHandler (streamToolBridge.ts)
  * - injectResultIfSafe (streamToolBridge.ts)
+ * - createFunctionCallScanner (functionCallScanner.ts)
  * - createAckTracker (ackTracker.ts)
  * - appendAckInstruction / formatFunctionResult (functionResultFormatter.ts)
  *
- * Covers test plan §5.1–5.4, §5.8–5.11, §5.15–5.16 (bridge core, safety, scanner).
+ * Covers test plan §5.1–5.4, §5.6, §5.8–5.11, §5.15–5.16 (bridge core, safety, scanner).
  *
  * Per testing-strategy.md §5: integration tests are required when
  * production modules call each other through injected dependencies.
@@ -36,6 +37,7 @@ import {
   type ModelAckEvent,
   type AckTracker,
 } from './ackTracker.ts';
+import { createFunctionCallScanner } from './functionCallScanner.ts';
 
 // --- Shared mock factories ---
 
@@ -1272,5 +1274,294 @@ describe('Integration: identity validation and parse edge cases (§5.15–5.16)'
     ) as StreamToolExecutionEvent;
     assert.ok(failed, 'Should fail with MCP_CLIENT_MISSING');
     assert.equal(failed.phase, 'mcp_client');
+  });
+});
+
+// --- Scanner → Bridge integration (GPT P1 requirement) ---
+
+describe('Integration: scanner → bridge pipeline', () => {
+  /**
+   * Helper: wire scanner + bridge together like production.
+   * Scanner detects function calls from NDJSON lines;
+   * on detection, fires bridge handler with stream_cutoff event.
+   */
+  function createScannerBridgePipeline(opts: {
+    mcpCallLog: Array<{ name: string; params: Record<string, unknown> }>;
+    events: BridgeEvent[];
+  }) {
+    const { mcpCallLog, events } = opts;
+
+    const scanner = createFunctionCallScanner();
+    let guardCounter = 0;
+    const sigs = new Set<string>();
+
+    const handler = createStreamToolHandler({
+      config: makeConfig(),
+      mcpClient: () => ({
+        isReady: () => true,
+        callTool: async (name: string, params: Record<string, unknown>) => {
+          mcpCallLog.push({ name, params });
+          return { status: 'ok' };
+        },
+      }),
+      guard: {
+        reserveExecution: (input) => {
+          const sig = `${input.functionName}:${input.callId}`;
+          if (sigs.has(sig)) return null;
+          sigs.add(sig);
+          return `key_${guardCounter++}`;
+        },
+        executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+      },
+      adapter: createMockAdapter(),
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    return { scanner, handler };
+  }
+
+  test('metadata patch false-positive must NOT reach bridge', async () => {
+    // This is the Bug C scenario from Gate 5d:
+    // A Notion metadata patch with "function_call" and "name" keywords in its metadata
+    // (e.g., agent-inference block definitions) should NOT trigger bridge execution.
+    const mcpCallLog: Array<{ name: string; params: Record<string, unknown> }> = [];
+    const events: BridgeEvent[] = [];
+    const { scanner, handler } = createScannerBridgePipeline({ mcpCallLog, events });
+
+    // Realistic metadata patch: type:"patch", contains "function_call" and "name" in metadata
+    // but text content does NOT contain function_call_start
+    const metadataPatch = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'a',
+        p: '/blocks/abc123',
+        v: {
+          type: 'agent-inference',
+          value: [{
+            type: 'function_call',
+            name: 'get_weather',
+            content: '',
+          }],
+        },
+      }],
+    });
+
+    const result = scanner.processLine(metadataPatch);
+
+    // Scanner should NOT detect this as a function call
+    assert.equal(result.detected, false, 'Metadata patch should not be detected as function call');
+    assert.equal(result.accumulating, false, 'Should not start accumulation');
+
+    // Even if we mistakenly fed it to bridge, verify bridge got 0 calls
+    if (result.detected && result.identity) {
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream_meta',
+        identity: result.identity,
+      });
+    }
+
+    assert.equal(mcpCallLog.length, 0, 'callTool must NOT be called for metadata patches');
+    const executionEvents = events.filter(e => e.type === 'stream_tool_execution');
+    assert.equal(executionEvents.length, 0, 'No bridge execution events for metadata patches');
+  });
+
+  test('cross-patch function call reaches bridge exactly once with correct identity', async () => {
+    // Realistic Notion patch sequence:
+    // 1. First patch: function_call_start with name and call_id
+    // 2. Middle patch: parameter data
+    // 3. Final patch: function_call_end
+    const mcpCallLog: Array<{ name: string; params: Record<string, unknown> }> = [];
+    const events: BridgeEvent[] = [];
+    const { scanner, handler } = createScannerBridgePipeline({ mcpCallLog, events });
+
+    // Patch 1: function_call_start
+    const patch1 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/def456/content',
+        v: '{"type":"function_call_start","name":"get_weather","call_id":"call_abc123"}\n',
+      }],
+    });
+
+    // Patch 2: parameter
+    const patch2 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/def456/content',
+        v: '{"type":"parameter","key":"city","value":"Tokyo"}\n',
+      }],
+    });
+
+    // Patch 3: function_call_end
+    const patch3 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/def456/content',
+        v: '{"type":"function_call_end","call_id":"call_abc123"}\n',
+      }],
+    });
+
+    // Process all patches through scanner
+    const r1 = scanner.processLine(patch1);
+    assert.equal(r1.detected, false, 'Patch 1: should not detect yet');
+    assert.equal(r1.accumulating, true, 'Patch 1: should start accumulating');
+
+    const r2 = scanner.processLine(patch2);
+    assert.equal(r2.detected, false, 'Patch 2: should not detect yet');
+    assert.equal(r2.accumulating, true, 'Patch 2: still accumulating');
+
+    const r3 = scanner.processLine(patch3);
+    assert.equal(r3.detected, true, 'Patch 3: should detect function call');
+    assert.equal(r3.accumulating, false, 'Patch 3: accumulation complete');
+    assert.ok(r3.identity, 'Should have extracted identity');
+    assert.equal(r3.identity!.name, 'get_weather');
+    assert.equal(r3.identity!.callId, 'call_abc123');
+
+    // Parse the arguments
+    const parsedArgs = JSON.parse(r3.identity!.arguments!);
+    assert.equal(parsedArgs.city, 'Tokyo');
+
+    // Feed to bridge — should execute exactly once
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream_cross_patch',
+      identity: r3.identity!,
+    });
+
+    // Verify bridge executed once with correct identity
+    assert.equal(mcpCallLog.length, 1, 'callTool should be called exactly once');
+    assert.equal(mcpCallLog[0].name, 'get_weather', 'Tool name should be get_weather');
+    assert.deepEqual(mcpCallLog[0].params, { city: 'Tokyo' }, 'Params should contain city:Tokyo');
+
+    // Verify no duplicate
+    const succeeded = events.filter(
+      e => e.type === 'stream_tool_execution' && (e as StreamToolExecutionEvent).status === 'succeeded'
+    );
+    assert.equal(succeeded.length, 1, 'Should emit exactly one succeeded event');
+    const duplicates = events.filter(
+      e => e.type === 'stream_tool_execution' && (e as StreamToolExecutionEvent).status === 'duplicate'
+    );
+    assert.equal(duplicates.length, 0, 'Should have no duplicates');
+  });
+
+  test('metadata patch during accumulation does not abort cross-patch detection', async () => {
+    // Interleaved scenario: function_call_start → metadata patch → parameter → function_call_end
+    const mcpCallLog: Array<{ name: string; params: Record<string, unknown> }> = [];
+    const events: BridgeEvent[] = [];
+    const { scanner, handler } = createScannerBridgePipeline({ mcpCallLog, events });
+
+    // Patch 1: function_call_start
+    const patch1 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/ghi789/content',
+        v: '{"type":"function_call_start","name":"search","call_id":"call_search_1"}\n',
+      }],
+    });
+
+    // Patch 2: metadata-only patch (no extractable text content)
+    const metaPatch = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'r',
+        p: '/blocks/ghi789/style',
+        v: { color: 'blue' },
+      }],
+    });
+
+    // Patch 3: parameter
+    const patch3 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/ghi789/content',
+        v: '{"type":"parameter","key":"query","value":"test search"}\n',
+      }],
+    });
+
+    // Patch 4: function_call_end
+    const patch4 = JSON.stringify({
+      type: 'patch',
+      v: [{
+        o: 'x',
+        p: '/blocks/ghi789/content',
+        v: '{"type":"function_call_end","call_id":"call_search_1"}\n',
+      }],
+    });
+
+    const r1 = scanner.processLine(patch1);
+    assert.equal(r1.accumulating, true);
+
+    const r2 = scanner.processLine(metaPatch);
+    assert.equal(r2.accumulating, true, 'Metadata patch should not abort accumulation');
+
+    const r3 = scanner.processLine(patch3);
+    assert.equal(r3.accumulating, true);
+
+    const r4 = scanner.processLine(patch4);
+    assert.equal(r4.detected, true, 'Should detect after function_call_end');
+    assert.equal(r4.identity!.name, 'search');
+
+    // Feed to bridge
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream_interleaved',
+      identity: r4.identity!,
+    });
+
+    assert.equal(mcpCallLog.length, 1, 'callTool called once despite interleaved metadata');
+    assert.equal(mcpCallLog[0].name, 'search');
+  });
+});
+
+// --- P2: DEFAULT_MAX_TOOL_CALLS_PER_STREAM usage ---
+
+describe('Integration: default circuit breaker constant', () => {
+  test('default max tool calls per stream matches production constant', async () => {
+    const events: BridgeEvent[] = [];
+    const mcpCalls: number[] = [];
+
+    let guardCounter = 0;
+    const handler = createStreamToolHandler({
+      // No circuitBreaker config → should use DEFAULT_MAX_TOOL_CALLS_PER_STREAM
+      config: makeConfig(),
+      mcpClient: () => ({
+        isReady: () => true,
+        callTool: async () => { mcpCalls.push(1); return 'ok'; },
+      }),
+      guard: {
+        reserveExecution: () => `key_${guardCounter++}`,
+        executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+      },
+      adapter: createMockAdapter(),
+      storage: createMockStorage(),
+      onEvent: (e) => events.push(e),
+    });
+
+    // Fire DEFAULT_MAX + 1 events on the same stream
+    for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_STREAM + 1; i++) {
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream_default_breaker',
+        identity: { name: 'tool_x', callId: `call_default_${i}`, arguments: '{}' },
+      });
+    }
+
+    // Exactly DEFAULT_MAX should execute
+    assert.equal(mcpCalls.length, DEFAULT_MAX_TOOL_CALLS_PER_STREAM,
+      `Should execute exactly ${DEFAULT_MAX_TOOL_CALLS_PER_STREAM} calls (default)`);
+
+    // The extra one should be blocked
+    const breakerEvents = events.filter(
+      e => e.type === 'stream_tool_execution'
+        && (e as StreamToolExecutionEvent).errorCode === 'CIRCUIT_BREAKER_OPEN'
+    );
+    assert.equal(breakerEvents.length, 1, 'Should have 1 circuit breaker event for the excess call');
   });
 });
