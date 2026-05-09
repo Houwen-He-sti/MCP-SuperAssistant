@@ -749,43 +749,58 @@ export class NotionAdapter extends BaseAdapterPlugin {
     /**
      * Find where to inject a tool result card in the Notion AI conversation UI.
      *
-     * Notion AI's /ai page uses `.notion-app-inner` as the main chat content
-     * area. Conversation messages appear as direct children (or within a
-     * scrollable container) inside this element.
-     *
-     * Strategy: find the main content area and append after the last
-     * visible message element, or fall back to appending at the bottom.
+     * PR #33 revealed that app-level scroll containers are too broad: they can
+     * create a full-width bottom card. Prefer a narrow chat-column wrapper near
+     * the Notion AI input; fall back to the root only if no better column exists.
      */
-    findToolResultMountPoint(_event?: { callId?: string }): ToolResultMountPoint | null {
+    findToolResultMountPoint(_event?: { callId?: string; kind?: string }): ToolResultMountPoint | null {
         if (!this.isSupported()) return null;
 
-        // Primary: find .notion-app-inner as the root reference
-        const chatContent = document.querySelector(this.selectors.CHAT_CONTENT) as HTMLElement | null;
-        if (!chatContent) return null;
+        const root = document.querySelector(this.selectors.CHAT_CONTENT) as HTMLElement | null;
+        if (!root) return null;
 
-        // Notion uses obfuscated atomic CSS classes (Stylex), so we can't rely on class
-        // names for finding the chat scroll container. Instead, walk the DOM to find a
-        // large scrollable container by computed style.
-        //
-        // Agent chat layout (as of 2025-07):
-        //   .notion-app-inner > div (unnamed) > ... > scrollable div (overflow-y: auto/scroll)
-        //     child 0: header bar (44px)
-        //     child 1: settings area (~170px)
-        //     child 2: chat content column (max-width: 774px, flex-grow: 1)
-        const scrollContainer = this.findScrollableContainer(chatContent);
-        const container = scrollContainer || chatContent;
+        const chatColumn = this.findChatColumnNearInput(root);
+        if (chatColumn) {
+            return { container: chatColumn, mode: 'append' as const };
+        }
 
-        // Append at end of container — Notion's agent chat page doesn't have
-        // stable selectors for individual message turns (all class names are
-        // obfuscated hashes like x78zum5, xdt5ytf). Appending is reliable.
-        return { container, mode: 'append' as const };
+        const scrollContainer = this.findScrollableContainer(root);
+        if (scrollContainer) {
+            return { container: scrollContainer, mode: 'append' as const };
+        }
+
+        return { container: root, mode: 'append' as const };
     }
 
     /**
-     * Walk DOM inside a root element to find the main scrollable conversation
-     * container. Returns the first large scrollable div (>500px wide, >300px tall).
-     * Notion doesn't use class-based selectors we can query, so we check
-     * computed overflow-y style.
+     * Find the narrow Notion AI chat column by walking upward from the input.
+     * This is more stable than Stylex class selectors and avoids choosing the
+     * full app-level scroll root.
+     */
+    private findChatColumnNearInput(root: HTMLElement): HTMLElement | null {
+        const selectors = this.selectors.CHAT_INPUT.split(', ');
+        let input: HTMLElement | null = null;
+        for (const sel of selectors) {
+            input = root.querySelector(sel.trim()) as HTMLElement | null;
+            if (input) break;
+        }
+        if (!input) return null;
+
+        let current: HTMLElement | null = input.parentElement;
+        let best: HTMLElement | null = null;
+        for (let depth = 0; depth < 8 && current && current !== root; depth++) {
+            const rect = current.getBoundingClientRect();
+            if (rect.width >= 500 && rect.width <= 900 && rect.height >= 80) {
+                best = current;
+            }
+            current = current.parentElement;
+        }
+        return best;
+    }
+
+    /**
+     * Fallback only: find a large scrollable div. This must not be the preferred
+     * path because it may select the app-level scroll container.
      */
     private findScrollableContainer(root: HTMLElement): HTMLElement | null {
         const divs = root.querySelectorAll('div');
@@ -793,7 +808,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
             const style = getComputedStyle(el);
             if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
             const rect = el.getBoundingClientRect();
-            if (rect.width > 500 && rect.height > 300) {
+            if (rect.width > 500 && rect.width < 1100 && rect.height > 300) {
                 return el as HTMLElement;
             }
         }
