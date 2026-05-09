@@ -759,31 +759,45 @@ export class NotionAdapter extends BaseAdapterPlugin {
     findToolResultMountPoint(_event?: { callId?: string }): ToolResultMountPoint | null {
         if (!this.isSupported()) return null;
 
-        // Primary: find .notion-app-inner chat area
+        // Primary: find .notion-app-inner as the root reference
         const chatContent = document.querySelector(this.selectors.CHAT_CONTENT) as HTMLElement | null;
         if (!chatContent) return null;
 
-        // Look for a scrollable conversation container inside .notion-app-inner
-        // Notion AI typically has a scroll container with message blocks
-        const scrollContainer = chatContent.querySelector(
-            '[class*="scroller"], [class*="scroll"], [style*="overflow"]'
-        ) as HTMLElement | null;
-
+        // Notion uses obfuscated atomic CSS classes (Stylex), so we can't rely on class
+        // names for finding the chat scroll container. Instead, walk the DOM to find a
+        // large scrollable container by computed style.
+        //
+        // Agent chat layout (as of 2025-07):
+        //   .notion-app-inner > div (unnamed) > ... > scrollable div (overflow-y: auto/scroll)
+        //     child 0: header bar (44px)
+        //     child 1: settings area (~170px)
+        //     child 2: chat content column (max-width: 774px, flex-grow: 1)
+        const scrollContainer = this.findScrollableContainer(chatContent);
         const container = scrollContainer || chatContent;
 
-        // Find the last message-like element to insert after
-        // Notion AI messages are typically contenteditable blocks or divs with specific attributes
-        const messages = container.querySelectorAll(
-            ':scope > [data-block-id], :scope > [class*="message"], :scope > [class*="agent"]'
-        );
-
-        if (messages.length > 0) {
-            const lastMessage = messages[messages.length - 1] as HTMLElement;
-            return { container, anchor: lastMessage, mode: 'after' as const };
-        }
-
-        // Fallback: append at end of container
+        // Append at end of container — Notion's agent chat page doesn't have
+        // stable selectors for individual message turns (all class names are
+        // obfuscated hashes like x78zum5, xdt5ytf). Appending is reliable.
         return { container, mode: 'append' as const };
+    }
+
+    /**
+     * Walk DOM inside a root element to find the main scrollable conversation
+     * container. Returns the first large scrollable div (>500px wide, >300px tall).
+     * Notion doesn't use class-based selectors we can query, so we check
+     * computed overflow-y style.
+     */
+    private findScrollableContainer(root: HTMLElement): HTMLElement | null {
+        const divs = root.querySelectorAll('div');
+        for (const el of divs) {
+            const style = getComputedStyle(el);
+            if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 500 && rect.height > 300) {
+                return el as HTMLElement;
+            }
+        }
+        return null;
     }
 
     private handleToolExecutionCompleted(data: any): void {
