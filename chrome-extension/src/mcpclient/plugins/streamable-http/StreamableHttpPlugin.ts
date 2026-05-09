@@ -154,7 +154,10 @@ export class StreamableHttpPlugin implements ITransportPlugin {
       const primitives: any[] = [];
       const promises: Promise<void>[] = [];
 
-      if (capabilities?.resources) {
+      // Always attempt to list resources/tools/prompts even if capabilities
+      // are not explicitly declared. Some MCP proxies omit capability
+      // declarations while still supporting these methods.
+      if (capabilities?.resources !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
         promises.push(
           client.listResources().then(({ resources }) => {
             resources.forEach(item => primitives.push({ type: 'resource', value: item }));
@@ -164,7 +167,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
         );
       }
 
-      if (capabilities?.tools) {
+      if (capabilities?.tools !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
         promises.push(
           client.listTools().then(({ tools }) => {
             tools.forEach(item => primitives.push({ type: 'tool', value: item }));
@@ -174,7 +177,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
         );
       }
 
-      if (capabilities?.prompts) {
+      if (capabilities?.prompts !== undefined || !capabilities || Object.keys(capabilities).length === 0) {
         promises.push(
           client.listPrompts().then(({ prompts }) => {
             prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
