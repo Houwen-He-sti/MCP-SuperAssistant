@@ -63,6 +63,12 @@ const TOOL_RESULT_CSS = `
 }
 `;
 
+function getAccordionTitle(data: ToolResultRenderData): string {
+    return data.status === 'pending' || data.status === 'running'
+        ? '正在接受应用响应'
+        : '已收到应用响应';
+}
+
 export function buildCardElement(data: ToolResultRenderData): HTMLElement {
     const card = document.createElement('div');
     card.className = 'mcp-tool-result-card';
@@ -76,7 +82,7 @@ export function buildCardElement(data: ToolResultRenderData): HTMLElement {
 
     const title = document.createElement('span');
     title.className = 'mcp-tool-result-title';
-    title.textContent = '已收到应用响应';
+    title.textContent = getAccordionTitle(data);
 
     const chevron = document.createElement('span');
     chevron.className = 'mcp-tool-result-chevron';
@@ -96,7 +102,7 @@ export function buildCardElement(data: ToolResultRenderData): HTMLElement {
     preview.setAttribute('data-visible', 'false');
 
     const pre = document.createElement('pre');
-    pre.textContent = data.status === 'success' ? data.resultPreview : (data.error || 'Unknown error');
+    pre.textContent = data.status === 'success' ? data.resultPreview : (data.error || data.resultPreview || '');
     preview.appendChild(pre);
 
     header.addEventListener('click', () => {
