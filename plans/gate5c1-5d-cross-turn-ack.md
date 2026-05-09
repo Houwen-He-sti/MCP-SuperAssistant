@@ -135,7 +135,36 @@ interface ModelAckEvent {
 3. **实现**: `ackTracker.ts`
 4. **实现**: `functionResultFormatter.ts` 追加 ACK instruction
 5. **实现**: `streamToolBridge.ts` 在 RESULT_SUBMITTED 后 emit + 注册 nonce
-6. **集成测试**: E2E script 验证真实 ACK
+6. **集成测试**: `streamToolBridge.integration.test.ts` — bridge + tracker 协作
+7. **E2E**: live Notion AI 验证 ACK 出现率
+
+---
+
+## 测试矩阵 (per testing-strategy.md)
+
+Unit tests:
+- `ackTracker.test.ts`: 14 tests — nonce 生成、pending 注册/确认/超时、scanText、dispose
+- `streamToolBridge.test.ts`: 73 existing tests — zero regressions (backward compat)
+
+Integration tests:
+- `streamToolBridge.integration.test.ts`: 7 tests — 生产模块跨边界协作
+  - bridge + tracker: RESULT_SUBMITTED → handoff ACK + nonce 注册
+  - bridge + tracker + scanText: 下一轮确认 ACK
+  - bridge 无 tracker: 向后兼容，不 emit ACK
+  - autoSubmit=false: 不生成 nonce
+  - appendAckInstruction: nonce 出现在注入文本中
+  - 多个 tool call: 独立 nonce + 独立 ACK
+  - ACK 超时: 配置时间后 emit timeout
+
+E2E / smoke tests:
+- 待 wiring 完成后用真实 Notion AI 验证 ACK 出现率
+
+Manual verification:
+- 待 E2E script 实现
+
+Known gaps / deferred tests:
+- streamToolBridgeInit wiring（tracker 注入到 production handler）— 需要单独 PR
+- 真实 model 的 ACK 出现率统计 — 依赖 E2E infra
 
 ---
 
