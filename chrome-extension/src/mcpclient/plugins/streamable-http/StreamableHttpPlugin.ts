@@ -192,7 +192,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
       return primitives;
     } catch (error) {
       logger.error('[StreamableHttpPlugin] Failed to get primitives:', error);
-      return [];
+      throw error;
     }
   }
 }
