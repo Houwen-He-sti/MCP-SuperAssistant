@@ -8,7 +8,8 @@
  * Tests: streamToolBridge.test.ts imports directly from this file.
  */
 
-import { formatFunctionResult } from './functionResultFormatter.ts';
+import { formatFunctionResult, appendAckInstruction } from './functionResultFormatter.ts';
+import { generateNonce, type AckTracker } from './ackTracker.ts';
 
 // --- Constants ---
 
@@ -41,6 +42,18 @@ export interface StreamToolExecutionEvent {
   errorCode?: string;
   durationMs?: number;
 }
+
+export interface BridgeHandoffAckEvent {
+  type: 'bridge_handoff_ack';
+  streamId: string;
+  callId: string;
+  functionName: string;
+  nonce: string;
+  timestamp: number;
+  outcome: 'RESULT_SUBMITTED';
+}
+
+export type BridgeEvent = StreamToolExecutionEvent | BridgeHandoffAckEvent;
 
 export interface FunctionCallIdentityLike {
   name?: string | null;
@@ -78,7 +91,8 @@ export interface StreamToolBridgeDeps {
   guard: ExecutionGuardLike;
   adapter: () => AdapterLike | null;
   storage: StorageLike;
-  onEvent: (event: StreamToolExecutionEvent) => void;
+  onEvent: (event: BridgeEvent) => void;
+  ackTracker?: AckTracker | null;
 }
 
 export interface StreamEvent {
@@ -169,6 +183,8 @@ export interface InjectResultParams {
   result: unknown;
   autoSubmit: boolean;
   adapter: () => AdapterLike | null;
+  /** Gate 5c.1: If provided, append ACK instruction with this nonce. */
+  nonce?: string;
 }
 
 /**
@@ -185,7 +201,7 @@ export interface InjectResultParams {
  * 7. If autoSubmit → submitForm() → check === false
  */
 export async function injectResultIfSafe(params: InjectResultParams): Promise<InjectResult> {
-  const { callId, name, status, result, autoSubmit, adapter } = params;
+  const { callId, name, status, result, autoSubmit, adapter, nonce } = params;
 
   const currentAdapter = adapter();
   if (!currentAdapter) {
@@ -209,7 +225,9 @@ export async function injectResultIfSafe(params: InjectResultParams): Promise<In
     return { outcome: 'INJECT_SKIPPED_DRAFT' };
   }
 
-  const formatted = formatFunctionResult({ callId, name, status, result });
+  const formatted = nonce
+    ? appendAckInstruction(formatFunctionResult({ callId, name, status, result }), nonce)
+    : formatFunctionResult({ callId, name, status, result });
 
   try {
     const insertOk = await currentAdapter.insertText(formatted);
@@ -238,7 +256,7 @@ export async function injectResultIfSafe(params: InjectResultParams): Promise<In
 // --- Implementation ---
 
 export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
-  const { config, mcpClient: resolveMcpClient, guard, adapter, storage, onEvent } = deps;
+  const { config, mcpClient: resolveMcpClient, guard, adapter, storage, onEvent, ackTracker } = deps;
 
   let executionCounter = 0;
   const expiredExecutions = new Set<number>();
@@ -470,13 +488,31 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     // Step 9: DOM injection via shared safe-injection helper (Gate 5 refactor)
     if (config.autoInsert) {
+      // Gate 5c.1: Generate nonce for ACK tracking (only for success + autoSubmit)
+      const nonce = (config.autoSubmit && ackTracker) ? generateNonce(callId) : undefined;
+
       const { outcome, error: injectError } = await injectResultIfSafe({
         callId, name: identity.name!, status: 'success',
-        result, autoSubmit: !!config.autoSubmit, adapter,
+        result, autoSubmit: !!config.autoSubmit, adapter, nonce,
       });
 
       switch (outcome) {
         case 'RESULT_SUBMITTED':
+          emit(streamId, identity, 'succeeded', { result, durationMs });
+          // Gate 5c.1: Emit bridge handoff ACK + register nonce for cross-turn tracking
+          if (nonce && ackTracker) {
+            onEvent({
+              type: 'bridge_handoff_ack',
+              streamId,
+              callId,
+              functionName: identity.name!,
+              nonce,
+              timestamp: Date.now(),
+              outcome: 'RESULT_SUBMITTED',
+            });
+            ackTracker.registerPending(nonce, callId, identity.name!);
+          }
+          return;
         case 'RESULT_INJECTED':
           emit(streamId, identity, 'succeeded', { result, durationMs });
           return;

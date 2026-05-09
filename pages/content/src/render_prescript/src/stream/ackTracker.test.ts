@@ -1,0 +1,191 @@
+/**
+ * Unit tests for ackTracker.ts — Cross-turn ACK nonce registry.
+ *
+ * Run: node --test --experimental-strip-types ackTracker.test.ts
+ * (from render_prescript/src/stream/ directory)
+ */
+
+import assert from 'node:assert/strict';
+import { describe, test, mock } from 'node:test';
+import {
+  createAckTracker,
+  generateNonce,
+  type AckTrackerConfig,
+  type ModelAckEvent,
+} from './ackTracker.ts';
+
+// --- generateNonce ---
+
+describe('generateNonce', () => {
+  test('includes callId prefix', () => {
+    const nonce = generateNonce('call_123');
+    assert.ok(nonce.startsWith('ack_call_123_'), `Expected "ack_call_123_" prefix, got: ${nonce}`);
+  });
+
+  test('length < 50 characters', () => {
+    const nonce = generateNonce('very_long_call_id_that_is_still_reasonable');
+    assert.ok(nonce.length < 50, `Nonce too long: ${nonce.length}`);
+  });
+
+  test('unique across calls', () => {
+    const nonces = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      nonces.add(generateNonce(`call_${i}`));
+    }
+    assert.equal(nonces.size, 100, 'Expected all unique nonces');
+  });
+});
+
+// --- createAckTracker ---
+
+describe('createAckTracker', () => {
+  function makeConfig(overrides: Partial<AckTrackerConfig> = {}): AckTrackerConfig {
+    return {
+      timeoutMs: 100, // short timeout for tests
+      onEvent: () => {},
+      ...overrides,
+    };
+  }
+
+  test('registerPending stores nonce and returns it', () => {
+    const tracker = createAckTracker(makeConfig());
+    const nonce = 'ack_test_abc';
+    tracker.registerPending(nonce, 'call_1', 'get_weather');
+    assert.ok(tracker.hasPending(nonce));
+  });
+
+  test('confirmAck emits model_ack_confirmed', () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({
+      onEvent: (e) => events.push(e),
+    }));
+
+    tracker.registerPending('ack_x', 'call_1', 'get_weather');
+    tracker.confirmAck('ack_x');
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'model_ack_confirmed');
+    assert.equal(events[0].nonce, 'ack_x');
+    assert.equal(events[0].callId, 'call_1');
+    assert.equal(events[0].functionName, 'get_weather');
+    assert.ok(events[0].latencyMs >= 0);
+  });
+
+  test('confirmAck removes from pending', () => {
+    const tracker = createAckTracker(makeConfig({ onEvent: () => {} }));
+    tracker.registerPending('ack_y', 'call_2', 'search');
+    tracker.confirmAck('ack_y');
+    assert.ok(!tracker.hasPending('ack_y'));
+  });
+
+  test('confirmAck for unknown nonce is no-op', () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+    tracker.confirmAck('ack_unknown');
+    assert.equal(events.length, 0);
+  });
+
+  test('timeout emits model_ack_timeout', async () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({
+      timeoutMs: 50,
+      onEvent: (e) => events.push(e),
+    }));
+
+    tracker.registerPending('ack_timeout', 'call_3', 'fetch_data');
+
+    // Wait for timeout
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'model_ack_timeout');
+    assert.equal(events[0].nonce, 'ack_timeout');
+    assert.equal(events[0].callId, 'call_3');
+    assert.equal(events[0].functionName, 'fetch_data');
+    assert.ok(events[0].latencyMs >= 50);
+    assert.ok(!tracker.hasPending('ack_timeout'));
+  });
+
+  test('confirmAck before timeout cancels timeout', async () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({
+      timeoutMs: 50,
+      onEvent: (e) => events.push(e),
+    }));
+
+    tracker.registerPending('ack_fast', 'call_4', 'tool_a');
+    tracker.confirmAck('ack_fast');
+
+    // Wait past timeout window
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    // Should only have the confirmed event, not a timeout
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'model_ack_confirmed');
+  });
+
+  test('scanText detects nonce in model output', () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+    tracker.registerPending('ack_scan_1', 'call_5', 'read_file');
+
+    const modelOutput = 'Here is the result based on the tool output. <mcp_ack nonce="ack_scan_1" /> Let me continue...';
+    tracker.scanText(modelOutput);
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'model_ack_confirmed');
+    assert.equal(events[0].nonce, 'ack_scan_1');
+  });
+
+  test('scanText detects multiple nonces', () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+    tracker.registerPending('ack_m1', 'call_6', 'tool_x');
+    tracker.registerPending('ack_m2', 'call_7', 'tool_y');
+
+    const modelOutput = '<mcp_ack nonce="ack_m1" /><mcp_ack nonce="ack_m2" />';
+    tracker.scanText(modelOutput);
+
+    assert.equal(events.length, 2);
+  });
+
+  test('scanText ignores non-pending nonces', () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({ onEvent: (e) => events.push(e) }));
+
+    const modelOutput = '<mcp_ack nonce="ack_not_registered" />';
+    tracker.scanText(modelOutput);
+
+    assert.equal(events.length, 0);
+  });
+
+  test('dispose cancels all pending timeouts', async () => {
+    const events: ModelAckEvent[] = [];
+    const tracker = createAckTracker(makeConfig({
+      timeoutMs: 50,
+      onEvent: (e) => events.push(e),
+    }));
+
+    tracker.registerPending('ack_dispose_1', 'call_8', 'tool_d');
+    tracker.registerPending('ack_dispose_2', 'call_9', 'tool_e');
+    tracker.dispose();
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    // No timeout events should fire after dispose
+    assert.equal(events.length, 0);
+  });
+
+  test('getPendingCount returns correct count', () => {
+    const tracker = createAckTracker(makeConfig());
+    assert.equal(tracker.getPendingCount(), 0);
+    tracker.registerPending('ack_a', 'c1', 'f1');
+    assert.equal(tracker.getPendingCount(), 1);
+    tracker.registerPending('ack_b', 'c2', 'f2');
+    assert.equal(tracker.getPendingCount(), 2);
+    tracker.confirmAck('ack_a');
+    assert.equal(tracker.getPendingCount(), 1);
+  });
+});
