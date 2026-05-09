@@ -52,18 +52,7 @@ Tool "echo" is not registered in the current MCP tool registry
 - **假设 B**: tool 列表未完全加载（timing issue — preflight 检查通过但 tools 列表是空的或不完整的）
 - **假设 C**: proxy (mcp-superassistant-proxy) 没有正确转发 echo tool
 
-**解决方案**: 在 E2E 脚本的 preflight 阶段加入 tool 列表检查：
-```javascript
-// Preflight: 确认 echo tool 已注册
-const tools = await mcpClient.getAvailableTools();
-const hasEcho = tools.some(t => t.name === 'echo');
-if (!hasEcho) {
-  console.error('echo tool not found. Available tools:', tools.map(t => t.name));
-  // 尝试 force refresh
-  const refreshed = await mcpClient.getAvailableTools(true);
-  // ...
-}
-```
+**解决方案**: Phase 0 preflight gate（见下方实施方案）— 先发现实际 runtime API surface，再选择可用的 tool 列表 API 或 fallback 到直接 probe。
 
 ### Gap 2: Error path vs Success path
 
