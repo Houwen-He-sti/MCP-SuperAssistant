@@ -3,8 +3,9 @@
 > **Author**: Opus/Claude
 > **Created**: 2026-05-10
 > **Status**: Draft — pending GPT review
-> **Parent**: `plans/gate6-and-notion-mcp-plan.md` (consensus document)
-> **PR**: TBD
+> **Parent**: `plans/gate6-and-notion-mcp-plan.md` (consensus document, commit `9a300f1` on main)
+> **PR**: [#37](https://github.com/Houwen-He-sti/MCP-SuperAssistant/pull/37)
+> **GPT Review**: LGTM with comments (comment ID 4414241534)
 
 ---
 
@@ -129,6 +130,9 @@ export interface StreamProviderAdapter {
    * Example: Notion intercepts URLs containing 'runInferenceTranscript'.
    */
   shouldInterceptUrl(url: string): boolean;
+  // NOTE: 后续 R-F+ 可能需要扩展为 shouldIntercept(request: {url, method, contentType})
+  // 以支持 ChatGPT/Claude SSE 等需要检查 method/headers 的场景。
+  // R-C 阶段只需 URL match（Notion 足够），不提前抽象。
 
   /**
    * Extract readable content from a stream chunk.
@@ -175,6 +179,25 @@ export interface StreamChunkContent {
 已有 `streamToolBridge.ts` 基本实现此角色。Gate 6-R 不需要创建新的 runtime core class，只需：
 1. 确保 streamToolBridge 不直接依赖任何 provider-specific import
 2. 初始化时通过依赖注入接收 provider adapter
+
+### 4.4 Architecture Notes (from GPT review)
+
+#### Scanner State Ownership
+
+`functionCallScanner` 本身是无状态的（每次调用传入 text）。但 `interceptorMain.ts` 内部**累积 patch text** 并管理跨 patch 的解析状态。
+
+- **R-C**：state 先由 provider adapter 持有（行为等价优先）
+- **R-D+**：考虑迁移到 core 按 stream-id 持有（使 provider adapter 更薄）
+- 不在 R-B/R-C 阶段做 state 迁移，避免同时改接口和改状态
+
+#### MAIN World Bundle Architecture
+
+`StreamProviderAdapter` 有方法（不可 JSON 序列化），因此不通过 `postMessage` 传递。架构决策：
+
+- 每个 provider 编译自己的 MAIN world bundle（已有 webpack entry 模式）
+- Provider adapter 在 MAIN world 内部实例化，不跨 world 传递
+- ISOLATED world 通过 `postMessage` 只接收 serializable 的 `StreamChunkContent` / `FunctionCallIdentity`
+- `interceptorBridge.ts` 泛化时保持 serializable 消息协议不变
 
 ---
 
