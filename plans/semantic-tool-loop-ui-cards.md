@@ -1,7 +1,7 @@
 # Semantic Tool-loop UI Cards — Evidence Audit & Redesign Plan
 
 > **PR 关联**：MCP-SuperAssistant PR #30（Tool Result UI v1）、PR #33（UI mount 修复）、PR #34（UI layout 修复）
-> **前置文档**：`plans/gate6-semantic-tool-loop-ui-cards.md`（Gate 6-UI Phase A plan）、`plans/tool-result-ui-and-sidebar-simplify.md`（v1 plan）
+> **前置文档**：`plans/tool-result-ui-and-sidebar-simplify.md`（v1 plan）。本 PR 取代之前未落库的 Gate 6 plan 草稿。
 > **状态**：Draft — 待 committee review
 
 ---
@@ -85,11 +85,12 @@
 
 ### 3.3 PR #34 — UI Layout 修复
 
-**内容**：约束 Notion card 宽度、避免渲染成页面底部 full-width block，并支持 event alias。
+**内容**：约束 Notion card 宽度、避免渲染成页面底部 full-width block，并支持 event alias。同时重构了 Notion 的 mount point 策略。
 
 **仍然有效的证据**：
 - `width: min(100%, 820px)` 约束
 - `margin: 8px auto` 居中
+- Notion mount point 策略：先找 `.notion-app-inner`，再向上找 narrow chat column，使用 `append` 模式；失败时才 fallback 到 scroll container / root。
 
 **局部有效的证据**：
 - event alias 支持的具体实现方式可能需要随新状态机调整
@@ -140,20 +141,23 @@ export type ToolLoopCardTone =
 
 ### 4.3 每个状态的触发事件
 
-| UI 状态 | 触发事件源 | 触发条件 |
+> **注意**：当前 `streamToolBridge.ts` 的事件契约尚未完全覆盖以下所有细分状态（例如，当前代码在 reserve 成功后并未 emit `reserved`，且注入结果主要折叠为 `succeeded`）。
+> **Gate 6B 的前置要求**：必须先扩展 `BridgeEvent` 契约，新增真正的 `detected`/`reserved` 以及细分的 inject outcome UI event，然后才能完成以下映射。
+
+| UI 状态 | 触发事件源 (Gate 6B 扩展后) | 触发条件 |
 |---------|-----------|----------|
-| `tool_call_detected` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`reserved` |
+| `tool_call_detected` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`reserved` (需新增 emit) |
 | `tool_execution_started` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`executing` |
 | `tool_execution_succeeded` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`succeeded` |
 | `tool_execution_failed` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`failed` |
-| `tool_result_inserted` | `streamToolBridge.onEvent` | `injectResultIfSafe` outcome=`RESULT_INJECTED` |
-| `tool_result_submitted` | `streamToolBridge.onEvent` | `injectResultIfSafe` outcome=`RESULT_SUBMITTED` |
+| `tool_result_inserted` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`succeeded` 且 outcome=`RESULT_INJECTED` (需扩展 payload) |
+| `tool_result_submitted` | `streamToolBridge.onEvent` | `bridge_handoff_ack` event |
 | `bridge_handoff_ack` | `streamToolBridge.onEvent` | `bridge_handoff_ack` event |
-| `model_ack_confirmed` | `ackTracker` | nonce 在 stream 中被回显 |
-| `model_ack_timeout` | `ackTracker` | nonce 在 timeout 窗口内未被回显 |
-| `execution_blocked` | `streamToolBridge.onEvent` | `injectResultIfSafe` outcome=`INJECT_SKIPPED_DRAFT` |
+| `model_ack_confirmed` | `ackTracker` | nonce 在 stream 中被回显 (通过 `mcp-superassistant:model-ack` 暴露) |
+| `model_ack_timeout` | `ackTracker` | nonce 在 timeout 窗口内未被回显 (通过 `mcp-superassistant:model-ack` 暴露) |
+| `execution_blocked` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`succeeded` 且 outcome=`INJECT_SKIPPED_DRAFT` |
 | `policy_rejected` | `streamToolBridge.onEvent` | tool allowlist denied / circuit breaker open / args too large |
-| `adapter_unavailable` | `streamToolBridge.onEvent` | `injectResultIfSafe` outcome=`INJECT_SKIPPED_NO_ADAPTER` |
+| `adapter_unavailable` | `streamToolBridge.onEvent` | `stream_tool_execution` status=`failed` 且 outcome=`INJECT_SKIPPED_NO_ADAPTER` |
 | `mcp_client_unavailable` | `streamToolBridge.onEvent` | mcpClient not available / not ready |
 | `unexpected_error` | 任何未捕获异常 | 非预期错误 |
 
@@ -215,10 +219,10 @@ interface ToolResultMountPoint {
 
 ### 5.2 Notion
 
-**当前 mount point**（PR #33 修复后）：
-- 优先选择器：`[data-testid="agent-send-message-button"]` 的父级对话容器
-- 回退选择器：`main` / `[role="main"]`
-- 插入模式：`after` 最后一个消息元素
+**当前 mount point**（PR #34 修复后）：
+- 优先选择器：先找 `.notion-app-inner`，再从输入框向上找 narrow chat column
+- 回退选择器：scroll container / root
+- 插入模式：`append` 到 chat column
 
 **E2E 观察要求**：
 - 在 Notion `/chat` 页面执行一次工具调用，验证 card 出现在正确位置
@@ -227,10 +231,9 @@ interface ToolResultMountPoint {
 
 ### 5.3 ChatGPT
 
-**当前 mount point**（EXPERIMENTAL）：
-- 优先选择器：`[data-testid^="conversation-turn-"]` 最后一个 turn 的父级
-- 回退选择器：`main .flex.flex-col`
-- 插入模式：`after` 最后一个 turn
+**当前 mount point**：
+> 现有 experimental implementation 是：优先选择器 `[data-testid^="conversation-turn-"]` 最后一个 turn 的父级，回退 `main .flex.flex-col`，插入模式 `after`。
+> Gate 6 observation 必须验证或重设该 fallback chain。
 
 **E2E 观察要求**：
 - 在 ChatGPT 页面执行一次工具调用，验证 card 出现
@@ -239,10 +242,9 @@ interface ToolResultMountPoint {
 
 ### 5.4 DeepSeek
 
-**当前 mount point**（EXPERIMENTAL）：
-- 优先选择器：`.chat-message-list` / `[class*="chat-messages"]`
-- 回退选择器：`main` / `[role="main"]`
-- 插入模式：`after` 最后一个消息
+**当前 mount point**：
+> 现有 experimental implementation 是：优先选择器 `.chat-message-list` / `[class*="chat-messages"]`，回退 `main` / `[role="main"]`，插入模式 `after`。
+> Gate 6 observation 必须验证或重设该 fallback chain。
 
 **E2E 观察要求**：
 - 在 DeepSeek 页面执行一次工具调用，验证 card 出现
@@ -303,7 +305,9 @@ mcp:tool-execution-complete (legacy, 向后兼容)
 
 ### 7.1 观察脚本
 
-在 `MCP-SuperAssistant/scripts/` 下创建 E2E 观察脚本：
+> Gate 6 默认扩展 `scripts/e2e-tool-result-renderer.cjs`；只有当 lifecycle / timeline assertion 结构明显不同，才新建独立 CJS 脚本，并复用 `scripts/lib/` helper。
+
+如果需要新建，在 `MCP-SuperAssistant/scripts/` 下创建 E2E 观察脚本：
 
 ```
 e2e-ui-state-observation.cjs
