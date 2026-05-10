@@ -1,4 +1,11 @@
-# Gate 6: Semantic Tool-loop UI Cards
+# Gate 6-UI-A: Semantic Tool-loop UI Cards
+
+> **命名说明**：Gate 6 分为两条并行轨道：
+> - **Gate 6-R**: Runtime Extraction / Provider Generalization
+> - **Gate 6-UI**: Semantic Tool-loop UI Cards
+>
+> 本文档是 Gate 6-UI 的 Phase A（plan），后续 Phase B 为实现。
+> 详见 `plans/gate6-and-notion-mcp-plan.md` 中的命名约定。
 
 ## 目标
 
