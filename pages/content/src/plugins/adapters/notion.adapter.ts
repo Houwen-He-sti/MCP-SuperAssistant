@@ -1,20 +1,107 @@
+import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 
 /**
- * Notion AI Adapter for Notion AI Chat (notion.so/ai)
+ * Notion AI Adapter — supports both:
+ * 1. Notion AI native agent (face icon) on regular Notion pages
+ * 2. Legacy /ai chat panel (fallback)
  *
- * This adapter provides functionality for interacting with Notion AI's
- * chat interface, including text insertion and form submission.
- *
- * Phase 1: Only supports the /ai chat panel. Does not activate on
- * regular Notion pages, databases, or settings.
+ * On first conversation with the native agent, automatically injects
+ * the SuperAssistant Bridge protocol prompt.
  */
+
+/**
+ * Bridge protocol prompt injected on first conversation.
+ * Tells Notion AI to use jsonl code blocks for tool calls via SuperAssistant Bridge.
+ */
+const BRIDGE_PROMPT = `我本地运行了一个名为 SuperAssistant Bridge 的浏览器扩展。
+这个桥接器主要用于本地代码 review：因为我（用户）没有 GitHub 管理员权限，无法装官方 GitHub MCP，所以用本地 MCP server 暴露只读 git 工具（git_status / git_diff / git_log / git_show / read_workspace_file 等），让你帮我读代码、找 bug、提改进建议。
+它会从你回复的 DOM 中提取 \`\`\`jsonl 代码块，发送到本地 MCP server 执行，执行结果会作为下一条用户消息回贴给你。请你作为这个桥接的协作端，按以下协议工作。
+
+角色
+你是一个"桥接器协作型"Agent。当需要外部系统执行操作时，按本协议输出一个 jsonl 代码块表示一次函数调用；不需要外部工具时，直接用自然语言回答。
+
+通道使用规则（重要）
+任何外部操作（读写文件、git、GitHub、HTTP、邮件等）一律走本协议的 jsonl 通道。
+不要使用你内置的 Notion / 搜索 / 网页 / 图像等工具，除非我在该轮消息中明确要求。
+你的内置工具与本桥接器是两条独立通道，并行使用会造成混乱。
+
+输出协议（jsonl）
+一次响应至多包含一个 jsonl 代码块；代码块前后允许有简短自然语言说明。
+代码块语言标记必须是 jsonl（三反引号后紧跟小写 jsonl）。
+代码块中每行是一个独立 JSON 对象（不是 JSON 数组）。
+行的固定顺序：
+function_call_start
+description
+parameter（可多行；每行一个参数）
+function_call_end
+
+字段要求
+call_id：本次调用唯一字符串（建议 UUID 或 <unix_ts>-<n>）。function_call_start 与 function_call_end 的 call_id 必须一致。
+name：工具名称，写在 function_call_start.name。
+parameter 行包含：
+key：参数名
+value：参数值，保持原始 JSON 类型（字符串 / 数字 / 布尔 / 对象 / 数组）
+
+格式硬约束
+jsonl 代码块内只允许 ASCII 双引号（U+0022），禁止智能引号、全角引号、全角符号。
+每行必须是单行、独立、合法的 JSON，不允许跨行。
+不要在 jsonl 代码块内插入注释、空行或自然语言。
+不要把 jsonl 行写进 Markdown 列表或引用块；必须放在独立的代码块里。
+
+示例（连通性测试）
+{"type":"function_call_start","name":"echo","call_id":"c1"}
+{"type":"description","text":"测试桥接器连通性"}
+{"type":"parameter","key":"message","value":"hello"}
+{"type":"function_call_end","call_id":"c1"}
+
+决策流程
+先判断是否需要工具：闲聊、解释、写作类任务直接用自然语言回答，不输出 jsonl。
+需要工具时：
+选择一个最合适的工具，一次只调一个。
+检查必填参数是否齐全；缺失就先用自然语言追问，不要凭空补默认值。
+输出 jsonl 后停止，等待桥接器回贴结果，不伪造结果。
+拿到桥接器回贴结果后，基于结果继续：解释、追加下一步调用，或结束。
+桥接器无响应（用户未回贴结果）：等待，不重复输出 jsonl，不伪造结果。
+用户请求中出现具体值（尤其是引号内内容）时，原样使用，不二次加工。
+当工具的参数细节不确定时，优先调用 get_bridge_info 获取权威 schema，再生成对应调用。
+
+jsonl：
+推送 / 提交 / 合并代码：git_push、git_commit、merge_pr
+创建或合并 PR、关闭或修改 Issue
+任何写入主分支或对外发送内容的操作
+
+通用原则：
+不在 main / master 分支直接 commit 或 push。
+不输出或回显 secrets、token、私钥、密码；如果发现工具结果里含敏感信息，对外只复述非敏感部分。
+调用 merge_pr 前先用 get_pr 获取最新 head SHA，并作为 expected_head_sha 传入。
+路径参数只使用工作区内相对路径，避免 .. 越界。
+post_mailbox_message 的 body 不要包含敏感信息。
+
+可用工具速查（以桥接器实际返回的 schema 为准）
+常用：
+echo（必填：message）
+get_bridge_info
+get_task_status
+read_workspace_file（必填：path）
+post_mailbox_message（必填：to、topic、body）
+Git / GitHub（只读）：
+git_status、git_diff、git_log、git_branch、git_show
+list_prs、get_pr、get_pr_diff、get_pr_comments
+list_issues、get_issue
+写入类：
+create_branch、switch_branch
+git_add、git_commit、git_push
+create_pr、comment_on_pr、submit_pr_review、request_review
+create_issue、comment_on_issue、update_issue
+merge_pr`;
+
+import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
 
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
-    readonly version = '1.0.0';
+    readonly version = '1.1.0';
     readonly hostnames = ['notion.so', 'www.notion.so'];
     readonly capabilities: AdapterCapability[] = [
         'text-insertion',
@@ -22,16 +109,23 @@ export class NotionAdapter extends BaseAdapterPlugin {
         'dom-manipulation',
     ];
 
-    // CSS selectors for Notion AI's UI elements (discovered via CDP DOM exploration)
+    // CSS selectors for Notion AI's UI elements
     private readonly selectors = {
-        // Primary chat input — contenteditable div with role="textbox"
+        // === Native Notion AI agent (face icon) selectors ===
+        // Chat input — Notion AI agent uses a contenteditable div
+        NATIVE_CHAT_INPUT:
+            'div[role="textbox"][contenteditable="true"], div[contenteditable="true"][data-placeholder*="Ask"], div[contenteditable="true"][data-placeholder*="Message"]',
+        // Send button — Notion AI agent send button (specific data-testid only;
+        // broader aria-label fallbacks removed to prevent false positives on regular pages)
+        NATIVE_SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
+        // Chat content area for native agent
+        NATIVE_CHAT_CONTENT: '.notion-ai-chat-content, [data-testid="ai-chat-content"], .notion-app-inner',
+
+        // === Legacy /ai panel selectors (fallback) ===
         CHAT_INPUT:
             'div[role="textbox"][contenteditable="true"], div.content-editable-leaf-rtl[contenteditable="true"]',
-        // Send button — data-testid provided by Notion
         SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
-        // Chat conversation content — lives inside .notion-app-inner (not the sidebar scroller)
         CHAT_CONTENT: '.notion-app-inner',
-        // Button insertion points for MCP popover — near the plus menu button
         BUTTON_INSERTION_CONTAINER: '[data-testid="unified-chat-plus-menu-button"]',
     };
 
@@ -53,13 +147,42 @@ export class NotionAdapter extends BaseAdapterPlugin {
     private uiIntegrationSetup: boolean = false;
     private wasOnAiPage: boolean = false;
 
+    // First-conversation tracking for bridge prompt injection
+    private bridgePromptInjected: boolean = false;
+    private conversationMessageCount: number = 0;
+    private messageObserver: MutationObserver | null = null;
+
     /**
-     * Route gating: activate on Notion AI pages (/ai, /chat, /agent paths).
-     * Prevents interference with normal Notion pages.
+     * Route gating: activate on Notion AI pages.
+     * Supports both:
+     * 1. Native Notion AI agent (face icon) on any Notion page
+     * 2. Legacy /ai, /chat, /agent paths (fallback)
      */
     isSupported(): boolean {
         const path = window.location.pathname;
-        return path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
+
+        // Legacy /ai panel paths are always supported
+        if (isLegacyPath(path)) return true;
+
+        // Native Notion AI agent: detect by presence of AI chat input on any Notion page
+        const nativeInput = document.querySelector(this.selectors.NATIVE_CHAT_INPUT);
+        return isSupportedPath(path, nativeInput !== null);
+    }
+
+    /**
+     * Check if we're on the native Notion AI agent page (face icon),
+     * as opposed to the legacy /ai panel.
+     *
+     * Uses BOTH route matching AND DOM verification to prevent
+     * false positives on regular Notion edit pages.
+     */
+    private isNativeAiAgent(): boolean {
+        const path = window.location.pathname;
+        if (!isNativeAiRoute(path)) return false;
+
+        // DOM guard: verify the native AI submit button actually exists
+        const submitBtn = document.querySelector(this.selectors.NATIVE_SUBMIT_BUTTON);
+        return submitBtn !== null;
     }
 
     async initialize(context: PluginContext): Promise<void> {
@@ -85,13 +208,21 @@ export class NotionAdapter extends BaseAdapterPlugin {
         await super.activate();
         this.context.logger.debug('Activating Notion AI adapter...');
 
-        // Only set up DOM/UI if we're on the /ai page
+        // Reset first-conversation state on each activation
+        this.bridgePromptInjected = false;
+        this.conversationMessageCount = 0;
+
         if (this.isSupported()) {
             this.wasOnAiPage = true;
             this.setupDOMObservers();
             this.setupUIIntegration();
+
+            // Setup message observer for native AI agent to track conversation count
+            if (this.isNativeAiAgent()) {
+                this.setupMessageObserver();
+            }
         } else {
-            this.context.logger.debug('Not on /ai page, skipping DOM/UI setup');
+            this.context.logger.debug('Not on supported page, skipping DOM/UI setup');
         }
 
         this.context.eventBus.emit('adapter:activated', {
@@ -131,6 +262,12 @@ export class NotionAdapter extends BaseAdapterPlugin {
             this.urlCheckInterval = null;
         }
 
+        // Cleanup message observer
+        if (this.messageObserver) {
+            this.messageObserver.disconnect();
+            this.messageObserver = null;
+        }
+
         // Unsubscribe event listeners
         for (const unsub of this.eventUnsubscribers) {
             unsub();
@@ -144,6 +281,8 @@ export class NotionAdapter extends BaseAdapterPlugin {
         this.domObserversSetup = false;
         this.uiIntegrationSetup = false;
         this.wasOnAiPage = false;
+        this.bridgePromptInjected = false;
+        this.conversationMessageCount = 0;
     }
 
     // ── Core capabilities ──────────────────────────────────────────────
@@ -184,10 +323,12 @@ export class NotionAdapter extends BaseAdapterPlugin {
     /**
      * Insert text into the Notion AI chat input (contenteditable div).
      * Uses execCommand / InputEvent to update both DOM and editor internal state.
+     *
+     * On native AI agent, injects bridge prompt on first conversation if input is empty.
      */
     async insertText(text: string, options?: { targetElement?: HTMLElement }): Promise<boolean> {
         if (!this.isSupported()) {
-            this.context.logger.debug('Not on /ai page, skipping insertText');
+            this.context.logger.debug('Not on supported page, skipping insertText');
             return false;
         }
 
@@ -196,8 +337,12 @@ export class NotionAdapter extends BaseAdapterPlugin {
         let target: HTMLElement | null = options?.targetElement ?? null;
 
         if (!target) {
-            const selectors = this.selectors.CHAT_INPUT.split(', ');
-            for (const sel of selectors) {
+            // Try native agent selectors first, then legacy fallback
+            const allSelectors = [
+                ...this.selectors.NATIVE_CHAT_INPUT.split(', '),
+                ...this.selectors.CHAT_INPUT.split(', '),
+            ];
+            for (const sel of allSelectors) {
                 target = document.querySelector(sel.trim()) as HTMLElement;
                 if (target) break;
             }
@@ -213,6 +358,17 @@ export class NotionAdapter extends BaseAdapterPlugin {
             const originalContent = target.textContent || '';
             target.focus();
 
+            // On native AI agent, inject bridge prompt on first conversation
+            let contentToInsert = text;
+            if (this.isNativeAiAgent() && !this.bridgePromptInjected && this.conversationMessageCount === 0) {
+                // Only inject if input is empty (no user draft)
+                if (!originalContent.trim()) {
+                    this.context.logger.debug('First conversation detected, injecting bridge prompt');
+                    contentToInsert = BRIDGE_PROMPT + '\n\n' + text;
+                    this.bridgePromptInjected = true;
+                }
+            }
+
             // Select all existing content so new text replaces it
             const selection = window.getSelection();
             if (selection) {
@@ -222,7 +378,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
                 selection.addRange(range);
             }
 
-            const newContent = originalContent ? originalContent + '\n' + text : text;
+            const newContent = originalContent ? originalContent + '\n' + contentToInsert : contentToInsert;
 
             // Try execCommand first — best way to sync with editor state
             const execResult = document.execCommand('insertText', false, newContent);
@@ -245,7 +401,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
             // Verify insertion
             const finalContent = target.textContent || '';
-            if (!finalContent.includes(text)) {
+            if (!finalContent.includes(contentToInsert)) {
                 this.context.logger.warn('Text insertion may not have taken effect');
             }
 
@@ -281,16 +437,27 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
     /**
      * Submit the current text in the Notion AI chat input by clicking the send button.
+     * Supports both native AI agent and legacy /ai panel.
      */
     async submitForm(options?: { formElement?: HTMLFormElement }): Promise<boolean> {
         if (!this.isSupported()) {
-            this.context.logger.debug('Not on /ai page, skipping submitForm');
+            this.context.logger.debug('Not on supported page, skipping submitForm');
             return false;
         }
 
         this.context.logger.debug('Attempting to submit Notion AI chat input');
 
-        const submitButton = document.querySelector(this.selectors.SUBMIT_BUTTON) as HTMLElement | null;
+        // Try native agent selectors first, then legacy fallback
+        const allSelectors = [
+            ...this.selectors.NATIVE_SUBMIT_BUTTON.split(', '),
+            ...this.selectors.SUBMIT_BUTTON.split(', '),
+        ];
+
+        let submitButton: HTMLElement | null = null;
+        for (const sel of allSelectors) {
+            submitButton = document.querySelector(sel.trim()) as HTMLElement | null;
+            if (submitButton) break;
+        }
 
         if (!submitButton) {
             this.context.logger.error('Could not find Notion AI send button');
@@ -317,6 +484,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
             }
 
             submitButton.click();
+
+            // Increment conversation count after successful submit on native agent
+            if (this.isNativeAiAgent()) {
+                this.conversationMessageCount++;
+            }
 
             this.emitExecutionCompleted('submitForm', {
                 formElement: options?.formElement?.tagName || 'unknown',
@@ -352,20 +524,24 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     // Handle SPA navigation between /ai and non-/ai
                     const nowOnAi = this.isSupported();
                     if (nowOnAi && !this.wasOnAiPage) {
-                        // Navigated TO /ai — set up DOM/UI
-                        this.context.logger.debug('Navigated to /ai, setting up DOM/UI');
+                        // Navigated TO supported page — set up DOM/UI
+                        this.context.logger.debug('Navigated to supported page, setting up DOM/UI');
                         this.wasOnAiPage = true;
                         this.setupDOMObservers();
                         this.setupUIIntegration();
                     } else if (!nowOnAi && this.wasOnAiPage) {
-                        // Navigated AWAY from /ai — tear down DOM/UI
-                        this.context.logger.debug('Navigated away from /ai, cleaning up DOM/UI');
+                        // Navigated AWAY from supported page — tear down DOM/UI
+                        this.context.logger.debug('Navigated away from supported page, cleaning up DOM/UI');
                         this.wasOnAiPage = false;
                         this.cleanupUIIntegration();
                         this.cleanupDOMObservers();
                         this.domObserversSetup = false;
                         this.uiIntegrationSetup = false;
                     }
+
+                    // Reset bridge prompt state on any URL change (handles /chat→/chat?t=new)
+                    this.bridgePromptInjected = false;
+                    this.conversationMessageCount = 0;
                 }
             }, 1000);
         }
@@ -389,6 +565,53 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
         this.eventUnsubscribers.push(unsub1, unsub2);
         this.storeEventListenersSetup = true;
+    }
+
+    // ── Message observer for native AI agent ──────────────────────────
+
+    /**
+     * Setup MutationObserver to track conversation messages on native AI agent.
+     * Used to determine when to inject the bridge prompt (only on first message).
+     */
+    private setupMessageObserver(): void {
+        if (this.messageObserver) {
+            this.messageObserver.disconnect();
+        }
+
+        this.context.logger.debug('Setting up message observer for native AI agent');
+
+        // Observe the chat content area for new messages
+        const chatContent = document.querySelector(this.selectors.NATIVE_CHAT_CONTENT);
+        if (!chatContent) {
+            this.context.logger.debug('Chat content not found, skipping message observer');
+            return;
+        }
+
+        this.messageObserver = new MutationObserver((mutations) => {
+            for (let i = 0; i < mutations.length; i++) {
+                const mutation = mutations[i];
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    // Check if added nodes look like message elements
+                    for (let j = 0; j < mutation.addedNodes.length; j++) {
+                        const node = mutation.addedNodes[j];
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            const el = node as Element;
+                            // Heuristic: messages typically have text content and are not hidden
+                            if (el.textContent && el.textContent.trim().length > 10) {
+                                this.conversationMessageCount++;
+                                this.context.logger.debug(`Message detected, count: ${this.conversationMessageCount}`);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        this.messageObserver.observe(chatContent, {
+            childList: true,
+            subtree: true,
+        });
     }
 
     // ── DOM observers ──────────────────────────────────────────────────
@@ -803,7 +1026,8 @@ export class NotionAdapter extends BaseAdapterPlugin {
      */
     private findScrollableContainer(root: HTMLElement): HTMLElement | null {
         const divs = root.querySelectorAll('div');
-        for (const el of divs) {
+        for (let i = 0; i < divs.length; i++) {
+            const el = divs[i];
             const style = getComputedStyle(el);
             if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
             const rect = el.getBoundingClientRect();
