@@ -97,6 +97,8 @@ create_pr、comment_on_pr、submit_pr_review、request_review
 create_issue、comment_on_issue、update_issue
 merge_pr`;
 
+import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
+
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
     readonly version = '1.1.0';
@@ -113,8 +115,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
         // Chat input — Notion AI agent uses a contenteditable div
         NATIVE_CHAT_INPUT:
             'div[role="textbox"][contenteditable="true"], div[contenteditable="true"][data-placeholder*="Ask"], div[contenteditable="true"][data-placeholder*="Message"]',
-        // Send button — Notion AI agent send button
-        NATIVE_SUBMIT_BUTTON: '[data-testid="agent-send-message-button"], button[aria-label*="Send"], button[aria-label*="send"]',
+        // Send button — Notion AI agent send button (specific data-testid only;
+        // broader aria-label fallbacks removed to prevent false positives on regular pages)
+        NATIVE_SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
         // Chat content area for native agent
         NATIVE_CHAT_CONTENT: '.notion-ai-chat-content, [data-testid="ai-chat-content"], .notion-app-inner',
 
@@ -158,30 +161,28 @@ export class NotionAdapter extends BaseAdapterPlugin {
     isSupported(): boolean {
         const path = window.location.pathname;
 
-        // Legacy /ai panel paths
-        if (path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/')) {
-            return true;
-        }
+        // Legacy /ai panel paths are always supported
+        if (isLegacyPath(path)) return true;
 
         // Native Notion AI agent: detect by presence of AI chat input on any Notion page
-        // Notion pages have paths like /workspace/xxx or /doc/xxx
-        if (path.startsWith('/workspace/') || path.startsWith('/doc/') || path.startsWith('/')) {
-            // Check if native AI chat input exists on the page
-            const nativeInput = document.querySelector(this.selectors.NATIVE_CHAT_INPUT);
-            return nativeInput !== null;
-        }
-
-        return false;
+        const nativeInput = document.querySelector(this.selectors.NATIVE_CHAT_INPUT);
+        return isSupportedPath(path, nativeInput !== null);
     }
 
     /**
      * Check if we're on the native Notion AI agent page (face icon),
      * as opposed to the legacy /ai panel.
+     *
+     * Uses BOTH route matching AND DOM verification to prevent
+     * false positives on regular Notion edit pages.
      */
     private isNativeAiAgent(): boolean {
         const path = window.location.pathname;
-        // Native agent appears on /chat and regular Notion pages, but not /ai or /agent
-        return !path.startsWith('/ai') && !path.startsWith('/agent/');
+        if (!isNativeAiRoute(path)) return false;
+
+        // DOM guard: verify the native AI submit button actually exists
+        const submitBtn = document.querySelector(this.selectors.NATIVE_SUBMIT_BUTTON);
+        return submitBtn !== null;
     }
 
     async initialize(context: PluginContext): Promise<void> {
@@ -523,20 +524,24 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     // Handle SPA navigation between /ai and non-/ai
                     const nowOnAi = this.isSupported();
                     if (nowOnAi && !this.wasOnAiPage) {
-                        // Navigated TO /ai — set up DOM/UI
-                        this.context.logger.debug('Navigated to /ai, setting up DOM/UI');
+                        // Navigated TO supported page — set up DOM/UI
+                        this.context.logger.debug('Navigated to supported page, setting up DOM/UI');
                         this.wasOnAiPage = true;
                         this.setupDOMObservers();
                         this.setupUIIntegration();
                     } else if (!nowOnAi && this.wasOnAiPage) {
-                        // Navigated AWAY from /ai — tear down DOM/UI
-                        this.context.logger.debug('Navigated away from /ai, cleaning up DOM/UI');
+                        // Navigated AWAY from supported page — tear down DOM/UI
+                        this.context.logger.debug('Navigated away from supported page, cleaning up DOM/UI');
                         this.wasOnAiPage = false;
                         this.cleanupUIIntegration();
                         this.cleanupDOMObservers();
                         this.domObserversSetup = false;
                         this.uiIntegrationSetup = false;
                     }
+
+                    // Reset bridge prompt state on any URL change (handles /chat→/chat?t=new)
+                    this.bridgePromptInjected = false;
+                    this.conversationMessageCount = 0;
                 }
             }, 1000);
         }

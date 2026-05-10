@@ -1,125 +1,125 @@
 /**
- * Tests for NotionAdapter — native AI agent entry + bridge prompt injection.
- * Uses Node.js built-in test runner (node --test).
+ * Tests for NotionAdapter pure route functions.
+ * Imports actual production code — not copied expressions.
+ *
+ * Run: node --test --experimental-transform-types src/plugins/adapters/__tests__/notion.adapter.test.ts
  */
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import {
+    isLegacyPath,
+    isNativeAiRoute,
+    isSupportedPath,
+    shouldInjectBridgePrompt,
+} from '../notion.routes.ts';
 
-describe('NotionAdapter', () => {
-    describe('isSupported() logic', () => {
-        it('should return true for legacy /ai path', () => {
-            const path: string = '/ai';
-            const isSupported = path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
-            assert.equal(isSupported, true);
+describe('NotionAdapter route functions', () => {
+    describe('isLegacyPath()', () => {
+        it('should return true for /ai', () => {
+            assert.equal(isLegacyPath('/ai'), true);
         });
 
-        it('should return true for legacy /ai/xxx path', () => {
-            const path: string = '/ai/chat/123';
-            const isSupported = path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
-            assert.equal(isSupported, true);
+        it('should return true for /ai/chat/123', () => {
+            assert.equal(isLegacyPath('/ai/chat/123'), true);
         });
 
-        it('should return true for workspace path when native input exists', () => {
-            const path: string = '/workspace/test-page';
-            const hasNativeInput: boolean = true;
-            const isLegacyPath = path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
-            const isSupported = isLegacyPath || (path.startsWith('/workspace/') && hasNativeInput);
-            assert.equal(isSupported, true);
+        it('should return false for /chat (not legacy, native route)', () => {
+            assert.equal(isLegacyPath('/chat'), false);
         });
 
-        it('should return false for workspace path when native input does not exist', () => {
-            const path: string = '/workspace/test-page';
-            const hasNativeInput: boolean = false;
-            const isLegacyPath = path === '/ai' || path.startsWith('/ai/') || path.startsWith('/chat') || path.startsWith('/agent/');
-            const isSupported = isLegacyPath || (path.startsWith('/workspace/') && hasNativeInput);
-            assert.equal(isSupported, false);
+        it('should return true for /agent/abc123', () => {
+            assert.equal(isLegacyPath('/agent/abc123'), true);
+        });
+
+        it('should return false for workspace page', () => {
+            assert.equal(isLegacyPath('/workspace/test-page'), false);
+        });
+
+        it('should return false for doc page', () => {
+            assert.equal(isLegacyPath('/doc/some-id'), false);
+        });
+
+        it('should return false for root path', () => {
+            assert.equal(isLegacyPath('/'), false);
         });
     });
 
-    describe('isNativeAiAgent() logic', () => {
+    describe('isNativeAiRoute()', () => {
+        it('should return true for /chat path (native agent route)', () => {
+            assert.equal(isNativeAiRoute('/chat'), true);
+        });
+
         it('should return true for workspace page', () => {
-            const path: string = '/workspace/test-page';
-            const isNative = !path.startsWith('/ai') && !path.startsWith('/agent/');
-            assert.equal(isNative, true);
+            assert.equal(isNativeAiRoute('/workspace/test-page'), true);
         });
 
         it('should return false for /ai path', () => {
-            const path: string = '/ai';
-            const isNative = !path.startsWith('/ai') && !path.startsWith('/agent/');
-            assert.equal(isNative, false);
+            assert.equal(isNativeAiRoute('/ai'), false);
         });
 
-        it('should return true for /chat path (native agent)', () => {
-            const path: string = '/chat';
-            const isNative = !path.startsWith('/ai') && !path.startsWith('/agent/');
-            assert.equal(isNative, true);
-        });
-    });
-
-    describe('bridge prompt injection logic', () => {
-        it('should inject bridge prompt on first conversation when input is empty', () => {
-            const bridgePromptInjected: boolean = false;
-            const conversationMessageCount: number = 0;
-            const originalContent: string = '';
-            const isNativeAiAgent: boolean = true;
-
-            const shouldInject = isNativeAiAgent && !bridgePromptInjected && conversationMessageCount === 0 && !originalContent.trim();
-            assert.equal(shouldInject, true);
+        it('should return false for /agent/ path', () => {
+            assert.equal(isNativeAiRoute('/agent/abc'), false);
         });
 
-        it('should NOT inject bridge prompt when input has existing content', () => {
-            const bridgePromptInjected: boolean = false;
-            const conversationMessageCount: number = 0;
-            const originalContent: string = 'User draft';
-            const isNativeAiAgent: boolean = true;
-
-            const shouldInject = isNativeAiAgent && !bridgePromptInjected && conversationMessageCount === 0 && !originalContent.trim();
-            assert.equal(shouldInject, false);
-        });
-
-        it('should NOT inject bridge prompt on second conversation', () => {
-            const bridgePromptInjected: boolean = false;
-            const conversationMessageCount: number = 1;
-            const originalContent: string = '';
-            const isNativeAiAgent: boolean = true;
-
-            const shouldInject = isNativeAiAgent && !bridgePromptInjected && conversationMessageCount === 0 && !originalContent.trim();
-            assert.equal(shouldInject, false);
-        });
-
-        it('should NOT inject bridge prompt if already injected', () => {
-            const bridgePromptInjected: boolean = true;
-            const conversationMessageCount: number = 0;
-            const originalContent: string = '';
-            const isNativeAiAgent: boolean = true;
-
-            const shouldInject = isNativeAiAgent && !bridgePromptInjected && conversationMessageCount === 0 && !originalContent.trim();
-            assert.equal(shouldInject, false);
+        it('should return false for /ai/chat/123', () => {
+            assert.equal(isNativeAiRoute('/ai/chat/123'), false);
         });
     });
 
-    describe('conversation counting logic', () => {
-        it('should increment count after submitForm on native agent', () => {
-            let conversationMessageCount: number = 0;
-            const isNativeAiAgent: boolean = true;
-
-            if (isNativeAiAgent) {
-                conversationMessageCount++;
-            }
-
-            assert.equal(conversationMessageCount, 1);
+    describe('isSupportedPath()', () => {
+        it('should return true for /ai without native input', () => {
+            assert.equal(isSupportedPath('/ai', false), true);
         });
 
-        it('should NOT increment count on legacy /ai panel', () => {
-            let conversationMessageCount: number = 0;
-            const isNativeAiAgent: boolean = false;
+        it('should return true for /chat without native input', () => {
+            assert.equal(isSupportedPath('/chat', false), true);
+        });
 
-            if (isNativeAiAgent) {
-                conversationMessageCount++;
-            }
+        it('should return true for /agent/ without native input', () => {
+            assert.equal(isSupportedPath('/agent/abc', false), true);
+        });
 
-            assert.equal(conversationMessageCount, 0);
+        it('should return true for workspace page with native input', () => {
+            assert.equal(isSupportedPath('/workspace/test', true), true);
+        });
+
+        it('should return false for workspace page without native input', () => {
+            assert.equal(isSupportedPath('/workspace/test', false), false);
+        });
+
+        it('should return false for random path without native input', () => {
+            assert.equal(isSupportedPath('/some-random-page', false), false);
+        });
+
+        it('should return true for random path with native input', () => {
+            assert.equal(isSupportedPath('/some-random-page', true), true);
+        });
+    });
+
+    describe('shouldInjectBridgePrompt()', () => {
+        it('should inject on first conversation with empty input', () => {
+            assert.equal(shouldInjectBridgePrompt(true, false, 0, ''), true);
+        });
+
+        it('should NOT inject when input has existing content', () => {
+            assert.equal(shouldInjectBridgePrompt(true, false, 0, 'User draft'), false);
+        });
+
+        it('should NOT inject on second conversation', () => {
+            assert.equal(shouldInjectBridgePrompt(true, false, 1, ''), false);
+        });
+
+        it('should NOT inject if already injected', () => {
+            assert.equal(shouldInjectBridgePrompt(true, true, 0, ''), false);
+        });
+
+        it('should NOT inject on legacy /ai page', () => {
+            assert.equal(shouldInjectBridgePrompt(false, false, 0, ''), false);
+        });
+
+        it('should inject with whitespace-only input (treated as empty)', () => {
+            assert.equal(shouldInjectBridgePrompt(true, false, 0, '   \n\t  '), true);
         });
     });
 });
