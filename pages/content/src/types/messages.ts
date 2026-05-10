@@ -4,7 +4,7 @@
  * These types ensure consistency between the context bridge, MCP client, and background script
  */
 
-import type { ServerConfig, ConnectionStatus, Tool } from './stores';
+import type { ConnectionStatus, ServerConfig, Tool } from './stores';
 
 // Base message structure for all communication
 export interface BaseMessage {
@@ -42,7 +42,7 @@ export interface CallToolResponse {
 }
 
 // Connection status
-export interface GetConnectionStatusRequest {}
+export interface GetConnectionStatusRequest { }
 
 export interface GetConnectionStatusResponse {
   status: ConnectionStatus;
@@ -60,7 +60,7 @@ export interface GetToolsResponse {
 }
 
 // Force reconnect
-export interface ForceReconnectRequest {}
+export interface ForceReconnectRequest { }
 
 export interface ForceReconnectResponse {
   isConnected: boolean;
@@ -69,7 +69,7 @@ export interface ForceReconnectResponse {
 }
 
 // Server configuration
-export interface GetServerConfigRequest {}
+export interface GetServerConfigRequest { }
 
 export interface GetServerConfigResponse {
   config: ServerConfig;
@@ -120,14 +120,16 @@ export interface HeartbeatResponseBroadcast {
 export interface TabLabelReport {
   label: string | null;
   source: 'window-name' | 'title-prefix' | null;
+  url?: string;
 }
 
 export interface TabLabelQueryResponse {
   labels: Record<number, string>; // tabId → label
+  labelDetails: Record<number, { label: string; url: string }>; // tabId → { label, url }
 }
 
 // Message type union for better type safety
-export type McpMessageType = 
+export type McpMessageType =
   | 'mcp:call-tool'
   | 'mcp:get-connection-status'
   | 'mcp:get-tools'
@@ -137,6 +139,7 @@ export type McpMessageType =
   | 'mcp:heartbeat'
   | 'mcp:tab-label-report'
   | 'mcp:tab-label-query'
+  | 'mcp:request-auto-label'
   | 'connection:status-changed'
   | 'mcp:tool-update'
   | 'mcp:server-config-updated'
@@ -208,12 +211,13 @@ export function isValidMessageType(type: string): type is McpMessageType {
     'mcp:heartbeat',
     'mcp:tab-label-report',
     'mcp:tab-label-query',
+    'mcp:request-auto-label',
     'connection:status-changed',
     'mcp:tool-update',
     'mcp:server-config-updated',
     'mcp:heartbeat-response'
   ];
-  
+
   return validTypes.includes(type as McpMessageType);
 }
 
