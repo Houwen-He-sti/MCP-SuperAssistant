@@ -76,14 +76,17 @@ export function detectTabLabel(): DetectedLabel | null {
 
 在 `chrome-extension/src/background/index.ts`：
 - `Map<number, { label: string; source: string }>` 注册表
-- 处理 `'mcp:tab-label-report'` 消息
+- 处理 `'mcp:tab-label-report'` 消息（label 可为 null 表示清除）
 - 处理 `'mcp:tab-label-query'` 消息
 - `chrome.tabs.onRemoved` 清理
-- `chrome.tabs.onUpdated` 被动检测 title 变化
 
 ### 4. 持续检测
 
-Content script 用 MutationObserver 监听 `<title>` 变化 + 定期检查 `window.name`（每 5s），重新上报变化。
+Content script 用 MutationObserver 监听 `<title>` 变化 + `<head>` childList（SPA title 替换）+ 定期检查 `window.name`（每 5s），重新上报变化。`startLabelMonitoring()` 幂等设计。
+
+## 未采用的备选方案
+
+- **`chrome.tabs.onUpdated`**：Background 可通过此 API 检测 tab URL/title 变化，但只能看到 title 不能看到 `window.name`，且需要额外 `executeScript` 调用。Content script + MutationObserver 方案更轻量、更精确，无需额外 permission。
 
 ## 风险
 
