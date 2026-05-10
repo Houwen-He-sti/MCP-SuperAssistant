@@ -179,6 +179,14 @@ export interface McpMessageMap {
     request: Record<string, never>;
     response: TabLabelQueryResponse;
   };
+  'mcp:tab-label-report': {
+    request: TabLabelReport;
+    response: { success: boolean };
+  };
+  'mcp:request-auto-label': {
+    request: { prefix: string };
+    response: { label: string };
+  };
 }
 
 // Error categories for better error handling
