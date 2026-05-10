@@ -936,9 +936,15 @@ async function handleMcpMessage(
 
       case 'mcp:tab-label-report': {
         const tabId = sender.tab?.id;
-        if (tabId != null && payload.label) {
-          tabLabels.set(tabId, { label: payload.label, source: payload.source });
-          logger.debug(`[TabLabels] Tab ${tabId} labeled "${payload.label}" (${payload.source})`);
+        if (tabId != null) {
+          if (payload.label) {
+            tabLabels.set(tabId, { label: payload.label, source: payload.source });
+            logger.debug(`[TabLabels] Tab ${tabId} labeled "${payload.label}" (${payload.source})`);
+          } else {
+            if (tabLabels.delete(tabId)) {
+              logger.debug(`[TabLabels] Tab ${tabId} label cleared`);
+            }
+          }
         }
         result = { success: true };
         break;

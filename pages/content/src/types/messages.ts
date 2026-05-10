@@ -118,8 +118,8 @@ export interface HeartbeatResponseBroadcast {
 
 // Tab label types (ai-web-agent-mcp integration)
 export interface TabLabelReport {
-  label: string;
-  source: 'window-name' | 'title-prefix';
+  label: string | null;
+  source: 'window-name' | 'title-prefix' | null;
 }
 
 export interface TabLabelQueryResponse {
@@ -172,6 +172,10 @@ export interface McpMessageMap {
     request: HeartbeatRequest;
     response: HeartbeatResponse;
   };
+  'mcp:tab-label-query': {
+    request: Record<string, never>;
+    response: TabLabelQueryResponse;
+  };
 }
 
 // Error categories for better error handling
@@ -202,6 +206,8 @@ export function isValidMessageType(type: string): type is McpMessageType {
     'mcp:get-server-config',
     'mcp:update-server-config',
     'mcp:heartbeat',
+    'mcp:tab-label-report',
+    'mcp:tab-label-query',
     'connection:status-changed',
     'mcp:tool-update',
     'mcp:server-config-updated',

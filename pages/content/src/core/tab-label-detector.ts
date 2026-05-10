@@ -44,20 +44,24 @@ export function detectTabLabel(): DetectedLabel | null {
 }
 
 /**
- * Report a detected label to the background script.
+ * Report a detected (or cleared) label to the background script.
  */
-function reportLabel(detected: DetectedLabel): void {
+function reportLabel(detected: DetectedLabel | null): void {
   try {
     chrome.runtime.sendMessage({
       type: 'mcp:tab-label-report',
       payload: {
-        label: detected.label,
-        source: detected.source,
+        label: detected?.label ?? null,
+        source: detected?.source ?? null,
       },
       origin: 'content',
       timestamp: Date.now(),
     });
-    logger.debug(`Reported label "${detected.label}" (source: ${detected.source})`);
+    if (detected) {
+      logger.debug(`Reported label "${detected.label}" (source: ${detected.source})`);
+    } else {
+      logger.debug('Reported label cleared');
+    }
   } catch (err) {
     logger.error('Failed to report tab label:', err);
   }
@@ -65,6 +69,7 @@ function reportLabel(detected: DetectedLabel): void {
 
 let currentLabel: string | null = null;
 let titleObserver: MutationObserver | null = null;
+let headObserver: MutationObserver | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
@@ -76,33 +81,63 @@ function checkAndReport(): void {
 
   if (newLabel !== currentLabel) {
     currentLabel = newLabel;
-    if (detected) {
-      reportLabel(detected);
-    }
+    reportLabel(detected);
+  }
+}
+
+/**
+ * Observe the current <title> element for mutations.
+ */
+function observeTitle(): void {
+  if (titleObserver) {
+    titleObserver.disconnect();
+    titleObserver = null;
+  }
+  const titleEl = document.querySelector('title');
+  if (titleEl) {
+    titleObserver = new MutationObserver(() => checkAndReport());
+    titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
   }
 }
 
 /**
  * Start continuous monitoring for label changes.
+ * Idempotent — safe to call multiple times.
  *
  * - MutationObserver on <title> for title-prefix changes
+ * - MutationObserver on <head> to detect SPA title element replacement
  * - Periodic poll for window.name changes (no event API for window.name)
  */
 export function startLabelMonitoring(): void {
+  // Stop any existing monitoring first (idempotent)
+  stopLabelMonitoring();
+
   // Initial detection
   checkAndReport();
 
   // Watch <title> mutations
-  const titleEl = document.querySelector('title');
-  if (titleEl) {
-    titleObserver = new MutationObserver(() => checkAndReport());
-    titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
-    logger.debug('Title MutationObserver started');
+  observeTitle();
+
+  // Watch <head> for added/removed <title> elements (SPA frameworks may replace <title>)
+  const head = document.head;
+  if (head) {
+    headObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        const titleChanged = Array.from(m.addedNodes).some(n => (n as Element).tagName === 'TITLE') ||
+                             Array.from(m.removedNodes).some(n => (n as Element).tagName === 'TITLE');
+        if (titleChanged) {
+          observeTitle();
+          checkAndReport();
+          break;
+        }
+      }
+    });
+    headObserver.observe(head, { childList: true });
   }
 
   // Poll window.name periodically (no event for window.name changes)
   pollTimer = setInterval(() => checkAndReport(), WINDOW_NAME_POLL_INTERVAL);
-  logger.debug('window.name polling started');
+  logger.debug('Label monitoring started');
 }
 
 /**
@@ -112,6 +147,10 @@ export function stopLabelMonitoring(): void {
   if (titleObserver) {
     titleObserver.disconnect();
     titleObserver = null;
+  }
+  if (headObserver) {
+    headObserver.disconnect();
+    headObserver = null;
   }
   if (pollTimer) {
     clearInterval(pollTimer);
