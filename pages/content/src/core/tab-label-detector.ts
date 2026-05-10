@@ -77,17 +77,39 @@ function reportLabel(detected: DetectedLabel | null): void {
   }
 }
 
+/**
+ * Ensure document.title has the [label] prefix.
+ * Called when we detect a label from window.name but the title is missing its prefix.
+ * This acts as a fallback when ai-web-agent-mcp's own persistence fails (e.g. after refresh on SPAs).
+ */
+export function ensureTitlePrefix(label: string): boolean {
+  if (typeof document === 'undefined') return false;
+  const tag = `[${label}]`;
+  if (document.title.startsWith(tag)) return false;
+
+  // Strip any existing stale prefix first
+  const stripped = document.title.replace(/^\[.*?\]\s*/, '');
+  document.title = stripped ? `${tag} ${stripped}` : tag;
+  logger.debug(`Restored title prefix: ${tag}`);
+  return true;
+}
+
 let currentLabel: string | null = null;
 let titleObserver: MutationObserver | null = null;
 let headObserver: MutationObserver | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Check for label changes and report if changed.
+ * Check for label changes, ensure title prefix, and report if changed.
  */
 function checkAndReport(): void {
   const detected = detectTabLabel();
   const newLabel = detected?.label ?? null;
+
+  // Ensure title prefix when we have a label from window.name
+  if (detected && detected.source === 'window-name') {
+    ensureTitlePrefix(detected.label);
+  }
 
   if (newLabel !== currentLabel) {
     currentLabel = newLabel;
@@ -97,7 +119,9 @@ function checkAndReport(): void {
 
 /**
  * Observe the current <title> element for mutations.
+ * When title changes, re-check the label and re-apply prefix if needed.
  */
+let _insideObserverCallback = false;
 function observeTitle(): void {
   if (titleObserver) {
     titleObserver.disconnect();
@@ -105,7 +129,16 @@ function observeTitle(): void {
   }
   const titleEl = document.querySelector('title');
   if (titleEl) {
-    titleObserver = new MutationObserver(() => checkAndReport());
+    titleObserver = new MutationObserver(() => {
+      // Guard against re-entrancy: our own ensureTitlePrefix triggers a mutation
+      if (_insideObserverCallback) return;
+      _insideObserverCallback = true;
+      try {
+        checkAndReport();
+      } finally {
+        _insideObserverCallback = false;
+      }
+    });
     titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
   }
 }

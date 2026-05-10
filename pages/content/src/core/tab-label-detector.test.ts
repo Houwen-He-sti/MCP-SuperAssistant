@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { detectFromValues, type DetectedLabel } from './tab-label-detector.ts';
+import { detectFromValues, ensureTitlePrefix, type DetectedLabel } from './tab-label-detector.ts';
 
 // --- detectFromValues: window.name detection ---
 
@@ -96,5 +96,71 @@ describe('detectFromValues — priority (window.name wins)', () => {
   test('returns null when neither source has a label', () => {
     const result = detectFromValues('random', 'Normal Page Title');
     assert.equal(result, null);
+  });
+});
+
+// --- ensureTitlePrefix ---
+
+describe('ensureTitlePrefix — title prefix restoration', () => {
+  // Mock document.title for Node.js environment
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  let mockTitle = '';
+
+  function setupDocument(title: string) {
+    mockTitle = title;
+    // @ts-expect-error -- mock document for testing
+    globalThis.document = {
+      get title() { return mockTitle; },
+      set title(v: string) { mockTitle = v; },
+    };
+  }
+
+  function teardownDocument() {
+    if (originalDescriptor) {
+      Object.defineProperty(globalThis, 'document', originalDescriptor);
+    } else {
+      // @ts-expect-error -- cleanup
+      delete globalThis.document;
+    }
+  }
+
+  test('adds prefix when title has no prefix', () => {
+    setupDocument('ChatGPT');
+    const changed = ensureTitlePrefix('gpt-tab-6');
+    assert.equal(changed, true);
+    assert.equal(mockTitle, '[gpt-tab-6] ChatGPT');
+    teardownDocument();
+  });
+
+  test('returns false when prefix already present', () => {
+    setupDocument('[gpt-tab-6] ChatGPT');
+    const changed = ensureTitlePrefix('gpt-tab-6');
+    assert.equal(changed, false);
+    assert.equal(mockTitle, '[gpt-tab-6] ChatGPT');
+    teardownDocument();
+  });
+
+  test('replaces stale prefix with correct one', () => {
+    setupDocument('[old-label] ChatGPT');
+    const changed = ensureTitlePrefix('gpt-tab-6');
+    assert.equal(changed, true);
+    assert.equal(mockTitle, '[gpt-tab-6] ChatGPT');
+    teardownDocument();
+  });
+
+  test('handles empty title', () => {
+    setupDocument('');
+    const changed = ensureTitlePrefix('gpt-tab-6');
+    assert.equal(changed, true);
+    assert.equal(mockTitle, '[gpt-tab-6]');
+    teardownDocument();
+  });
+
+  test('returns false when document is undefined', () => {
+    // @ts-expect-error -- test no-document scenario
+    delete globalThis.document;
+    const changed = ensureTitlePrefix('gpt-tab-6');
+    assert.equal(changed, false);
+    teardownDocument();
   });
 });
