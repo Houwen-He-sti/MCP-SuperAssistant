@@ -147,7 +147,7 @@ export function wrapWithSystemPromptTag(prompt: string): string {
 
 /**
  * Assemble the Notion bridge prompt (used by notion.adapter.ts).
- * Wraps with <mcp-system-prompt> for UI rendering.
+ * Returns raw template content; caller is responsible for wrapping with <mcp-system-prompt>.
  */
 export function assembleNotionBridgePrompt(): string {
     return getNotionBridgePrompt();

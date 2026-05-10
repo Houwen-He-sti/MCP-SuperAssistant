@@ -1,5 +1,5 @@
 // pages/content/src/utils/instructionGenerator.ts
-import { assembleInstructions } from './promptTemplateLoader';
+import { assembleInstructions, wrapWithSystemPromptTag } from './promptTemplateLoader';
 import { createLogger } from '@extension/shared/lib/logger';
 
 /**
@@ -25,10 +25,10 @@ export const generateInstructionsJson = (
   if (currentHost.includes('chatgpt')) platform = 'chatgpt';
   if (currentHost.includes('notion')) platform = 'notion';
 
-  return assembleInstructions({
+  return wrapWithSystemPromptTag(assembleInstructions({
     tools,
     platform,
     customInstructions,
     customInstructionsEnabled,
-  });
+  }));
 };

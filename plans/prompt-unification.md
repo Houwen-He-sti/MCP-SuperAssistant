@@ -39,7 +39,7 @@
 - **用户的 BRIDGE_PROMPT** 经过多次测试优化，与 Opus 4.7 配合良好
 
 ### 未知
-- `<instruct>` 标签的渲染时机和方式（未来迭代，当前只做标签包裹）
+- `<mcp-system-prompt>` 标签的渲染时机和方式（未来迭代，当前只做标签包裹）
 - 配置文件放在 Chrome storage 还是扩展包内（需确认）
 
 ## 技术方案
@@ -54,7 +54,7 @@
 │  ├── chatgpt-supplement.md     ← ChatGPT 补充指令     │
 │  └── gemini-supplement.md      ← Gemini 补充指令      │
 │                                                       │
-│  用 <instruct section="xxx"> 标签包裹各指令段落        │
+│  用 <mcp-system-prompt> 标签包裹系统指令              │
 └──────────────────────────────────────────────────────┘
          ↓ 编译时 import 为字符串
 ┌──────────────────────────────────────────────────────┐
@@ -115,13 +115,13 @@
 `notion.adapter.ts` 的 `BRIDGE_PROMPT` 是用户专门定制的。处理方式：
 - 把它移到 `prompt-templates/notion-bridge.md`
 - notion.adapter 从模板加载器获取
-- 同样用 `<instruct>` 包裹
+- 同样用 `<mcp-system-prompt>` 包裹
 
 ## 实施步骤
 
 ### Step 1: 创建模板文件
 
-把三处硬编码提示词提取到 `prompt-templates/` 目录的 `.md` 文件中，用 `<instruct>` 标签包裹。
+把三处硬编码提示词提取到 `prompt-templates/` 目录的 `.md` 文件中。
 
 ### Step 2: 创建 promptTemplateLoader
 
@@ -145,14 +145,14 @@
 ### Step 5: 测试
 
 - 单元测试：promptTemplateLoader 正确加载和组装
-- 单元测试：`<instruct>` 标签包裹正确
+- 单元测试：`<mcp-system-prompt>` 标签包裹正确
 - 集成验证：生成的指令内容与重构前功能等价
 
 ## 验收标准
 
 1. 源码中不再有超过 3 行的硬编码提示词字符串
 2. 所有提示词模板在 `prompt-templates/` 目录中可读可编辑
-3. `<instruct section="...">` 标签包裹所有指令段落
+3. `<mcp-system-prompt>` 标签包裹注入到对话的系统指令
 4. `instructionGeneratorJson.ts` 生成的指令功能等价
 5. `notion.adapter.ts` 的 BRIDGE_PROMPT 从模板加载
 6. 现有 DOM scanner 和 stream interceptor 不受影响（不改检测逻辑）
