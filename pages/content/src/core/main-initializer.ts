@@ -21,6 +21,7 @@ import { initializeGlobalEventHandlers, cleanupGlobalEventHandlers } from '../ev
 import { logMessage } from '../utils/helpers';
 import { createLogger } from '@extension/shared/lib/logger';
 import { initializeAnalyticsListeners, startPeriodicSessionTracking, stopPeriodicSessionTracking } from '../analytics-listener';
+import { startLabelMonitoring, stopLabelMonitoring } from './tab-label-detector';
 
 // Simple logger implementation
 
@@ -254,6 +255,10 @@ export async function applicationInit(): Promise<void> {
     startPeriodicSessionTracking();
     performanceMonitor.mark('analytics-initialized');
 
+    // Detect and monitor ai-web-agent-mcp tab labels
+    startLabelMonitoring();
+    performanceMonitor.mark('tab-label-monitoring-started');
+
     // Mark initialization complete
     performanceMonitor.mark('app-init-complete');
 
@@ -312,6 +317,10 @@ export async function applicationCleanup(): Promise<void> {
     // Stop analytics tracking and send final session summary
     stopPeriodicSessionTracking();
     logger.debug('Analytics tracking stopped.');
+
+    // Stop tab label monitoring
+    stopLabelMonitoring();
+    logger.debug('Tab label monitoring stopped.');
 
     // Cleanup in reverse order of initialization
     await cleanupPluginSystem();

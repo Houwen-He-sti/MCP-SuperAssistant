@@ -53,6 +53,16 @@ const DEFAULT_CONNECTION_TYPE: ConnectionType = 'sse';
 // Remote Config Manager
 let remoteConfigManager: RemoteConfigManager | null = null;
 
+// Tab label registry — maps tabId to label reported by content scripts
+const tabLabels = new Map<number, { label: string; source: string }>();
+
+// Clean up tab labels when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabLabels.delete(tabId)) {
+    logger.debug(`[TabLabels] Cleaned up label for closed tab ${tabId}`);
+  }
+});
+
 // Background script state management with connection type support
 let serverUrl: string = DEFAULT_SSE_URL;
 let connectionType: ConnectionType = DEFAULT_CONNECTION_TYPE;
@@ -921,6 +931,25 @@ async function handleMcpMessage(
             });
           }, 0);
         }
+        break;
+      }
+
+      case 'mcp:tab-label-report': {
+        const tabId = sender.tab?.id;
+        if (tabId != null && payload.label) {
+          tabLabels.set(tabId, { label: payload.label, source: payload.source });
+          logger.debug(`[TabLabels] Tab ${tabId} labeled "${payload.label}" (${payload.source})`);
+        }
+        result = { success: true };
+        break;
+      }
+
+      case 'mcp:tab-label-query': {
+        const labels: Record<number, string> = {};
+        for (const [id, entry] of tabLabels) {
+          labels[id] = entry.label;
+        }
+        result = { labels };
         break;
       }
 
