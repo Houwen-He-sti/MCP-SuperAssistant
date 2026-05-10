@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-05-10T07:15:26.241Z",
+  "probe": "tab-labels",
+  "total_tabs": 5,
+  "labeled_count": 0,
+  "unlabeled_count": 0,
+  "error_count": 5,
+  "results": [
+    {
+      "cdp_title": "[gpt-tab-6] VSCode-Dir项目讨论专用 - PR Review Testing Issues",
+      "cdp_url": "https://chatgpt.com/g/g-p-69f6d887a46881919e9a51add41174d6/c/69ffee98-e9cc-83ec-86db-4f3847282a06",
+      "runtime_title": null,
+      "runtime_windowName": null,
+      "detected_label": null,
+      "label_source": null,
+      "error": "CDP timeout: Runtime.evaluate"
+    },
+    {
+      "cdp_title": "ChatGPT",
+      "cdp_url": "https://chatgpt.com/",
+      "runtime_title": null,
+      "runtime_windowName": null,
+      "detected_label": null,
+      "label_source": null,
+      "error": "CDP timeout: Runtime.evaluate"
+    },
+    {
+      "cdp_title": "[notion-tab-0] Notion AI | Notion",
+      "cdp_url": "https://www.notion.so/ai",
+      "runtime_title": null,
+      "runtime_windowName": null,
+      "detected_label": null,
+      "label_source": null,
+      "error": "CDP timeout: Runtime.evaluate"
+    },
+    {
+      "cdp_title": "[perplexity-tab-0] New Tab",
+      "cdp_url": "chrome://newtab/",
+      "runtime_title": null,
+      "runtime_windowName": null,
+      "detected_label": null,
+      "label_source": null,
+      "error": "CDP timeout: Runtime.evaluate"
+    },
+    {
+      "cdp_title": "[perplexity-tab-1] Perplexity",
+      "cdp_url": "https://www.perplexity.ai/sidecar",
+      "runtime_title": null,
+      "runtime_windowName": null,
+      "detected_label": null,
+      "label_source": null,
+      "error": "CDP timeout: Runtime.evaluate"
+    }
+  ]
+}
