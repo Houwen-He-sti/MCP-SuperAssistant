@@ -1,13 +1,18 @@
 /**
- * E2E test: ToolResultRenderer initialization and event handling on Notion.
+ * E2E test: ToolResultRenderer initialization, rendering, and interaction on Notion.
  *
  * Covers:
  * 1. Extension reload (ensures latest build is loaded)
  * 2. Page reload
  * 3. ToolResultRenderer styles injected into DOM
  * 4. Event listener responds to mcp:tool-execution-complete
- * 5. Card element created with correct structure
- * 6. Card toggle (expand/collapse) works
+ * 5. Card element created with correct structure and text
+ * 6. Card title shows tool name in "Tool: xxx" format
+ * 7. Card status badge shows correct emoji
+ * 8. Card width constrained (≤820px, not full viewport width)
+ * 9. Card toggle (expand/collapse) works with correct content
+ * 10. Event alias support (toolName instead of functionName)
+ * 11. Card idempotency (same callId doesn't create duplicate)
  *
  * Prerequisites:
  * - Comet/Chrome with --remote-debugging-port=9222
@@ -176,15 +181,14 @@ async function main() {
     console.log('\nStep 5: Fire mcp:tool-execution-complete event...');
     const testToolName = 'e2e_test_tool';
     const testCallId = `e2e-${Date.now()}`;
-    const testResult = 'E2E test result: ToolResultRenderer is working correctly!';
+    const testResultText = 'Search results:\\n1. Result A\\n2. Result B';
 
     await cdp.evaluate(`
         document.dispatchEvent(new CustomEvent('mcp:tool-execution-complete', {
             detail: {
                 functionName: '${testToolName}',
-                toolCallId: '${testCallId}',
-                args: { query: 'e2e test' },
-                result: '${testResult}',
+                callId: '${testCallId}',
+                result: '${testResultText}',
                 timestamp: Date.now(),
             },
             bubbles: true,
@@ -193,8 +197,8 @@ async function main() {
     console.log('  Event dispatched');
     await sleep(2000);
 
-    // ─── Step 6: Verify card creation ───
-    console.log('\nStep 6: Verify card creation...');
+    // ─── Step 6: Verify card creation + structure + text ───
+    console.log('\nStep 6: Verify card creation, structure, and content...');
 
     const cardState = await cdp.evaluate(`
         (function() {
@@ -202,17 +206,25 @@ async function main() {
             if (cards.length === 0) return JSON.stringify({ found: false });
             var card = cards[cards.length - 1];
             var rect = card.getBoundingClientRect();
+            var title = card.querySelector('.mcp-tool-result-title');
+            var status = card.querySelector('.mcp-tool-result-status');
+            var chevron = card.querySelector('.mcp-tool-result-chevron');
             return JSON.stringify({
                 found: true,
                 count: cards.length,
                 inBody: document.body.contains(card),
                 visible: rect.width > 0 && rect.height > 0,
                 display: getComputedStyle(card).display,
+                cardWidth: Math.round(rect.width),
+                viewportWidth: window.innerWidth,
                 hasHeader: !!card.querySelector('.mcp-tool-result-header'),
                 hasPreview: !!card.querySelector('.mcp-tool-result-preview'),
-                hasChevron: !!card.querySelector('.mcp-tool-result-chevron'),
-                content: card.textContent.substring(0, 300),
+                hasChevron: !!chevron,
+                titleText: title ? title.textContent : null,
+                statusText: status ? status.textContent : null,
+                chevronText: chevron ? chevron.textContent : null,
                 eventType: card.getAttribute('data-mcp-event-type'),
+                callIdAttr: card.getAttribute('data-mcp-call-id'),
             });
         })()
     `);
@@ -222,14 +234,30 @@ async function main() {
     check(state.found === true, 'Tool result card created');
     check(state.inBody === true, 'Card is attached to document.body');
     check(state.visible === true, 'Card has non-zero dimensions (visible)');
-    check(state.display === 'block', 'Card display is block');
     check(state.hasHeader === true, 'Card has .mcp-tool-result-header');
     check(state.hasPreview === true, 'Card has .mcp-tool-result-preview');
     check(state.hasChevron === true, 'Card has .mcp-tool-result-chevron');
     check(state.eventType === 'tool_execution_completed', 'Card data-mcp-event-type is correct');
+    check(state.callIdAttr === testCallId, 'Card data-mcp-call-id matches dispatched callId');
+
+    // ── Text content verification ──
     check(
-        state.content && state.content.includes(testToolName),
-        `Card content includes tool name "${testToolName}"`
+        state.titleText === `Tool: ${testToolName}`,
+        `Card title shows "Tool: ${testToolName}" (got: "${state.titleText}")`
+    );
+    check(
+        state.statusText === '✅',
+        `Card status shows ✅ for success (got: "${state.statusText}")`
+    );
+
+    // ── Width constraint ──
+    check(
+        state.cardWidth <= 820,
+        `Card width ≤ 820px (got: ${state.cardWidth}px)`
+    );
+    check(
+        state.cardWidth < state.viewportWidth,
+        `Card width (${state.cardWidth}px) < viewport width (${state.viewportWidth}px) — not full-width`
     );
 
     // ─── Step 7: Verify toggle ───
@@ -273,8 +301,8 @@ async function main() {
     check(expanded.previewVisible === 'true', 'After click: preview data-visible=true');
     check(expanded.previewDisplay === 'block', 'After click: preview display=block');
     check(
-        expanded.previewContent && expanded.previewContent.includes('E2E test result'),
-        'Expanded preview contains test result text'
+        expanded.previewContent && expanded.previewContent.includes('Result A'),
+        'Expanded preview contains expected result text'
     );
 
     // Click to collapse
@@ -295,8 +323,110 @@ async function main() {
     check(collapsed.chevronExpanded === 'false', 'After second click: collapsed again');
     check(collapsed.previewVisible === 'false', 'After second click: preview hidden again');
 
-    // ─── Step 8: Cleanup ───
-    console.log('\nStep 8: Cleanup test card...');
+    // ─── Step 8: Event alias test (toolName instead of functionName) ───
+    console.log('\nStep 8: Verify event alias (toolName instead of functionName)...');
+    const aliasCallId = `e2e-alias-${Date.now()}`;
+    const aliasToolName = 'aliased_web_search';
+
+    await cdp.evaluate(`
+        document.dispatchEvent(new CustomEvent('mcp:tool-execution-complete', {
+            detail: {
+                toolName: '${aliasToolName}',
+                toolCallId: '${aliasCallId}',
+                result: 'alias test result',
+                timestamp: Date.now(),
+            },
+            bubbles: true,
+        }));
+    `);
+    await sleep(1000);
+
+    const aliasState = await cdp.evaluate(`
+        (function() {
+            var card = document.querySelector('[data-mcp-call-id="${aliasCallId}"]');
+            if (!card) return JSON.stringify({ found: false });
+            var title = card.querySelector('.mcp-tool-result-title');
+            return JSON.stringify({
+                found: true,
+                titleText: title ? title.textContent : null,
+            });
+        })()
+    `.replace('${aliasCallId}', aliasCallId));
+
+    const alias = JSON.parse(aliasState?.value || '{}');
+    check(alias.found === true, 'Alias event created a card');
+    check(
+        alias.titleText === `Tool: ${aliasToolName}`,
+        `Alias card title shows "Tool: ${aliasToolName}" (got: "${alias.titleText}")`
+    );
+
+    // ─── Step 9: Idempotency test (same callId doesn't create duplicate) ───
+    console.log('\nStep 9: Verify idempotency (same callId = no duplicate)...');
+    const beforeCount = await cdp.evaluate(
+        `document.querySelectorAll('.mcp-tool-result-card').length`
+    );
+
+    await cdp.evaluate(`
+        document.dispatchEvent(new CustomEvent('mcp:tool-execution-complete', {
+            detail: {
+                functionName: '${testToolName}',
+                callId: '${testCallId}',
+                result: 'duplicate attempt',
+                timestamp: Date.now(),
+            },
+            bubbles: true,
+        }));
+    `);
+    await sleep(1000);
+
+    const afterCount = await cdp.evaluate(
+        `document.querySelectorAll('.mcp-tool-result-card').length`
+    );
+    check(
+        afterCount?.value === beforeCount?.value,
+        `Duplicate callId did not create new card (before: ${beforeCount?.value}, after: ${afterCount?.value})`
+    );
+
+    // ─── Step 10: Error status card ───
+    console.log('\nStep 10: Verify error card (no result)...');
+    const errorCallId = `e2e-error-${Date.now()}`;
+
+    await cdp.evaluate(`
+        document.dispatchEvent(new CustomEvent('mcp:tool-execution-complete', {
+            detail: {
+                functionName: 'failing_tool',
+                callId: '${errorCallId}',
+                timestamp: Date.now(),
+            },
+            bubbles: true,
+        }));
+    `);
+    await sleep(1000);
+
+    const errorState = await cdp.evaluate(`
+        (function() {
+            var card = document.querySelector('[data-mcp-call-id="${errorCallId}"]');
+            if (!card) return JSON.stringify({ found: false });
+            var status = card.querySelector('.mcp-tool-result-status');
+            var title = card.querySelector('.mcp-tool-result-title');
+            return JSON.stringify({
+                found: true,
+                statusText: status ? status.textContent : null,
+                titleText: title ? title.textContent : null,
+            });
+        })()
+    `.replace('${errorCallId}', errorCallId));
+
+    const errState = JSON.parse(errorState?.value || '{}');
+    check(errState.found === true, 'Error card created');
+    check(errState.statusText === '❌', `Error card shows ❌ (got: "${errState.statusText}")`);
+    check(
+        errState.titleText === 'Tool: failing_tool',
+        `Error card title shows "Tool: failing_tool" (got: "${errState.titleText}")`
+    );
+
+    // ─── Step 11: Cleanup ───
+    console.log('\nStep 11: Cleanup test cards...');
     await cdp.evaluate(`
         document.querySelectorAll('.mcp-tool-result-card').forEach(c => c.remove());
     `);

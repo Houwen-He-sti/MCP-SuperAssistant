@@ -12,16 +12,42 @@ export const MAX_RAW_LENGTH = 10_000;
 
 // ── Types ──
 
+interface ExecutionLike {
+    id?: string;
+    callId?: string;
+    toolCallId?: string;
+    functionName?: string;
+    toolName?: string;
+    name?: string;
+    result?: unknown;
+}
+
+interface ToolCallLike {
+    call_id?: string;
+    callId?: string;
+    id?: string;
+    name?: string;
+    functionName?: string;
+    toolName?: string;
+}
+
 /** Input detail from mcp:tool-execution-complete event */
 export interface ToolExecutionDetail {
-    result?: string;
+    result?: unknown;
     isFileAttachment?: boolean;
     file?: unknown;
     fileName?: string;
     confirmationText?: string;
     skipAutoInsertCheck?: boolean;
+
+    // Known identity aliases across direct and nested browser bridge payloads.
     callId?: string;
+    toolCallId?: string;
     functionName?: string;
+    toolName?: string;
+    name?: string;
+    execution?: ExecutionLike;
+    toolCall?: ToolCallLike;
 }
 
 /** Validated and extracted data ready for rendering */
@@ -61,6 +87,36 @@ export function truncatePreview(text: string, maxLength: number = MAX_PREVIEW_LE
     return text.slice(0, maxLength) + '\n... (truncated)';
 }
 
+export function extractCallId(detail: ToolExecutionDetail): string {
+    return detail.callId
+        || detail.toolCallId
+        || detail.execution?.callId
+        || detail.execution?.toolCallId
+        || detail.execution?.id
+        || detail.toolCall?.callId
+        || detail.toolCall?.call_id
+        || detail.toolCall?.id
+        || `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function extractFunctionName(detail: ToolExecutionDetail): string {
+    return detail.functionName
+        || detail.toolName
+        || detail.name
+        || detail.execution?.functionName
+        || detail.execution?.toolName
+        || detail.execution?.name
+        || detail.toolCall?.functionName
+        || detail.toolCall?.toolName
+        || detail.toolCall?.name
+        || 'unknown_tool';
+}
+
+export function extractResult(detail: ToolExecutionDetail): unknown {
+    if (detail.result !== undefined && detail.result !== null) return detail.result;
+    return detail.execution?.result;
+}
+
 /**
  * Extract and validate render data from a tool execution complete detail.
  * Returns null if the detail is invalid.
@@ -74,18 +130,19 @@ export function extractRenderData(
         return null;
     }
 
-    const callId = detail.callId || `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const functionName = detail.functionName || 'unknown_tool';
-    const hasResult = detail.result !== undefined && detail.result !== null;
+    const callId = extractCallId(detail);
+    const functionName = extractFunctionName(detail);
+    const result = extractResult(detail);
+    const hasResult = result !== undefined && result !== null;
     const hasConfirmation = !!detail.confirmationText;
 
-    const rawResult = hasResult ? stringifyToolResult(detail.result) : undefined;
-    const resultPreview = rawResult
+    const rawResult = hasResult ? stringifyToolResult(result) : undefined;
+    const resultPreview = rawResult !== undefined
         ? truncatePreview(rawResult, MAX_PREVIEW_LENGTH)
         : (detail.confirmationText || '');
 
     // mcp:tool-execution-complete is already a completion event.
-    // Only mark as error if there's no result AND no confirmation AND no explicit success signal.
+    // Only mark as error if there's no result AND no confirmation.
     const isError = !hasResult && !hasConfirmation;
 
     return {
@@ -93,7 +150,7 @@ export function extractRenderData(
         functionName,
         status: isError ? 'error' : 'success',
         resultPreview,
-        rawResult: rawResult ? truncatePreview(rawResult, MAX_RAW_LENGTH) : undefined,
+        rawResult: rawResult !== undefined ? truncatePreview(rawResult, MAX_RAW_LENGTH) : undefined,
         error: isError ? 'No result returned' : undefined,
         timestamp: Date.now(),
     };

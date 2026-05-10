@@ -31,7 +31,10 @@ const STYLE_TAG_ID = 'mcp-tool-result-renderer-styles';
 
 const TOOL_RESULT_CSS = `
 .mcp-tool-result-card {
-  margin: 8px 0;
+  box-sizing: border-box;
+  width: min(100%, 820px);
+  max-width: 820px;
+  margin: 8px auto;
   border: 1px solid var(--mcp-tr-border, #e5e7eb);
   border-radius: 8px;
   overflow: hidden;
@@ -229,7 +232,7 @@ export class ToolResultRenderer {
     }
 
     private async handleToolExecutionComplete(detail: ToolExecutionCompleteDetail): Promise<void> {
-        const data = extractRenderData(detail);
+        const data = extractRenderData(detail as any);
         if (!data) return;
 
         this.injectResultBlock(data);
