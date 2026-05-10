@@ -21,26 +21,36 @@ export interface DetectedLabel {
 }
 
 /**
- * One-shot detection: check window.name and document.title for a label.
+ * Pure detection logic: check given values for a tab label.
+ * Exported for unit testing — no browser globals accessed.
  */
-export function detectTabLabel(): DetectedLabel | null {
+export function detectFromValues(windowName: string, documentTitle: string): DetectedLabel | null {
   // Primary: window.name with __AIWEB__ namespace
-  if (typeof window !== 'undefined' && window.name?.startsWith(AIWEB_PREFIX)) {
-    const label = window.name.slice(AIWEB_PREFIX.length);
+  if (windowName?.startsWith(AIWEB_PREFIX)) {
+    const label = windowName.slice(AIWEB_PREFIX.length);
     if (label) {
       return { label, source: 'window-name' };
     }
   }
 
   // Fallback: parse [label] prefix from document.title
-  if (typeof document !== 'undefined' && document.title) {
-    const match = document.title.match(/^\[([^\]]+)\]/);
+  if (documentTitle) {
+    const match = documentTitle.match(/^\[([^\]]+)\]/);
     if (match?.[1]) {
       return { label: match[1], source: 'title-prefix' };
     }
   }
 
   return null;
+}
+
+/**
+ * One-shot detection: check window.name and document.title for a label.
+ */
+export function detectTabLabel(): DetectedLabel | null {
+  const wn = typeof window !== 'undefined' ? (window.name ?? '') : '';
+  const dt = typeof document !== 'undefined' ? (document.title ?? '') : '';
+  return detectFromValues(wn, dt);
 }
 
 /**
