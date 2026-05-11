@@ -3,7 +3,8 @@
 **分支**: `feat/tool-result-card-rendering`  
 **作者**: Opus/Claude  
 **日期**: 2026-05-11  
-**状态**: Concept LGTM with revisions (GPT + Opus 共识)
+**状态**: Concept LGTM with revisions (GPT + Opus 共识)  
+**相关测试原则**: [Provider DOM Contract Testing](provider-dom-contract-testing.md)
 
 ---
 
@@ -23,6 +24,19 @@
 - 不在单个 codeblock 内放多个 call（保持 1 codeblock = 1 call 不变量）
 - 不引入 batch wrapper XML 格式（MVP 用多个并列 `<function_results>` block）
 - 不改变单工具调用的核心行为（向后兼容）
+
+## 测试原则：Mocked DOM 不等于真实 Provider DOM Contract
+
+本计划中的 mocked DOM E2E 只能证明 scanner / batch / handler 逻辑在一个假定 DOM 结构下成立。它不能证明真实 provider 页面（ChatGPT、Notion、Copilot、Gemini 等）仍然满足这些 selector、message boundary、codeblock parent tracing、input/submit 结构假设。
+
+因此，任何依赖 provider DOM selector 或 assistant message boundary 的实现，进入 production-ready 状态前必须补充真实 provider DOM contract observation 或 regression。详见 [`plans/provider-dom-contract-testing.md`](provider-dom-contract-testing.md)。
+
+对本 multi-tool 功能，Provider DOM Contract 至少要验证：
+
+1. 同一条 assistant message 中的多个 codeblock 能追溯到同一个 message container；
+2. 不同 assistant message 的 codeblock 不会被错误聚合；
+3. message id 或 fallback id 足够稳定，可用于 dedupeKey；
+4. input / submit selector 支持一次性插入 merged results 并提交一次。
 
 ## 已知与未知
 
@@ -317,7 +331,10 @@ const results = await Promise.allSettled(
 
 ### Step 6: 端到端测试
 
-- 手动测试：Notion AI / ChatGPT 下多工具调用
+- Mocked DOM E2E：验证 scanner / batch / handler 逻辑
+- Provider DOM Contract：验证真实 provider 页面仍满足 message boundary、codeblock tracing、input/submit selector 假设
+- Full Pipeline Integration：验证 extension → proxy → MCP server → extension → merged insert/submit
+- Manual AI Smoke：验证真实模型能输出多个独立工具调用，并能理解 merged results
 - 验证卡片渲染正确
 - 验证结果合并和提交正确
 - 验证单工具调用无性能退化
@@ -334,6 +351,7 @@ const results = await Promise.allSettled(
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | AI 输出格式不可靠（多 codeblock 合并为一个等） | 工具调用解析失败 | 提示词明确约束；实测各 AI 平台 |
+| Mocked DOM 与真实 provider DOM 偏离 | mock 测试绿但生产 scanner / grouping / input / submit 失败 | Provider DOM Contract observation / regression |
 | MutationObserver 重扫同一 message 导致重复执行 | 工具被执行多次 | dedupeKey = messageId + callId |
 | MCP server 不支持并发 | 并行执行失败 | MVP 串行执行；Phase 5 可选并行 |
 | 合并消息过长 | 输入框截断或 AI 上下文溢出 | 截断策略；大结果压缩 |
@@ -350,6 +368,7 @@ const results = await Promise.allSettled(
 6. BatchCollector 有完整单元测试
 7. 超时场景（部分工具未返回）优雅处理（partial flush）
 8. MutationObserver 重扫不导致重复执行
+9. Mocked DOM E2E 不单独作为 provider compatibility evidence；至少需要 provider DOM contract observation / regression
 
 ## Review 记录
 
