@@ -193,12 +193,9 @@ export class AutomationService {
     // Create new event listener
     this.eventListener = (event: Event) => {
       const detail = (event as CustomEvent<ToolExecutionCompleteDetail>).detail;
-      // Phase 4: Route through batchHandler if callId is present and batched
-      if (detail?.callId && this.batchHandler.isBatchedCall(detail.callId)) {
-        this.batchHandler.handleResult(detail);
-      } else {
-        this.processSingleResult(detail);
-      }
+      // Phase 4: All results go through batchHandler for unified routing
+      // (handles active batch, suppressed late results, and unbatched results)
+      this.batchHandler.handleResult(detail);
     };
 
     // Add event listener to document
