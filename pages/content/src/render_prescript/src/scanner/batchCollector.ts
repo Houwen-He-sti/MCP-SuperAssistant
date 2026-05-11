@@ -4,8 +4,9 @@
  *
  * Flush conditions (priority order):
  * 1. All expectedCallIds settled → flush immediately
- * 2. Idle timeout (no new results for idleTimeoutMs) → flush partial
- * 3. Max timeout (maxTimeoutMs since batch registration) → force flush
+ * 2. Stream/message end signal → debounce flush (streamEndDebounceMs)
+ * 3. Idle timeout (no new results for idleTimeoutMs) → flush partial
+ * 4. Max timeout (maxTimeoutMs since batch registration) → force flush
  *
  * Single-call batches flush immediately with no extra delay (backward compat).
  */
@@ -24,7 +25,7 @@ export interface BatchCallResult {
 export interface BatchFlushResult {
   batchId: string;
   results: BatchCallResult[];
-  flushReason: 'all_settled' | 'idle_timeout' | 'max_timeout';
+  flushReason: 'all_settled' | 'stream_end' | 'idle_timeout' | 'max_timeout';
 }
 
 export interface BatchCollectorOptions {
@@ -34,6 +35,8 @@ export interface BatchCollectorOptions {
   idleTimeoutMs?: number;
   /** Hard maximum milliseconds before force flush (default: 15000) */
   maxTimeoutMs?: number;
+  /** Debounce milliseconds after stream_end signal before flush (default: 500) */
+  streamEndDebounceMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +51,7 @@ interface BatchContext {
   startTime: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   maxTimer: ReturnType<typeof setTimeout> | null;
+  streamEndTimer: ReturnType<typeof setTimeout> | null;
   flushed: boolean;
 }
 
@@ -60,11 +64,13 @@ export class BatchCollector {
   private readonly onFlush: (result: BatchFlushResult) => void;
   private readonly idleTimeoutMs: number;
   private readonly maxTimeoutMs: number;
+  private readonly streamEndDebounceMs: number;
 
   constructor(options: BatchCollectorOptions) {
     this.onFlush = options.onFlush;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 3000;
     this.maxTimeoutMs = options.maxTimeoutMs ?? 15000;
+    this.streamEndDebounceMs = options.streamEndDebounceMs ?? 500;
   }
 
   /**
@@ -85,6 +91,7 @@ export class BatchCollector {
       startTime: Date.now(),
       idleTimer: null,
       maxTimer: null,
+      streamEndTimer: null,
       flushed: false,
     };
 
@@ -105,6 +112,9 @@ export class BatchCollector {
     // Ignore duplicate
     if (ctx.results.has(result.callId)) return;
 
+    // Reject unexpected callIds — only collect expected calls
+    if (!ctx.expectedCallIds.includes(result.callId)) return;
+
     ctx.results.set(result.callId, result);
 
     // Reset idle timer on each new result
@@ -122,6 +132,30 @@ export class BatchCollector {
 
     // Start idle timer for partial flush
     ctx.idleTimer = setTimeout(() => this.flush(ctx, 'idle_timeout'), this.idleTimeoutMs);
+  }
+
+  /**
+   * Signal that the stream/message has ended.
+   * Starts a short debounce timer, then flushes whatever results are available.
+   */
+  markStreamEnded(batchId: string): void {
+    const ctx = this.batches.get(batchId);
+    if (!ctx || ctx.flushed) return;
+
+    // If already all settled, no need for debounce
+    const allSettled = ctx.expectedCallIds.every(id => ctx.results.has(id));
+    if (allSettled) {
+      this.flush(ctx, 'all_settled');
+      return;
+    }
+
+    // Start stream_end debounce (only if not already started)
+    if (ctx.streamEndTimer === null) {
+      ctx.streamEndTimer = setTimeout(
+        () => this.flush(ctx, 'stream_end'),
+        this.streamEndDebounceMs,
+      );
+    }
   }
 
   /**
@@ -182,6 +216,10 @@ export class BatchCollector {
     if (ctx.maxTimer !== null) {
       clearTimeout(ctx.maxTimer);
       ctx.maxTimer = null;
+    }
+    if (ctx.streamEndTimer !== null) {
+      clearTimeout(ctx.streamEndTimer);
+      ctx.streamEndTimer = null;
     }
   }
 }

@@ -5,7 +5,7 @@
  * have completed (or timeout), then flushes merged results.
  */
 
-import { describe, it, beforeEach, afterEach, mock } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BatchCollector,
@@ -125,12 +125,50 @@ describe('BatchCollector', () => {
       assert.equal(flushed[0].flushReason, 'max_timeout');
       assert.equal(flushed[0].results.length, 0);
     });
+
+    it('stream_end debounce flushes partial results', async () => {
+      collector = new BatchCollector({
+        onFlush: (result) => { flushed.push(result); },
+        idleTimeoutMs: 10000,
+        maxTimeoutMs: 10000,
+        streamEndDebounceMs: 50,
+      });
+      collector.registerBatch('b1', ['c1', 'c2'], ['c1', 'c2']);
+      collector.addResult('b1', makeResult('c1'));
+      collector.markStreamEnded('b1');
+
+      assert.equal(flushed.length, 0, 'Should not flush immediately on stream_end');
+
+      await new Promise(r => setTimeout(r, 100));
+
+      assert.equal(flushed.length, 1);
+      assert.equal(flushed[0].flushReason, 'stream_end');
+      assert.equal(flushed[0].results.length, 1);
+    });
+
+    it('stream_end with all settled flushes immediately as all_settled', () => {
+      collector.registerBatch('b1', ['c1'], ['c1']);
+      collector.addResult('b1', makeResult('c1'));
+      // Already flushed as all_settled, markStreamEnded is a no-op
+      collector.markStreamEnded('b1');
+      assert.equal(flushed.length, 1);
+      assert.equal(flushed[0].flushReason, 'all_settled');
+    });
   });
 
   describe('edge cases', () => {
     it('ignores result for unknown batch', () => {
       collector.addResult('unknown', makeResult('c1'));
       assert.equal(flushed.length, 0);
+    });
+
+    it('rejects unexpected callId', () => {
+      collector.registerBatch('b1', ['c1'], ['c1']);
+      collector.addResult('b1', makeResult('unexpected'));
+      assert.equal(flushed.length, 0, 'Should not trigger flush from unexpected callId');
+      // The expected call should still work
+      collector.addResult('b1', makeResult('c1'));
+      assert.equal(flushed.length, 1);
     });
 
     it('ignores duplicate result for same callId', () => {
