@@ -55,7 +55,7 @@ const TONE_MAP: Record<ToolLoopUiEventType, ToolLoopCardTone> = {
 };
 
 export function mapEventToTone(type: ToolLoopUiEventType): ToolLoopCardTone {
-  return TONE_MAP[type] ?? 'neutral';
+  return TONE_MAP[type] ?? 'warning';
 }
 
 const TITLE_PREFIX_MAP: Record<ToolLoopUiEventType, string> = {
@@ -91,6 +91,39 @@ const ICON_MAP: Record<ToolLoopCardTone, string> = {
 
 export function getCardStatusIcon(tone: ToolLoopCardTone): string {
   return ICON_MAP[tone];
+}
+
+// --- Type Guards ---
+
+/**
+ * Shape guard for ToolLoopUiEvent. Validates structural integrity without
+ * checking if `type` is a known event type (that's isKnownToolLoopEventType's job).
+ * Prevents malformed CustomEvent payloads from polluting DOM or causing runtime errors.
+ */
+export function isToolLoopUiEvent(value: unknown): value is ToolLoopUiEvent {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v.version === 1 &&
+    typeof v.type === 'string' &&
+    typeof v.timestamp === 'number' &&
+    Number.isFinite(v.timestamp) &&
+    (v.callId === undefined || typeof v.callId === 'string') &&
+    (v.streamId === undefined || typeof v.streamId === 'string') &&
+    (v.toolName === undefined || typeof v.toolName === 'string') &&
+    (v.phase === undefined || typeof v.phase === 'string') &&
+    (v.errorCode === undefined || typeof v.errorCode === 'string') &&
+    (v.error === undefined || typeof v.error === 'string') &&
+    (v.injectOutcome === undefined || typeof v.injectOutcome === 'string')
+  );
+}
+
+/**
+ * Checks if the given type string is a known ToolLoopUiEventType.
+ * Used for runtime diagnostics — unknown types are still processed (with warning tone).
+ */
+export function isKnownToolLoopEventType(type: string): type is ToolLoopUiEventType {
+  return Object.prototype.hasOwnProperty.call(TONE_MAP, type);
 }
 
 // --- State Store ---

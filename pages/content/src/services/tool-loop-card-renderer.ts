@@ -16,17 +16,18 @@
  *   - Per-call state preserved even if DOM card can't be created yet
  */
 
-import type { ToolLoopUiEvent } from '../render_prescript/src/stream/toolLoopUiEvents.ts';
 import type { ToolResultMountPoint } from '../types/tool-result-ui';
 import type { AdapterPlugin } from '../plugins/plugin-types';
 import { createLogger } from '@extension/shared/lib/logger';
 import {
   ToolLoopCardStateStore,
+  isToolLoopUiEvent,
+  isKnownToolLoopEventType,
   type ToolLoopCardState,
   type TimelineEntry,
 } from './tool-loop-card-renderer-utils.ts';
 
-export { mapEventToTone, getCardTitle, getCardStatusIcon, ToolLoopCardStateStore } from './tool-loop-card-renderer-utils.ts';
+export { mapEventToTone, getCardTitle, getCardStatusIcon, ToolLoopCardStateStore, isToolLoopUiEvent, isKnownToolLoopEventType } from './tool-loop-card-renderer-utils.ts';
 export type { ToolLoopCardTone, ToolLoopCardState, TimelineEntry } from './tool-loop-card-renderer-utils.ts';
 
 const logger = createLogger('ToolLoopCardRenderer');
@@ -201,12 +202,14 @@ function isDisabled(): boolean {
 }
 
 // --- Service Class ---
+// TODO P2: stateStore/cards cleanup on SPA navigation or after terminal state timeout
 
 export class ToolLoopCardRenderer {
   private static instance: ToolLoopCardRenderer | null = null;
 
   private stateStore = new ToolLoopCardStateStore();
   private cards = new Map<string, HTMLElement>();
+  private pendingCreation = new Set<string>();
   private abortController?: AbortController;
   private started = false;
   private getActiveAdapterFn: (() => Promise<{ plugin?: AdapterPlugin } | null>) | null = null;
@@ -275,11 +278,11 @@ export class ToolLoopCardRenderer {
   }
 
   private handleEvent = (event: Event): void => {
-    const detail = (event as CustomEvent<ToolLoopUiEvent>).detail;
-    if (!detail) return;
+    const detail = (event as CustomEvent<unknown>).detail;
+    if (!isToolLoopUiEvent(detail)) return;
 
     const { callId } = detail;
-    if (!callId) {
+    if (typeof callId !== 'string' || callId.length === 0) {
       logger.warn('[ToolLoopCardRenderer] Skip event without callId', {
         type: detail.type,
         streamId: detail.streamId,
@@ -287,51 +290,83 @@ export class ToolLoopCardRenderer {
       return;
     }
 
+    if (!isKnownToolLoopEventType(detail.type)) {
+      logger.warn('[ToolLoopCardRenderer] Unknown tool-loop event type', {
+        type: detail.type,
+        streamId: detail.streamId,
+        callId: detail.callId,
+      });
+    }
+
     // Update internal state (always succeeds for valid callId)
     const state = this.stateStore.apply(detail);
     if (!state) return;
 
-    // Try to find or create card
+    // Check existing card
     let card = this.cards.get(callId);
+    if (card && !card.isConnected) {
+      this.cards.delete(callId);
+      card = undefined;
+    }
+
     if (card) {
       updateSemanticCard(card, state);
       return;
     }
 
-    // Card doesn't exist yet — try to create
-    card = this.tryCreateCard(state);
-    if (card) {
-      this.cards.set(callId, card);
-    }
+    // Guard: only one creation in-flight per callId
+    if (this.pendingCreation.has(callId)) return;
+
+    this.pendingCreation.add(callId);
+    void this.tryCreateCard(callId).finally(() => {
+      this.pendingCreation.delete(callId);
+    });
   };
 
-  private async tryCreateCard(state: ToolLoopCardState): Promise<HTMLElement | null> {
-    const mountPoint = await this.getMountPoint(state.callId);
+  private async tryCreateCard(callId: string): Promise<void> {
+    const mountPoint = await this.getMountPoint(callId);
     if (!mountPoint) {
-      logger.warn('[ToolLoopCardRenderer] Mount point unavailable', {
-        callId: state.callId,
-        toolName: state.toolName,
-      });
-      return null;
+      logger.warn('[ToolLoopCardRenderer] Mount point unavailable', { callId });
+      return;
     }
 
-    const card = buildSemanticCard(state);
+    const initialState = this.stateStore.get(callId);
+    if (!initialState) return;
 
-    try {
-      if (mountPoint.mode === 'after' && mountPoint.anchor) {
-        mountPoint.anchor.after(card);
-      } else {
-        mountPoint.container.appendChild(card);
+    // Re-check: card may have been created while we awaited
+    let card = this.cards.get(callId);
+    if (card && !card.isConnected) {
+      this.cards.delete(callId);
+      card = undefined;
+    }
+
+    if (!card) {
+      card = buildSemanticCard(initialState);
+      try {
+        if (mountPoint.mode === 'after' && mountPoint.anchor) {
+          mountPoint.anchor.after(card);
+        } else {
+          mountPoint.container.appendChild(card);
+        }
+        this.cards.set(callId, card);
+        logger.debug('[ToolLoopCardRenderer] Card created', {
+          callId,
+          toolName: initialState.toolName,
+          tone: initialState.currentTone,
+        });
+      } catch (e) {
+        logger.warn('[ToolLoopCardRenderer] Error injecting card', {
+          callId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return;
       }
-      logger.debug('[ToolLoopCardRenderer] Card created', {
-        callId: state.callId,
-        toolName: state.toolName,
-        tone: state.currentTone,
-      });
-      return card;
-    } catch (e) {
-      logger.warn('[ToolLoopCardRenderer] Error injecting card:', e);
-      return null;
+    }
+
+    // Critical: re-read latest state after async + DOM insert
+    const latestState = this.stateStore.get(callId);
+    if (latestState) {
+      updateSemanticCard(card, latestState);
     }
   }
 

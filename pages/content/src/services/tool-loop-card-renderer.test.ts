@@ -20,6 +20,8 @@ import {
   getCardTitle,
   getCardStatusIcon,
   ToolLoopCardStateStore,
+  isToolLoopUiEvent,
+  isKnownToolLoopEventType,
   type ToolLoopCardTone,
 } from './tool-loop-card-renderer-utils.ts';
 import type { ToolLoopUiEvent, ToolLoopUiEventType } from '../render_prescript/src/stream/toolLoopUiEvents.ts';
@@ -93,8 +95,8 @@ describe('mapEventToTone', () => {
     assert.equal(mapEventToTone('bridge_handoff_ack'), 'pending');
   });
 
-  test('unknown type falls back to neutral', () => {
-    assert.equal(mapEventToTone('nonexistent_type' as ToolLoopUiEventType), 'neutral');
+  test('unknown type falls back to warning', () => {
+    assert.equal(mapEventToTone('nonexistent_type' as ToolLoopUiEventType), 'warning');
   });
 });
 
@@ -299,5 +301,166 @@ describe('ToolLoopCardStateStore', () => {
     const state = store.apply(makeUiEvent('tool_execution_failed'));
 
     assert.equal(state!.statusIcon, '❌');
+  });
+});
+
+// ────────────────────────────────────────────
+// isToolLoopUiEvent (shape guard)
+// ────────────────────────────────────────────
+
+describe('isToolLoopUiEvent', () => {
+  test('valid event returns true', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: Date.now(),
+      callId: 'call-1',
+      toolName: 'test_tool',
+    }), true);
+  });
+
+  test('minimal valid event (only required fields) returns true', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+    }), true);
+  });
+
+  test('null returns false', () => {
+    assert.equal(isToolLoopUiEvent(null), false);
+  });
+
+  test('undefined returns false', () => {
+    assert.equal(isToolLoopUiEvent(undefined), false);
+  });
+
+  test('non-object returns false', () => {
+    assert.equal(isToolLoopUiEvent('string'), false);
+    assert.equal(isToolLoopUiEvent(42), false);
+  });
+
+  test('wrong version returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 2,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+    }), false);
+  });
+
+  test('non-string type returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 123,
+      timestamp: 1000,
+    }), false);
+  });
+
+  test('non-number timestamp returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: '2024-01-01',
+    }), false);
+  });
+
+  test('NaN timestamp returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: NaN,
+    }), false);
+  });
+
+  test('Infinity timestamp returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: Infinity,
+    }), false);
+  });
+
+  test('non-string callId returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+      callId: 123,
+    }), false);
+  });
+
+  test('non-string toolName returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+      toolName: { name: 'x' },
+    }), false);
+  });
+
+  test('non-string error returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+      error: new Error('oops'),
+    }), false);
+  });
+
+  test('non-string phase returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+      phase: 42,
+    }), false);
+  });
+
+  test('non-string injectOutcome returns false', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'tool_call_detected',
+      timestamp: 1000,
+      injectOutcome: true,
+    }), false);
+  });
+
+  test('unknown event type still passes guard (guard is shape-only)', () => {
+    assert.equal(isToolLoopUiEvent({
+      version: 1,
+      type: 'some_future_event_type',
+      timestamp: 1000,
+    }), true);
+  });
+});
+
+// ────────────────────────────────────────────
+// isKnownToolLoopEventType
+// ────────────────────────────────────────────
+
+describe('isKnownToolLoopEventType', () => {
+  test('known type returns true', () => {
+    assert.equal(isKnownToolLoopEventType('tool_call_detected'), true);
+    assert.equal(isKnownToolLoopEventType('tool_execution_failed'), true);
+    assert.equal(isKnownToolLoopEventType('model_ack_confirmed'), true);
+  });
+
+  test('unknown type returns false', () => {
+    assert.equal(isKnownToolLoopEventType('some_future_type'), false);
+    assert.equal(isKnownToolLoopEventType(''), false);
+  });
+});
+
+// ────────────────────────────────────────────
+// mapEventToTone — unknown type fallback
+// ────────────────────────────────────────────
+
+describe('mapEventToTone — unknown type handling', () => {
+  test('unknown type falls back to warning', () => {
+    assert.equal(mapEventToTone('nonexistent_type' as any), 'warning');
+  });
+
+  test('empty string type falls back to warning', () => {
+    assert.equal(mapEventToTone('' as any), 'warning');
   });
 });
