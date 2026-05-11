@@ -1,6 +1,22 @@
+/**
+ * functionResult.ts — Renders submitted user messages containing function results.
+ *
+ * This is a DOM post-processor for user messages in provider chat (ChatGPT, Notion, etc.).
+ * It detects <function_results> / <function_result> XML in user message textContent and
+ * replaces the raw XML with expandable, themed cards.
+ *
+ * LIFECYCLE NOTE: This renderer is intentionally separate from
+ * services/tool-result-renderer.ts (PR #30 ToolResultRenderer):
+ *   - functionResult.ts: processes submitted user messages visible in provider chat.
+ *   - ToolResultRenderer: handles mcp:tool-execution-complete events before/around submit.
+ * Do not merge these paths without a separate lifecycle unification plan.
+ *
+ * Gate 6: Updated to use functionResultParser.ts for canonical batch format support.
+ */
 import { CONFIG } from '../core/config';
 import { applyThemeClass, isDarkTheme } from '../utils/themeDetector';
 import { createLogger } from '@extension/shared/lib/logger';
+import { parseFunctionResults, containsFunctionResult } from './functionResultParser';
 
 // State management for rendered elements
 
@@ -392,50 +408,97 @@ export const renderFunctionResult = (block: HTMLElement, isProcessingRef: { curr
     }
 
     // Check if it's a function result
-    if (!content.includes('<function_result') && !content.includes('</function_result>')) {
+    if (!containsFunctionResult(content)) {
+      return false;
+    }
+
+    // Parse all function results (supports canonical, legacy, merged, batch)
+    const parsed = parseFunctionResults(content);
+    if (!parsed || parsed.results.length === 0) {
       return false;
     }
 
     // Generate a unique ID for this block
     const blockId = `result-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     block.setAttribute('data-block-id', blockId);
-    
 
-    // Parse the function result content
-    let resultContent = '';
     try {
-      // Extract content between function_result tags
-      const resultMatch = content.match(/<function_result[^>]*>([\s\S]*?)<\/function_result>/);
-      if (resultMatch && resultMatch[1]) {
-        resultContent = resultMatch[1].trim();
+      if (parsed.results.length === 1) {
+        // Single result — render one card (same UX as before)
+        const r = parsed.results[0];
+        const config: ExpandableConfig = {
+          blockId,
+          className: 'function-result-container',
+          headerText: 'Function Result',
+          expandTitle: 'Expand function result',
+          collapseTitle: 'Collapse function result',
+          callId: r.callId,
+        };
+
+        const contentArea = createThemedContentArea('param-value function-result-content');
+        renderFunctionResultContent(r.content, contentArea);
+
+        const resultContainer = createExpandableBlock(config, contentArea);
+        replaceBlockContent(block, resultContainer);
+        renderedFunctionResults.set(blockId, resultContainer);
+      } else {
+        // Multiple results — render batch card with multiple result rows
+        const batchContainer = createThemedContainer(
+          'function-block function-result-batch-container',
+          blockId,
+        );
+
+        // Batch header
+        const batchHeader = document.createElement('div');
+        batchHeader.className = 'function-name batch-header';
+
+        const headerLeft = document.createElement('div');
+        headerLeft.className = 'function-name-left';
+        const headerText = document.createElement('div');
+        headerText.className = 'function-name-text';
+        headerText.textContent = `Function Results (${parsed.results.length} calls)`;
+        headerLeft.appendChild(headerText);
+        batchHeader.appendChild(headerLeft);
+        batchContainer.appendChild(batchHeader);
+
+        // Render each result as a sub-card
+        parsed.results.forEach((r, i) => {
+          const subBlockId = `${blockId}-sub-${i}`;
+          const config: ExpandableConfig = {
+            blockId: subBlockId,
+            className: 'function-result-container function-result-sub',
+            headerText: r.name || 'Function Result',
+            expandTitle: `Expand result ${i + 1}`,
+            collapseTitle: `Collapse result ${i + 1}`,
+            callId: r.callId,
+          };
+
+          const contentArea = createThemedContentArea('param-value function-result-content');
+          renderFunctionResultContent(r.content, contentArea);
+
+          // Add status badge for error results
+          if (r.status === 'error') {
+            const statusBadge = document.createElement('span');
+            statusBadge.className = 'result-status-error';
+            statusBadge.textContent = 'error';
+            statusBadge.style.color = '#ef4444';
+            statusBadge.style.fontSize = '11px';
+            statusBadge.style.fontWeight = '600';
+            statusBadge.style.marginLeft = '8px';
+            // Will be appended after header creation
+            const subContainer = createExpandableBlock(config, contentArea);
+            const nameLeft = subContainer.querySelector('.function-name-left');
+            if (nameLeft) nameLeft.appendChild(statusBadge);
+            batchContainer.appendChild(subContainer);
+          } else {
+            const subContainer = createExpandableBlock(config, contentArea);
+            batchContainer.appendChild(subContainer);
+          }
+        });
+
+        replaceBlockContent(block, batchContainer);
+        renderedFunctionResults.set(blockId, batchContainer);
       }
-
-      // Extract call_id if available
-      const callIdMatch = content.match(/call_id="([^"]*)"/);
-      const callId = callIdMatch ? callIdMatch[1] : '';
-
-      // Create configuration for expandable block
-      const config: ExpandableConfig = {
-        blockId,
-        className: 'function-result-container',
-        headerText: 'Function Result',
-        expandTitle: 'Expand function result',
-        collapseTitle: 'Collapse function result',
-        callId,
-      };
-
-      // Create content area and render content
-      const contentArea = createThemedContentArea('param-value function-result-content');
-      renderFunctionResultContent(resultContent, contentArea);
-
-      // Create the complete expandable block
-      const resultContainer = createExpandableBlock(config, contentArea);
-
-      // Replace the original block with our rendered version
-      replaceBlockContent(block, resultContainer);
-
-      // Store the rendered block for future reference
-      renderedFunctionResults.set(blockId, resultContainer);
 
       return true;
     } catch (e) {
