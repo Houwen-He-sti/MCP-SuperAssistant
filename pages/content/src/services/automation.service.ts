@@ -18,6 +18,7 @@ import { useUserPreferences } from '../hooks/useStores';
 import { useCurrentAdapter } from '../hooks/useAdapter';
 import { eventBus } from '../events/event-bus';
 import { createLogger } from '@extension/shared/lib/logger';
+import { BatchAwareHandler, type MergedBatchResult, type ResultDetail } from './batchAwareHandler';
 
 // Store references for accessing state outside React components
 
@@ -101,8 +102,21 @@ export class AutomationService {
   private submitQueue: (() => Promise<void>)[] = [];
   private isProcessingSubmit = false;
 
+  // Phase 4: Batch-aware result routing
+  private batchHandler: BatchAwareHandler;
+
   // Private constructor for singleton pattern
-  private constructor() {}
+  private constructor() {
+    this.batchHandler = new BatchAwareHandler({
+      onSingleResult: (detail) => {
+        // Legacy path: process single result directly (no re-routing)
+        this.processSingleResult(detail as ToolExecutionCompleteDetail);
+      },
+      onBatchResult: (merged) => {
+        this.handleBatchComplete(merged);
+      },
+    });
+  }
 
   /**
    * Get the singleton instance of AutomationService
@@ -159,6 +173,9 @@ export class AutomationService {
       this.eventListener = null;
     }
 
+    // Phase 4: Dispose batch handler
+    this.batchHandler.dispose();
+
     this.isInitialized = false;
     logger.debug('[AutomationService] Automation service cleaned up');
   }
@@ -174,7 +191,13 @@ export class AutomationService {
 
     // Create new event listener
     this.eventListener = (event: Event) => {
-      this.handleToolExecutionComplete(event as CustomEvent<ToolExecutionCompleteDetail>);
+      const detail = (event as CustomEvent<ToolExecutionCompleteDetail>).detail;
+      // Phase 4: Route through batchHandler if callId is present and batched
+      if (detail?.callId && this.batchHandler.isBatchedCall(detail.callId)) {
+        this.batchHandler.handleResult(detail);
+      } else {
+        this.processSingleResult(detail);
+      }
     };
 
     // Add event listener to document
@@ -194,15 +217,15 @@ export class AutomationService {
   }
 
   /**
-   * Main handler for tool execution completion events
+   * Main handler for tool execution completion events.
+   * Also used by handleToolExecutionComplete for backward compat.
    */
-  private async handleToolExecutionComplete(event: CustomEvent<ToolExecutionCompleteDetail>): Promise<void> {
-    if (!event.detail) {
+  private async processSingleResult(detail: ToolExecutionCompleteDetail): Promise<void> {
+    if (!detail) {
       logger.warn('[AutomationService] Tool execution complete event received without detail');
       return;
     }
 
-    const detail = event.detail;
     logger.debug('[AutomationService] Tool execution complete event received:', detail);
 
     try {
@@ -538,7 +561,61 @@ export class AutomationService {
    */
   public async triggerTestAutomation(detail: ToolExecutionCompleteDetail): Promise<void> {
     logger.debug('[AutomationService] Triggering test automation');
-    await this.handleToolExecutionComplete(new CustomEvent('mcp:tool-execution-complete', { detail }));
+    await this.processSingleResult(detail);
+  }
+
+  // =========================================================================
+  // Phase 4: Batch-aware multi-tool support
+  // =========================================================================
+
+  /**
+   * Register a batch of expected tool call IDs.
+   * Called by the DOM scanner when multiple tool calls are detected
+   * in the same assistant message.
+   */
+  public registerBatch(batchId: string, expectedCallIds: string[], orderedCallIds: string[]): void {
+    logger.debug('[AutomationService] Registering batch:', { batchId, expectedCallIds });
+    this.batchHandler.registerBatch(batchId, expectedCallIds, orderedCallIds);
+  }
+
+  /**
+   * Signal that the assistant message stream has ended for a batch.
+   */
+  public markStreamEnded(batchId: string): void {
+    this.batchHandler.markStreamEnded(batchId);
+  }
+
+  /**
+   * Handle a completed batch — insert merged results and submit once.
+   */
+  private async handleBatchComplete(merged: MergedBatchResult): Promise<void> {
+    logger.debug('[AutomationService] Batch complete:', {
+      batchId: merged.batchId,
+      callCount: merged.callCount,
+      flushReason: merged.flushReason,
+    });
+
+    try {
+      const automationState = await this.getAutomationState();
+      if (!automationState) {
+        logger.debug('[AutomationService] Could not get automation state for batch, skipping');
+        return;
+      }
+
+      if (automationState.autoInsert) {
+        const insertDetail: ToolExecutionCompleteDetail = {
+          result: merged.mergedText,
+          skipAutoInsertCheck: false,
+        };
+        const insertSuccess = await this.handleAutoInsert(insertDetail);
+
+        if (insertSuccess && automationState.autoSubmit) {
+          this.enqueueAutoSubmit(insertDetail);
+        }
+      }
+    } catch (error) {
+      logger.error('[AutomationService] Error handling batch complete:', error);
+    }
   }
 
   /**
