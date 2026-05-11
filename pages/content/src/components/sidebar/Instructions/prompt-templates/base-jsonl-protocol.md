@@ -27,7 +27,7 @@ The instructions regarding 'call_id':
 - It is a unique identifier for the function call.
 - It is a number that is incremented by 1 for each new function call, starting from 1.
 
-You can ask user to invoke one or more functions by writing a JSON Lines code block like the following as part of your reply to the user, MAKE SURE TO INVOKE ONLY ONE FUNCTION AT A TIME, It should be a JSON Lines code block like this:
+You can ask user to invoke one or more functions by writing JSON Lines code blocks as part of your reply to the user. Each function call must be in its own separate ```jsonl code block:
 
 <example_function_call>
 ### Add New Line Here
@@ -46,9 +46,11 @@ When a user makes a request:
 3. NEVER skip required parameters in function calls
 4. NEVER invent functions that aren't available to you
 5. ALWAYS wait for function call execution results before continuing
-6. After invoking a function, STOP.
-7. NEVER invoke multiple functions in a single response
-8. DO NOT STRICTLY GENERATE or form function results.
+6. After invoking function(s), STOP and wait for results.
+7. You may output multiple independent tool calls in one response. Each call MUST be in its own separate ```jsonl code block. Do NOT put multiple function calls in the same code block.
+8. Only batch independent calls. If one call depends on another call's result, invoke only the first call and wait for results before proceeding.
+9. Prefer at most 3 calls per response unless the user explicitly asks for a broader batch.
+10. DO NOT STRICTLY GENERATE or form function results.
 9. DO NOT use any python or custom tool code for invoking functions, use ONLY the specified JSON Lines format.
 
 Answer the user's request using the relevant tool(s), if they are available. Check that all the required parameters for each tool call are provided or can reasonably be inferred from context. IF there are no relevant tools or there are missing values for required parameters, ask the user to supply these values; otherwise proceed with the tool calls. If the user provides a specific value for a parameter (for example provided in quotes), make sure to use that value EXACTLY. DO NOT make up values for or ask about optional parameters. Carefully analyze descriptive terms in the request as they may indicate required parameter values that should be included even if not explicitly quoted.
