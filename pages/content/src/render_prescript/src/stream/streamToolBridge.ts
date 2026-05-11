@@ -41,7 +41,7 @@ export interface StreamToolExecutionEvent {
   error?: string;
   errorCode?: string;
   durationMs?: number;
-  /** Gate 6B: Injection outcome for UI event mapping. Only set when status='succeeded' and autoInsert attempted. */
+  /** Gate 6B: Injection outcome for UI event mapping. Set when autoInsert is attempted, regardless of final status. */
   injectOutcome?: InjectOutcome;
 }
 

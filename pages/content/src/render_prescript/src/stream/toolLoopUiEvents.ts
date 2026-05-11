@@ -154,6 +154,51 @@ function normalizeFailed(
   evt: StreamToolExecutionEvent,
   base: Pick<ToolLoopUiEvent, 'version' | 'timestamp' | 'streamId' | 'callId' | 'toolName'>,
 ): ToolLoopUiEvent {
+  // Priority 1: if injectOutcome is set, this is a result-stage event
+  // (tool execution succeeded, but result delivery failed/was blocked)
+  if (evt.injectOutcome) {
+    const outcome = evt.injectOutcome;
+    switch (outcome) {
+      case 'RESULT_INJECTED':
+        return { ...base, type: 'tool_result_inserted', injectOutcome: outcome };
+      case 'RESULT_SUBMITTED':
+        return { ...base, type: 'tool_result_submitted', injectOutcome: outcome };
+      case 'INJECT_SKIPPED_NO_ADAPTER':
+      case 'INJECT_SKIPPED_NO_INSPECT':
+      case 'INJECT_SKIPPED_DRAFT':
+        return {
+          ...base,
+          type: 'tool_result_blocked',
+          phase: evt.phase ?? undefined,
+          errorCode: evt.errorCode ?? undefined,
+          error: evt.error ?? undefined,
+          injectOutcome: outcome,
+        };
+      case 'INSERT_FAILED':
+      case 'SUBMIT_FAILED':
+        return {
+          ...base,
+          type: 'tool_result_failed',
+          phase: evt.phase ?? undefined,
+          errorCode: evt.errorCode ?? undefined,
+          error: evt.error ?? undefined,
+          injectOutcome: outcome,
+        };
+      default:
+        // Fail-closed: unknown injectOutcome means injection was attempted
+        // but result is unclassifiable. Do not report as generic execution failure.
+        return {
+          ...base,
+          type: 'tool_result_failed',
+          phase: evt.phase ?? undefined,
+          errorCode: evt.errorCode ?? undefined,
+          error: evt.error ?? undefined,
+          injectOutcome: outcome,
+        };
+    }
+  }
+
+  // Priority 2: pre-execution blocking (no injectOutcome)
   const isBlocked = evt.errorCode && EXECUTION_BLOCKED_CODES.has(evt.errorCode);
 
   return {

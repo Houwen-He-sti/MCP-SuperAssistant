@@ -227,6 +227,107 @@ describe('normalizeToUiEvent — null/filter cases', () => {
   });
 });
 
+describe('normalizeToUiEvent — failed + injectOutcome (P1 fix)', () => {
+  test('failed + INSERT_FAILED → tool_result_failed with phase/errorCode', () => {
+    const raw = makeStreamEvent('failed', {
+      phase: 'inject',
+      error: 'insertText failed',
+      errorCode: 'INSERT_FAILED',
+      injectOutcome: 'INSERT_FAILED' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_failed');
+    assert.equal(result.phase, 'inject');
+    assert.equal(result.errorCode, 'INSERT_FAILED');
+    assert.equal(result.error, 'insertText failed');
+    assert.equal(result.injectOutcome, 'INSERT_FAILED');
+  });
+
+  test('failed + SUBMIT_FAILED → tool_result_failed with phase/errorCode', () => {
+    const raw = makeStreamEvent('failed', {
+      phase: 'submit',
+      error: 'submitForm failed',
+      errorCode: 'SUBMIT_FAILED',
+      injectOutcome: 'SUBMIT_FAILED' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_failed');
+    assert.equal(result.phase, 'submit');
+    assert.equal(result.errorCode, 'SUBMIT_FAILED');
+    assert.equal(result.injectOutcome, 'SUBMIT_FAILED');
+  });
+
+  test('failed + INJECT_SKIPPED_NO_ADAPTER → tool_result_blocked', () => {
+    const raw = makeStreamEvent('failed', {
+      phase: 'inject',
+      error: 'No adapter available for DOM injection',
+      errorCode: 'ADAPTER_MISSING',
+      injectOutcome: 'INJECT_SKIPPED_NO_ADAPTER' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_blocked');
+    assert.equal(result.phase, 'inject');
+    assert.equal(result.errorCode, 'ADAPTER_MISSING');
+    assert.equal(result.injectOutcome, 'INJECT_SKIPPED_NO_ADAPTER');
+  });
+
+  test('failed + INJECT_SKIPPED_NO_INSPECT → tool_result_blocked', () => {
+    const raw = makeStreamEvent('failed', {
+      injectOutcome: 'INJECT_SKIPPED_NO_INSPECT' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_blocked');
+    assert.equal(result.injectOutcome, 'INJECT_SKIPPED_NO_INSPECT');
+  });
+
+  test('failed + INJECT_SKIPPED_DRAFT → tool_result_blocked', () => {
+    const raw = makeStreamEvent('failed', {
+      injectOutcome: 'INJECT_SKIPPED_DRAFT' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_blocked');
+    assert.equal(result.injectOutcome, 'INJECT_SKIPPED_DRAFT');
+  });
+
+  test('failed + RESULT_INJECTED → tool_result_inserted (boundary defense)', () => {
+    const raw = makeStreamEvent('failed', {
+      injectOutcome: 'RESULT_INJECTED' as InjectOutcome,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_inserted');
+    assert.equal(result.injectOutcome, 'RESULT_INJECTED');
+  });
+
+  test('failed + unknown_future_outcome → tool_result_failed (fail-closed)', () => {
+    const raw = makeStreamEvent('failed', {
+      injectOutcome: 'FUTURE_NEW_OUTCOME' as any,
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_result_failed');
+    assert.equal(result.injectOutcome, 'FUTURE_NEW_OUTCOME');
+  });
+
+  test('failed + ADAPTER_MISSING but NO injectOutcome → tool_execution_failed (boundary lock)', () => {
+    const raw = makeStreamEvent('failed', {
+      phase: 'inject',
+      errorCode: 'ADAPTER_MISSING',
+      error: 'Some adapter error',
+    });
+    const result = normalizeToUiEvent(raw);
+    assert.ok(result);
+    assert.equal(result.type, 'tool_execution_failed');
+    assert.equal(result.errorCode, 'ADAPTER_MISSING');
+    assert.equal(result.phase, 'inject');
+  });
+});
+
 describe('normalizeToUiEvent — security: no raw params leak', () => {
   test('does not expose raw arguments or result in output', () => {
     const raw = makeStreamEvent('succeeded', {
