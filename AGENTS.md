@@ -4,29 +4,42 @@ This file records project-level workflow rules for agents working on MCP-SuperAs
 
 ## Browser Runtime Testing Discipline
 
-### Mocked DOM is not a provider DOM contract
+### Testing Discipline: Mocked DOM vs Real Provider DOM Contract
 
-Mocked DOM E2E tests validate behavior under an assumed DOM shape. They do **not** prove that the real provider page still satisfies that assumption.
+Mocked DOM E2E tests validate scanner, batch, handler, and injection behavior under an assumed DOM contract. They do **not** validate that the real provider page still satisfies that contract.
 
-Any feature that depends on provider DOM selectors, assistant message boundaries, code block structure, input fields, submit buttons, or tool-result mount points must include one of the following before it is treated as production-ready:
+Any browser-runtime functionality that depends on provider DOM selectors, assistant message boundaries, codeblock structure, input elements, submit controls, SPA navigation, or provider-specific mount points must include real-contract validation appropriate to the affected surface.
 
-1. a real provider DOM contract observation; or
-2. a provider DOM contract regression test; or
-3. a clearly documented manual observation with captured evidence and a follow-up automation plan.
+Required test responsibilities:
 
-This applies especially to browser runtime work involving ChatGPT, Notion, Copilot, Gemini, DeepSeek, Qwen, or other provider pages.
+| Test Layer | What It Proves | Merge Gate | Release Gate |
+|------------|----------------|------------|--------------|
+| Unit tests | Pure logic correctness | Always | Always |
+| Mocked DOM E2E | Behavior under assumed DOM structure | Required for DOM-touching logic | Required |
+| Provider DOM Contract | Real provider DOM assumptions still hold | Required when provider selectors, message boundaries, codeblock tracing, input, submit, or mount points are affected | Required |
+| Full Pipeline Integration | Extension/proxy/MCP/server/submit path works across real component boundaries | Required when cross-process, transport, batching, result injection, or submit behavior changes | Required |
+| Manual AI Smoke | Real model behavior on real provider UI | Not required for every PR | Required for release milestones |
 
-### Required distinction
+Mocked DOM E2E alone is insufficient merge confidence for browser-runtime changes that depend on provider-specific DOM contracts.
 
-Agents must distinguish these test layers:
+Provider DOM Contract checks should cover, when applicable:
 
-| Layer | Purpose |
-|---|---|
-| Unit tests | Validate isolated parser, scanner, collector, and formatter logic. |
-| Mocked DOM E2E | Validate browser-side behavior under an assumed DOM structure. |
-| Provider DOM Contract Test | Validate that real provider pages still match the selectors and boundaries used by mocked tests. |
-| Full Pipeline Integration | Validate extension -> proxy -> MCP server -> extension result flow. |
-| Manual AI Smoke | Validate real model behavior and prompt compliance on live provider pages. |
+- assistant message selector
+- stable message identity or fallback identity
+- codeblock-to-assistant-message ownership tracing
+- input textarea/editor selector
+- submit button/control selector
+- assistant message boundary detection
+- provider-specific mount point selection
+
+Full Pipeline Integration should prioritize existing production compatibility before edge cases. For multi-tool support, the minimum merge-gate matrix is:
+
+1. Single tool regression
+2. Two tools success, merged once
+3. Slow/fast out-of-order results with deterministic output order
+4. Timeout partial flush and late result suppression, when timeout/suppression/batch lifecycle changed
+
+Manual provider smoke tests are release-gate evidence unless a PR specifically changes real provider interaction behavior that cannot be covered by automated contract/integration tests.
 
 ### Review rule
 
