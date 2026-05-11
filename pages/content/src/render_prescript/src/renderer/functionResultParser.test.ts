@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { parseFunctionResults, containsFunctionResult } from './functionResultParser.ts';
+import { containsFunctionResult, parseFunctionResults } from './functionResultParser.ts';
 
 // --- Test fixtures ---
 
@@ -161,209 +161,252 @@ const CONTENT_NO_TYPE = `<function_results>
 /** P1-extra: Legacy bare tag without attributes */
 const LEGACY_BARE = `<function_result>bare content no attrs</function_result>`;
 
+/** Regression: bare <result> in canonical block (no attributes) */
+const CANONICAL_BARE_RESULT = `<function_results>
+  <result>bare canonical content</result>
+</function_results>`;
+
+/** Negative: <resultXyz> should NOT be parsed as <result> */
+const RESULT_PREFIX_COLLISION = `<function_results>
+  <resultXyz>should not match</resultXyz>
+</function_results>`;
+
+/** Negative: <result-card> should NOT be parsed as <result> */
+const RESULT_HYPHEN_COLLISION = `<function_results>
+  <result-card>should not match</result-card>
+</function_results>`;
+
 // --- Tests ---
 
 describe('containsFunctionResult', () => {
-  test('detects canonical format', () => {
-    assert.ok(containsFunctionResult(CANONICAL_SINGLE));
-  });
+    test('detects canonical format', () => {
+        assert.ok(containsFunctionResult(CANONICAL_SINGLE));
+    });
 
-  test('detects legacy format', () => {
-    assert.ok(containsFunctionResult(LEGACY_SINGLE));
-  });
+    test('detects legacy format', () => {
+        assert.ok(containsFunctionResult(LEGACY_SINGLE));
+    });
 
-  test('rejects plain text', () => {
-    assert.ok(!containsFunctionResult(NO_RESULTS));
-  });
+    test('rejects plain text', () => {
+        assert.ok(!containsFunctionResult(NO_RESULTS));
+    });
 
-  test('detects merged payload', () => {
-    assert.ok(containsFunctionResult(MERGED_TWO_BLOCKS));
-  });
+    test('detects merged payload', () => {
+        assert.ok(containsFunctionResult(MERGED_TWO_BLOCKS));
+    });
 });
 
 describe('parseFunctionResults — canonical single', () => {
-  test('parses one canonical result', () => {
-    const parsed = parseFunctionResults(CANONICAL_SINGLE);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    const r = parsed.results[0];
-    assert.equal(r.callId, 'call_abc123');
-    assert.equal(r.name, 'echo');
-    assert.equal(r.status, 'success');
-    assert.equal(r.contentType, 'application/json');
-    assert.ok(r.content.includes('"message":"hello"'));
-  });
+    test('parses one canonical result', () => {
+        const parsed = parseFunctionResults(CANONICAL_SINGLE);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        const r = parsed.results[0];
+        assert.equal(r.callId, 'call_abc123');
+        assert.equal(r.name, 'echo');
+        assert.equal(r.status, 'success');
+        assert.equal(r.contentType, 'application/json');
+        assert.ok(r.content.includes('"message":"hello"'));
+    });
 });
 
 describe('parseFunctionResults — canonical error', () => {
-  test('parses error result with error element', () => {
-    const parsed = parseFunctionResults(CANONICAL_ERROR);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    const r = parsed.results[0];
-    assert.equal(r.callId, 'call_err001');
-    assert.equal(r.name, 'file_read');
-    assert.equal(r.status, 'error');
-    assert.equal(r.contentType, 'ToolExecutionError');
-    assert.ok(r.content.includes('File not found'));
-  });
+    test('parses error result with error element', () => {
+        const parsed = parseFunctionResults(CANONICAL_ERROR);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        const r = parsed.results[0];
+        assert.equal(r.callId, 'call_err001');
+        assert.equal(r.name, 'file_read');
+        assert.equal(r.status, 'error');
+        assert.equal(r.contentType, 'ToolExecutionError');
+        assert.ok(r.content.includes('File not found'));
+    });
 });
 
 describe('parseFunctionResults — merged two blocks', () => {
-  test('parses both blocks from merged payload', () => {
-    const parsed = parseFunctionResults(MERGED_TWO_BLOCKS);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 2, 'should find 2 results from 2 blocks');
+    test('parses both blocks from merged payload', () => {
+        const parsed = parseFunctionResults(MERGED_TWO_BLOCKS);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 2, 'should find 2 results from 2 blocks');
 
-    assert.equal(parsed.results[0].callId, 'call_001');
-    assert.equal(parsed.results[0].name, 'read_file');
-    assert.ok(parsed.results[0].content.includes('Hello World'));
+        assert.equal(parsed.results[0].callId, 'call_001');
+        assert.equal(parsed.results[0].name, 'read_file');
+        assert.ok(parsed.results[0].content.includes('Hello World'));
 
-    assert.equal(parsed.results[1].callId, 'call_002');
-    assert.equal(parsed.results[1].name, 'list_dir');
-    assert.ok(parsed.results[1].content.includes('entries'));
-  });
+        assert.equal(parsed.results[1].callId, 'call_002');
+        assert.equal(parsed.results[1].name, 'list_dir');
+        assert.ok(parsed.results[1].content.includes('entries'));
+    });
 });
 
 describe('parseFunctionResults — multi-result single block', () => {
-  test('parses multiple results within one block', () => {
-    const parsed = parseFunctionResults(MULTI_RESULT_SINGLE_BLOCK);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 2);
+    test('parses multiple results within one block', () => {
+        const parsed = parseFunctionResults(MULTI_RESULT_SINGLE_BLOCK);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 2);
 
-    assert.equal(parsed.results[0].callId, 'call_a');
-    assert.equal(parsed.results[0].status, 'success');
+        assert.equal(parsed.results[0].callId, 'call_a');
+        assert.equal(parsed.results[0].status, 'success');
 
-    assert.equal(parsed.results[1].callId, 'call_b');
-    assert.equal(parsed.results[1].status, 'error');
-    assert.ok(parsed.results[1].content.includes('Something went wrong'));
-  });
+        assert.equal(parsed.results[1].callId, 'call_b');
+        assert.equal(parsed.results[1].status, 'error');
+        assert.ok(parsed.results[1].content.includes('Something went wrong'));
+    });
 });
 
 describe('parseFunctionResults — legacy format', () => {
-  test('parses legacy singular format', () => {
-    const parsed = parseFunctionResults(LEGACY_SINGLE);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].callId, 'call_001');
-    assert.ok(parsed.results[0].content.includes('"message":"hello"'));
-  });
+    test('parses legacy singular format', () => {
+        const parsed = parseFunctionResults(LEGACY_SINGLE);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].callId, 'call_001');
+        assert.ok(parsed.results[0].content.includes('"message":"hello"'));
+    });
 });
 
 describe('parseFunctionResults — trailing ACK instruction', () => {
-  test('extracts result and trailing text', () => {
-    const parsed = parseFunctionResults(WITH_ACK_INSTRUCTION);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].callId, 'call_ack001');
-    assert.ok(parsed.trailing.includes('result_nonce'));
-    assert.ok(parsed.trailing.includes('abc123'));
-  });
+    test('extracts result and trailing text', () => {
+        const parsed = parseFunctionResults(WITH_ACK_INSTRUCTION);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].callId, 'call_ack001');
+        assert.ok(parsed.trailing.includes('result_nonce'));
+        assert.ok(parsed.trailing.includes('abc123'));
+    });
 });
 
 describe('parseFunctionResults — mixed success/error merged', () => {
-  test('parses mixed status results', () => {
-    const parsed = parseFunctionResults(MIXED_STATUS_MERGED);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 2);
+    test('parses mixed status results', () => {
+        const parsed = parseFunctionResults(MIXED_STATUS_MERGED);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 2);
 
-    assert.equal(parsed.results[0].status, 'success');
-    assert.equal(parsed.results[0].callId, 'call_ok');
+        assert.equal(parsed.results[0].status, 'success');
+        assert.equal(parsed.results[0].callId, 'call_ok');
 
-    assert.equal(parsed.results[1].status, 'error');
-    assert.equal(parsed.results[1].callId, 'call_fail');
-    assert.ok(parsed.results[1].content.includes('Timeout'));
-  });
+        assert.equal(parsed.results[1].status, 'error');
+        assert.equal(parsed.results[1].callId, 'call_fail');
+        assert.ok(parsed.results[1].content.includes('Timeout'));
+    });
 });
 
 describe('parseFunctionResults — CDATA with code', () => {
-  test('extracts content with angle brackets and special chars', () => {
-    const parsed = parseFunctionResults(CDATA_WITH_CODE);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.ok(parsed.results[0].content.includes("'<div>'"));
-  });
+    test('extracts content with angle brackets and special chars', () => {
+        const parsed = parseFunctionResults(CDATA_WITH_CODE);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.ok(parsed.results[0].content.includes("'<div>'"));
+    });
 });
 
 describe('parseFunctionResults — no results', () => {
-  test('returns null for plain text', () => {
-    const parsed = parseFunctionResults(NO_RESULTS);
-    assert.equal(parsed, null);
-  });
+    test('returns null for plain text', () => {
+        const parsed = parseFunctionResults(NO_RESULTS);
+        assert.equal(parsed, null);
+    });
 
-  test('returns null for empty string', () => {
-    const parsed = parseFunctionResults('');
-    assert.equal(parsed, null);
-  });
+    test('returns null for empty string', () => {
+        const parsed = parseFunctionResults('');
+        assert.equal(parsed, null);
+    });
 });
 
 // --- P1 tests (GPT review feedback) ---
 
 describe('parseFunctionResults — P1-1: mixed canonical + legacy', () => {
-  test('parses both canonical and legacy results from same message', () => {
-    const parsed = parseFunctionResults(MIXED_CANONICAL_LEGACY);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 2, 'should find 2 results (1 canonical + 1 legacy)');
+    test('parses both canonical and legacy results from same message', () => {
+        const parsed = parseFunctionResults(MIXED_CANONICAL_LEGACY);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 2, 'should find 2 results (1 canonical + 1 legacy)');
 
-    assert.equal(parsed.results[0].callId, 'call_new');
-    assert.equal(parsed.results[0].name, 'echo');
-    assert.ok(parsed.results[0].content.includes('"new":"format"'));
+        assert.equal(parsed.results[0].callId, 'call_new');
+        assert.equal(parsed.results[0].name, 'echo');
+        assert.ok(parsed.results[0].content.includes('"new":"format"'));
 
-    assert.equal(parsed.results[1].callId, 'call_old');
-    assert.ok(parsed.results[1].content.includes('"old":"format"'));
-  });
+        assert.equal(parsed.results[1].callId, 'call_old');
+        assert.ok(parsed.results[1].content.includes('"old":"format"'));
+    });
 });
 
 describe('parseFunctionResults — P1-2: attribute order variation', () => {
-  test('parses correctly regardless of attribute order', () => {
-    const parsed = parseFunctionResults(ATTR_ORDER_VARIATION);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].callId, 'call_reorder');
-    assert.equal(parsed.results[0].name, 'read_file');
-    assert.equal(parsed.results[0].status, 'success');
-    assert.ok(parsed.results[0].content.includes('"reordered":true'));
-  });
+    test('parses correctly regardless of attribute order', () => {
+        const parsed = parseFunctionResults(ATTR_ORDER_VARIATION);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].callId, 'call_reorder');
+        assert.equal(parsed.results[0].name, 'read_file');
+        assert.equal(parsed.results[0].status, 'success');
+        assert.ok(parsed.results[0].content.includes('"reordered":true'));
+    });
 });
 
 describe('parseFunctionResults — P1-3: root with attributes', () => {
-  test('parses when root tag has attributes', () => {
-    const parsed = parseFunctionResults(ROOT_WITH_ATTRS);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].callId, 'call_batch');
-    assert.equal(parsed.results[0].name, 'tool_x');
-  });
+    test('parses when root tag has attributes', () => {
+        const parsed = parseFunctionResults(ROOT_WITH_ATTRS);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].callId, 'call_batch');
+        assert.equal(parsed.results[0].name, 'tool_x');
+    });
 });
 
 // --- P2 tests ---
 
 describe('parseFunctionResults — P2-1: content without CDATA', () => {
-  test('parses plain content without CDATA wrapper', () => {
-    const parsed = parseFunctionResults(CONTENT_NO_CDATA);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].content, 'hello world');
-    assert.equal(parsed.results[0].contentType, 'text/plain');
-  });
+    test('parses plain content without CDATA wrapper', () => {
+        const parsed = parseFunctionResults(CONTENT_NO_CDATA);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].content, 'hello world');
+        assert.equal(parsed.results[0].contentType, 'text/plain');
+    });
 });
 
 describe('parseFunctionResults — P2-2: content without type attribute', () => {
-  test('parses content tag without type', () => {
-    const parsed = parseFunctionResults(CONTENT_NO_TYPE);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].content, 'plain content here');
-    assert.equal(parsed.results[0].contentType, '');
-  });
+    test('parses content tag without type', () => {
+        const parsed = parseFunctionResults(CONTENT_NO_TYPE);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].content, 'plain content here');
+        assert.equal(parsed.results[0].contentType, '');
+    });
 });
 
 describe('parseFunctionResults — legacy bare tag', () => {
-  test('parses legacy tag without attributes', () => {
-    const parsed = parseFunctionResults(LEGACY_BARE);
-    assert.ok(parsed !== null);
-    assert.equal(parsed.results.length, 1);
-    assert.equal(parsed.results[0].content, 'bare content no attrs');
-    assert.equal(parsed.results[0].callId, '');
-  });
+    test('parses legacy tag without attributes', () => {
+        const parsed = parseFunctionResults(LEGACY_BARE);
+        assert.ok(parsed !== null);
+        assert.equal(parsed.results.length, 1);
+        assert.equal(parsed.results[0].content, 'bare content no attrs');
+        assert.equal(parsed.results[0].callId, '');
+    });
+});
+
+// --- Regression tests (GPT review: tag boundary strictness) ---
+
+describe('parseFunctionResults — canonical bare <result> tag', () => {
+    test('matches bare <result> but content requires <content> child', () => {
+        const parsed = parseFunctionResults(CANONICAL_BARE_RESULT);
+        assert.ok(parsed !== null, 'bare <result> should be matched by regex');
+        assert.equal(parsed.results.length, 1);
+        // parseResultElement requires <content> or <error> child to extract content.
+        // Bare text inside <result> is not extracted — this is by design.
+        assert.equal(parsed.results[0].content, '');
+        assert.equal(parsed.results[0].callId, '');
+    });
+});
+
+describe('parseFunctionResults — rejects <resultXyz> prefix collision', () => {
+    test('does not parse <resultXyz> as <result>', () => {
+        const parsed = parseFunctionResults(RESULT_PREFIX_COLLISION);
+        assert.equal(parsed, null, '<resultXyz> should not match <result> regex');
+    });
+});
+
+describe('parseFunctionResults — rejects <result-card> hyphen collision', () => {
+    test('does not parse <result-card> as <result>', () => {
+        const parsed = parseFunctionResults(RESULT_HYPHEN_COLLISION);
+        assert.equal(parsed, null, '<result-card> should not match <result> regex');
+    });
 });

@@ -15,12 +15,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { describe, test, beforeEach } from 'node:test';
+import { describe, test } from 'node:test';
 import {
-  isNotionHost,
-  containsFunctionResultLikeText,
-  findPossibleTurnLanes,
-  getNotionFunctionResultCandidates,
+    containsFunctionResultLikeText,
+    findPossibleTurnLanes,
+    getNotionFunctionResultCandidates,
+    isNotionHost,
 } from './notionTurnDiscovery.ts';
 
 // --- Minimal DOM shim for Node.js ---
@@ -32,12 +32,12 @@ import { parseHTML } from 'linkedom';
 // Helper to create a test DOM from HTML string
 // Also patches globalThis.HTMLElement so instanceof checks work in Node.js
 function createTestDOM(html: string): { document: Document; root: HTMLElement } {
-  const { document } = parseHTML(`<!DOCTYPE html><html><body>${html}</body></html>`);
-  // Patch globalThis.HTMLElement for instanceof checks in production code
-  if (typeof globalThis.HTMLElement === 'undefined') {
-    (globalThis as any).HTMLElement = document.body.constructor;
-  }
-  return { document, root: document.body as unknown as HTMLElement };
+    const { document } = parseHTML(`<!DOCTYPE html><html><body>${html}</body></html>`);
+    // Patch globalThis.HTMLElement for instanceof checks in production code
+    if (typeof globalThis.HTMLElement === 'undefined') {
+        (globalThis as any).HTMLElement = document.body.constructor;
+    }
+    return { document, root: document.body as unknown as HTMLElement };
 }
 
 // --- Test fixtures ---
@@ -131,126 +131,126 @@ const EMPTY_DOM = `<div>Nothing here</div>`;
 // isNotionHost
 // ============================================================
 describe('isNotionHost', () => {
-  test('matches notion.so', () => {
-    assert.ok(isNotionHost('notion.so'));
-  });
+    test('matches notion.so', () => {
+        assert.ok(isNotionHost('notion.so'));
+    });
 
-  test('matches subdomain www.notion.so', () => {
-    assert.ok(isNotionHost('www.notion.so'));
-  });
+    test('matches subdomain www.notion.so', () => {
+        assert.ok(isNotionHost('www.notion.so'));
+    });
 
-  test('matches subdomain ai.notion.so', () => {
-    assert.ok(isNotionHost('ai.notion.so'));
-  });
+    test('matches subdomain ai.notion.so', () => {
+        assert.ok(isNotionHost('ai.notion.so'));
+    });
 
-  test('rejects evil-notion.so.example.com', () => {
-    assert.ok(!isNotionHost('evil-notion.so.example.com'));
-  });
+    test('rejects evil-notion.so.example.com', () => {
+        assert.ok(!isNotionHost('evil-notion.so.example.com'));
+    });
 
-  test('rejects my-notion.so.fake', () => {
-    assert.ok(!isNotionHost('my-notion.so.fake'));
-  });
+    test('rejects my-notion.so.fake', () => {
+        assert.ok(!isNotionHost('my-notion.so.fake'));
+    });
 
-  test('rejects chatgpt.com', () => {
-    assert.ok(!isNotionHost('chatgpt.com'));
-  });
+    test('rejects chatgpt.com', () => {
+        assert.ok(!isNotionHost('chatgpt.com'));
+    });
 
-  test('rejects empty string', () => {
-    assert.ok(!isNotionHost(''));
-  });
+    test('rejects empty string', () => {
+        assert.ok(!isNotionHost(''));
+    });
 });
 
 // ============================================================
 // containsFunctionResultLikeText
 // ============================================================
 describe('containsFunctionResultLikeText', () => {
-  test('detects canonical <function_results>', () => {
-    assert.ok(containsFunctionResultLikeText('<function_results>'));
-  });
+    test('detects canonical <function_results>', () => {
+        assert.ok(containsFunctionResultLikeText('<function_results>'));
+    });
 
-  test('detects legacy <function_result call_id=...>', () => {
-    assert.ok(containsFunctionResultLikeText('<function_result call_id="x">'));
-  });
+    test('detects legacy <function_result call_id=...>', () => {
+        assert.ok(containsFunctionResultLikeText('<function_result call_id="x">'));
+    });
 
-  test('rejects plain text mentioning function results conceptually', () => {
-    assert.ok(!containsFunctionResultLikeText('The function result was successful'));
-  });
+    test('rejects plain text mentioning function results conceptually', () => {
+        assert.ok(!containsFunctionResultLikeText('The function result was successful'));
+    });
 
-  test('rejects empty string', () => {
-    assert.ok(!containsFunctionResultLikeText(''));
-  });
+    test('rejects empty string', () => {
+        assert.ok(!containsFunctionResultLikeText(''));
+    });
 });
 
 // ============================================================
 // findPossibleTurnLanes
 // ============================================================
 describe('findPossibleTurnLanes', () => {
-  test('finds turn lane with function_results child', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM);
-    const container = root.querySelector('.notion-selectable-container') as HTMLElement;
-    const lanes = findPossibleTurnLanes(container);
-    assert.ok(lanes.length >= 1, `Expected at least 1 lane, got ${lanes.length}`);
-  });
+    test('finds turn lane with function_results child', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM);
+        const container = root.querySelector('.notion-selectable-container') as HTMLElement;
+        const lanes = findPossibleTurnLanes(container);
+        assert.ok(lanes.length >= 1, `Expected at least 1 lane, got ${lanes.length}`);
+    });
 
-  test('finds lane even with extra wrapper layers', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM_EXTRA_WRAPPER);
-    const container = root.querySelector('.notion-selectable-container') as HTMLElement;
-    const lanes = findPossibleTurnLanes(container);
-    assert.ok(lanes.length >= 1, `Expected at least 1 lane, got ${lanes.length}`);
-  });
+    test('finds lane even with extra wrapper layers', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM_EXTRA_WRAPPER);
+        const container = root.querySelector('.notion-selectable-container') as HTMLElement;
+        const lanes = findPossibleTurnLanes(container);
+        assert.ok(lanes.length >= 1, `Expected at least 1 lane, got ${lanes.length}`);
+    });
 
-  test('returns empty for container with no function_results children', () => {
-    const { root } = createTestDOM(`
+    test('returns empty for container with no function_results children', () => {
+        const { root } = createTestDOM(`
       <div class="test-container">
         <div>Hello</div>
         <div>World</div>
       </div>
     `);
-    const container = root.querySelector('.test-container') as HTMLElement;
-    const lanes = findPossibleTurnLanes(container);
-    assert.equal(lanes.length, 0);
-  });
+        const container = root.querySelector('.test-container') as HTMLElement;
+        const lanes = findPossibleTurnLanes(container);
+        assert.equal(lanes.length, 0);
+    });
 
-  test('returns empty for container with single child', () => {
-    const { root } = createTestDOM(`
+    test('returns empty for container with single child', () => {
+        const { root } = createTestDOM(`
       <div class="test-container">
         <div>${FUNCTION_RESULTS_ESCAPED}</div>
       </div>
     `);
-    const container = root.querySelector('.test-container') as HTMLElement;
-    const lanes = findPossibleTurnLanes(container);
-    // Single child — not a turn lane (need >= 2 turns)
-    assert.equal(lanes.length, 0);
-  });
+        const container = root.querySelector('.test-container') as HTMLElement;
+        const lanes = findPossibleTurnLanes(container);
+        // Single child — not a turn lane (need >= 2 turns)
+        assert.equal(lanes.length, 0);
+    });
 });
 
 // ============================================================
 // getNotionFunctionResultCandidates — core contract tests
 // ============================================================
 describe('getNotionFunctionResultCandidates', () => {
-  test('selects user turn containing <function_results>', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.ok(candidates.length >= 1, `Expected >= 1 candidate, got ${candidates.length}`);
-    // Verify the selected element contains the XML
-    assert.ok(candidates[0].textContent?.includes('<function_results'));
-  });
+    test('selects user turn containing <function_results>', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM);
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.ok(candidates.length >= 1, `Expected >= 1 candidate, got ${candidates.length}`);
+        // Verify the selected element contains the XML
+        assert.ok(candidates[0].textContent?.includes('<function_results'));
+    });
 
-  test('excludes AI turn that quotes XML inside [data-content-editable-root]', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM);
-    const candidates = getNotionFunctionResultCandidates(root);
-    // None of the candidates should contain data-content-editable-root
-    for (const candidate of candidates) {
-      assert.ok(
-        !candidate.querySelector('[data-content-editable-root]'),
-        'Candidate should not contain AI content root',
-      );
-    }
-  });
+    test('excludes AI turn that quotes XML inside [data-content-editable-root]', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM);
+        const candidates = getNotionFunctionResultCandidates(root);
+        // None of the candidates should contain data-content-editable-root
+        for (const candidate of candidates) {
+            assert.ok(
+                !candidate.querySelector('[data-content-editable-root]'),
+                'Candidate should not contain AI content root',
+            );
+        }
+    });
 
-  test('excludes AI turn without thinking block but with content root', () => {
-    // This tests that we don't depend on childCount to distinguish user/AI
-    const { root } = createTestDOM(`
+    test('excludes AI turn without thinking block but with content root', () => {
+        // This tests that we don't depend on childCount to distinguish user/AI
+        const { root } = createTestDOM(`
       <div class="notion-selectable-container">
         <div>
           ${USER_TURN_WITH_RESULTS}
@@ -258,14 +258,14 @@ describe('getNotionFunctionResultCandidates', () => {
         </div>
       </div>
     `);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.equal(candidates.length, 1, 'Should only select user turn, not AI turn');
-    assert.ok(candidates[0].textContent?.includes('<function_results'));
-    assert.ok(!candidates[0].querySelector('[data-content-editable-root]'));
-  });
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.equal(candidates.length, 1, 'Should only select user turn, not AI turn');
+        assert.ok(candidates[0].textContent?.includes('<function_results'));
+        assert.ok(!candidates[0].querySelector('[data-content-editable-root]'));
+    });
 
-  test('excludes AI turn with raw function_results in content root', () => {
-    const { root } = createTestDOM(`
+    test('excludes AI turn with raw function_results in content root', () => {
+        const { root } = createTestDOM(`
       <div class="notion-selectable-container">
         <div>
           ${USER_TURN_WITH_RESULTS}
@@ -273,31 +273,31 @@ describe('getNotionFunctionResultCandidates', () => {
         </div>
       </div>
     `);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.equal(candidates.length, 1, 'Should exclude AI turn even with raw XML');
-  });
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.equal(candidates.length, 1, 'Should exclude AI turn even with raw XML');
+    });
 
-  test('supports extra wrapper between container and turn lane', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM_EXTRA_WRAPPER);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.ok(candidates.length >= 1, 'Should find candidates despite extra wrappers');
-  });
+    test('supports extra wrapper between container and turn lane', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM_EXTRA_WRAPPER);
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.ok(candidates.length >= 1, 'Should find candidates despite extra wrappers');
+    });
 
-  test('scans multiple containers and finds the right one', () => {
-    const { root } = createTestDOM(NOTION_MULTI_CONTAINER);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.ok(candidates.length >= 1, 'Should find candidate in second container');
-    assert.ok(candidates[0].textContent?.includes('<function_results'));
-  });
+    test('scans multiple containers and finds the right one', () => {
+        const { root } = createTestDOM(NOTION_MULTI_CONTAINER);
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.ok(candidates.length >= 1, 'Should find candidate in second container');
+        assert.ok(candidates[0].textContent?.includes('<function_results'));
+    });
 
-  test('returns empty when no containers exist', () => {
-    const { root } = createTestDOM(EMPTY_DOM);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.equal(candidates.length, 0);
-  });
+    test('returns empty when no containers exist', () => {
+        const { root } = createTestDOM(EMPTY_DOM);
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.equal(candidates.length, 0);
+    });
 
-  test('returns empty when containers have no function results', () => {
-    const { root } = createTestDOM(`
+    test('returns empty when containers have no function results', () => {
+        const { root } = createTestDOM(`
       <div class="notion-selectable-container">
         <div>
           <div>Hello</div>
@@ -305,14 +305,14 @@ describe('getNotionFunctionResultCandidates', () => {
         </div>
       </div>
     `);
-    const candidates = getNotionFunctionResultCandidates(root);
-    assert.equal(candidates.length, 0);
-  });
+        const candidates = getNotionFunctionResultCandidates(root);
+        assert.equal(candidates.length, 0);
+    });
 
-  test('does not return duplicates', () => {
-    const { root } = createTestDOM(NOTION_CHAT_DOM);
-    const candidates = getNotionFunctionResultCandidates(root);
-    const unique = new Set(candidates);
-    assert.equal(candidates.length, unique.size, 'Should not contain duplicates');
-  });
+    test('does not return duplicates', () => {
+        const { root } = createTestDOM(NOTION_CHAT_DOM);
+        const candidates = getNotionFunctionResultCandidates(root);
+        const unique = new Set(candidates);
+        assert.equal(candidates.length, unique.size, 'Should not contain duplicates');
+    });
 });

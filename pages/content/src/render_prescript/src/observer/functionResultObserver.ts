@@ -1,7 +1,7 @@
-import { CONFIG } from '../core/config';
-import { renderFunctionResult, processedResultElements } from '../renderer/functionResult';
 import { createLogger } from '@extension/shared/lib/logger';
-import { isNotionHost, getNotionFunctionResultCandidates } from './notionTurnDiscovery';
+import { CONFIG } from '../core/config';
+import { processedResultElements, renderFunctionResult } from '../renderer/functionResult';
+import { getNotionFunctionResultCandidates, isNotionHost } from './notionTurnDiscovery';
 
 // State for processing and observers
 

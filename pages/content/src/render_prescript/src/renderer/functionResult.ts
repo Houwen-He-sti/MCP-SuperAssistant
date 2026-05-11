@@ -13,10 +13,10 @@
  *
  * Gate 6: Updated to use functionResultParser.ts for canonical batch format support.
  */
+import { createLogger } from '@extension/shared/lib/logger';
 import { CONFIG } from '../core/config';
 import { applyThemeClass, isDarkTheme } from '../utils/themeDetector';
-import { createLogger } from '@extension/shared/lib/logger';
-import { parseFunctionResults, containsFunctionResult } from './functionResultParser';
+import { containsFunctionResult, parseFunctionResults } from './functionResultParser';
 
 // State management for rendered elements
 
