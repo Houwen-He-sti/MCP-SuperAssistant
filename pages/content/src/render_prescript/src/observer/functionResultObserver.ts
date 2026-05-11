@@ -1,6 +1,7 @@
 import { CONFIG } from '../core/config';
 import { renderFunctionResult, processedResultElements } from '../renderer/functionResult';
 import { createLogger } from '@extension/shared/lib/logger';
+import { isNotionHost, getNotionFunctionResultCandidates } from './notionTurnDiscovery';
 
 // State for processing and observers
 
@@ -56,6 +57,13 @@ export const checkForUnprocessedFunctionResults = (): number => {
  * @returns Array of HTML elements
  */
 const getTargetElements = (): HTMLElement[] => {
+  // Notion AI Chat: use JS-based turn candidate discovery (Gate 6 Lane B)
+  // Notion has no stable semantic author markers, so CSS selectors alone can't
+  // distinguish user turns from AI turns. See notionTurnDiscovery.ts for details.
+  if (isNotionHost(window.location.hostname)) {
+    return getNotionFunctionResultCandidates(document);
+  }
+
   if (!CONFIG.function_result_selector || CONFIG.function_result_selector.length === 0) {
     return [];
   }

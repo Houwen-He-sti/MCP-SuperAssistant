@@ -221,12 +221,13 @@ export const WEBSITE_CONFIGS: Array<{
           'div[class*="notion-code-block"]',
           '.notion-code-block',
         ],
-        // In Notion AI, user and assistant messages are typically wrapped in
-        // editable content roots or specific message containers.
+        // Notion AI Chat function result detection is handled by
+        // provider-specific JS candidate discovery in functionResultObserver.ts
+        // (notionTurnDiscovery.ts). Notion has no stable semantic author markers,
+        // so CSS selectors can't distinguish user turns from AI turns.
+        // This selector is retained only as a coarse fallback/anchor.
         function_result_selector: [
-          'div[data-content-editable-root] .whenContentEditable',
-          'div[data-content-editable-root]',
-          'div[class*="message"] div[class*="content"]',
+          'div.notion-selectable-container',
         ],
         // Enable CodeMirror extraction if Notion uses it for code blocks
         useCodeMirrorExtraction: true,
