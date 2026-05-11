@@ -1,8 +1,8 @@
 # Plan: Multi-Tool Call Support — 支持一次响应中多个工具调用
 
-**分支**: TBD（待创建）  
+**分支**: `feat/tool-result-card-rendering`  
 **作者**: Opus/Claude  
-**日期**: 2026-06-02  
+**日期**: 2026-05-11  
 **状态**: Concept LGTM with revisions (GPT + Opus 共识)
 
 ---
@@ -90,26 +90,30 @@
 
 ### Result 格式示例
 
+> **注意**：MVP 复用现有 `formatFunctionResult()`（`functionResultFormatter.ts`）的 XML 格式输出。
+> 下面是概念示例，实际输出格式见 `functionResultFormatter.ts` 中的 `formatSuccess()` / `formatError()`。
+> 每个 call 独立调用 `formatFunctionResult()` 生成一个 `<function_results>` block，然后按原始调用顺序拼接。
+
 ```
 Tool execution results for batch b123 (2 calls):
 
 <function_results>
-call_id: c1
-name: git_status
-status: success
-
+  <result call_id="c1" name="git_status" status="success">
+    <content type="application/json"><![CDATA[
 On branch main
 Changes not staged for commit:
   modified: src/index.ts
+    ]]></content>
+  </result>
 </function_results>
 
 <function_results>
-call_id: c2
-name: git_diff
-status: success
-
+  <result call_id="c2" name="git_diff" status="success">
+    <content type="application/json"><![CDATA[
 diff --git a/src/index.ts b/src/index.ts
 ...
+    ]]></content>
+  </result>
 </function_results>
 ```
 
@@ -150,8 +154,8 @@ Parser 解析出 N 个 function_call                  ← 无需改
   ↓
 ExecutionGuard.reserve() × N                       ← 无需改
   ↓
-Promise.all([ MCP.callTool() × N ])                ← 需改：并行执行
-  ↓
+for (call of calls) await MCP.callTool(call)        ← 需改：串行执行（MVP）
+  ↓                                                   （P2: 对 read-only tools 可选并行）
 dispatch N 个 tool-execution-complete 事件          ← 无需改
   ↓  ↓
   ↓  ToolResultRenderer × N → N 张结果卡片         ← 无需改
@@ -256,11 +260,14 @@ private async handleBatchComplete(results: ToolExecutionCompleteDetail[]) {
 }
 
 private mergeResults(results: ToolExecutionCompleteDetail[]): string {
+  // MVP: 复用现有 formatFunctionResult() 输出格式（XML schema）
+  // 每个 call 独立调用 formatFunctionResult() 生成一个 <function_results> block
+  // 然后按原始调用顺序拼接。不引入新的 result schema。
+  // 见 functionResultFormatter.ts 的真实 XML 格式。
   const header = `Tool execution results for batch (${results.length} calls):\n\n`;
-  const blocks = results.map(r => {
-    const status = r.result ? 'success' : 'error';
-    return `<function_results>\ncall_id: ${r.callId}\nname: ${r.functionName}\nstatus: ${status}\n\n${r.result || 'Error occurred'}\n</function_results>`;
-  });
+  const blocks = results.map(r =>
+    formatFunctionResult({ callId: r.callId, name: r.functionName, status: r.status, result: r.result })
+  );
   return header + blocks.join('\n\n');
 }
 ```

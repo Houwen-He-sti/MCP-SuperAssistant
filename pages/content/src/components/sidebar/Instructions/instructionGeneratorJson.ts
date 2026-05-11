@@ -1,6 +1,5 @@
 // pages/content/src/utils/instructionGenerator.ts
 import { assembleInstructions, wrapWithSystemPromptTag } from './promptTemplateLoader';
-import { createLogger } from '@extension/shared/lib/logger';
 
 /**
  * Generates instructions for using MCP tools based on available tools.
@@ -10,8 +9,6 @@ import { createLogger } from '@extension/shared/lib/logger';
  * @param customInstructionsEnabled Whether custom instructions should be included
  * @returns Formatted instructions string
  */
-
-const logger = createLogger('InstructionGeneratorJSON');
 
 export const generateInstructionsJson = (
   tools: Array<{ name: string; schema: string; description: string }>,

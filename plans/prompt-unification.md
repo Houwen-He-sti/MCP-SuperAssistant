@@ -104,11 +104,11 @@
 
 ### 配置存储
 
-**方案：扩展包内静态模板 + Chrome storage 覆盖**
+**方案：扩展包内静态模板 + Chrome storage 覆盖（future work）**
 
 1. 默认模板放在扩展包内（`prompt-templates/` 目录），作为 raw string 在构建时 inline
-2. 用户可通过 Chrome storage（或未来 UI）覆盖模板
-3. InstructionManager 优先读 Chrome storage 覆盖，fallback 到默认模板
+2. **Future work**: 用户可通过 Chrome storage（或未来 UI）覆盖模板（当前 PR scope 不含此功能）
+3. **Future work**: InstructionManager 优先读 Chrome storage 覆盖，fallback 到默认模板
 
 ### Notion BRIDGE_PROMPT 处理
 
