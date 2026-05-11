@@ -30,7 +30,7 @@ import { formatFunctionResult } from '../render_prescript/src/stream/functionRes
 export interface ResultDetail {
   callId?: string;
   functionName?: string;
-  result?: string;
+  result?: unknown;
   status?: 'success' | 'error';
   /** Pass-through fields (file attachment, etc.) */
   [key: string]: unknown;
@@ -67,6 +67,8 @@ export class BatchAwareHandler {
   private readonly onBatchResult: (result: MergedBatchResult) => void;
   /** Maps callId → batchId for active (unflushed) batches */
   private callToBatch = new Map<string, string>();
+  /** CallIds from flushed batches — late arrivals are suppressed, not re-routed */
+  private suppressedCallIds = new Set<string>();
 
   constructor(options: BatchAwareHandlerOptions) {
     this.onSingleResult = options.onSingleResult;
@@ -85,6 +87,9 @@ export class BatchAwareHandler {
    * Must be called before results arrive for those callIds.
    */
   registerBatch(batchId: string, expectedCallIds: string[], orderedCallIds: string[]): void {
+    // Skip if batch already registered (idempotent — matches BatchCollector behavior)
+    if (this.collector.hasPendingBatch(batchId)) return;
+
     this.collector.registerBatch(batchId, expectedCallIds, orderedCallIds);
     for (const callId of expectedCallIds) {
       this.callToBatch.set(callId, batchId);
@@ -99,12 +104,17 @@ export class BatchAwareHandler {
   handleResult(detail: ResultDetail): void {
     const callId = detail.callId;
 
+    // Suppress late results from already-flushed batches
+    if (callId && this.suppressedCallIds.has(callId)) {
+      return;
+    }
+
     if (callId && this.callToBatch.has(callId)) {
       const batchId = this.callToBatch.get(callId)!;
       this.collector.addResult(batchId, {
         callId,
         functionName: detail.functionName ?? 'unknown',
-        result: detail.result ?? '',
+        result: typeof detail.result === 'string' ? detail.result : JSON.stringify(detail.result ?? ''),
         status: detail.status ?? 'success',
       });
     } else {
@@ -132,6 +142,7 @@ export class BatchAwareHandler {
   dispose(): void {
     this.collector.dispose();
     this.callToBatch.clear();
+    this.suppressedCallIds.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -139,15 +150,16 @@ export class BatchAwareHandler {
   // ---------------------------------------------------------------------------
 
   private handleFlush(flushResult: BatchFlushResult): void {
-    // Remove flushed callIds from mapping
+    // Move ALL callIds for this batch to suppressed set (prevents late arrivals
+    // from being re-routed to the single-result legacy path)
     for (const r of flushResult.results) {
       this.callToBatch.delete(r.callId);
+      this.suppressedCallIds.add(r.callId);
     }
-    // Also clean up any expected callIds that didn't produce results
-    // (they're no longer in active batch either)
     for (const [callId, batchId] of this.callToBatch) {
       if (batchId === flushResult.batchId) {
         this.callToBatch.delete(callId);
+        this.suppressedCallIds.add(callId);
       }
     }
 

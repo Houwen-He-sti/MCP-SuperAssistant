@@ -247,4 +247,62 @@ describe('BatchAwareHandler', () => {
     assert.ok(merged.mergedText.startsWith('Tool execution results'));
     assert.ok(merged.mergedText.includes('2 calls'));
   });
+
+  // =========================================================================
+  // P1 fix: Late results after partial flush are suppressed
+  // =========================================================================
+
+  it('suppresses late result after idle_timeout partial flush', async () => {
+    handler.registerBatch('b1', ['c1', 'c2'], ['c1', 'c2']);
+    handler.handleResult({ result: 'r1', callId: 'c1', functionName: 'f1' });
+
+    // Wait for idle timeout flush
+    await new Promise(r => setTimeout(r, 150));
+
+    const batchFn = opts.onBatchResult as ReturnType<typeof mock.fn>;
+    assert.equal(batchFn.mock.calls.length, 1);
+    assert.equal(batchFn.mock.calls[0].arguments[0].flushReason, 'idle_timeout');
+
+    const singleFn = opts.onSingleResult as ReturnType<typeof mock.fn>;
+
+    // Late result for c2 — should NOT route to onSingleResult
+    handler.handleResult({ result: 'r2', callId: 'c2', functionName: 'f2' });
+
+    assert.equal(singleFn.mock.calls.length, 0, 'late result must not route to onSingleResult');
+    assert.equal(batchFn.mock.calls.length, 1, 'late result must not trigger second onBatchResult');
+  });
+
+  it('suppresses late result after stream_end partial flush', async () => {
+    handler.registerBatch('b1', ['c1', 'c2'], ['c1', 'c2']);
+    handler.handleResult({ result: 'r1', callId: 'c1', functionName: 'f1' });
+    handler.markStreamEnded('b1');
+
+    await new Promise(r => setTimeout(r, 100));
+
+    const batchFn = opts.onBatchResult as ReturnType<typeof mock.fn>;
+    assert.equal(batchFn.mock.calls.length, 1);
+
+    const singleFn = opts.onSingleResult as ReturnType<typeof mock.fn>;
+    handler.handleResult({ result: 'r2', callId: 'c2', functionName: 'f2' });
+
+    assert.equal(singleFn.mock.calls.length, 0, 'late result must be suppressed');
+    assert.equal(batchFn.mock.calls.length, 1, 'no second batch flush');
+  });
+
+  // =========================================================================
+  // P2 fix: Duplicate registerBatch is idempotent
+  // =========================================================================
+
+  it('duplicate registerBatch does not cause state drift', () => {
+    handler.registerBatch('b1', ['c1'], ['c1']);
+    handler.registerBatch('b1', ['c1', 'c99'], ['c1', 'c99']); // should be ignored
+
+    handler.handleResult({ result: 'r1', callId: 'c1', functionName: 'f1' });
+
+    const batchFn = opts.onBatchResult as ReturnType<typeof mock.fn>;
+    assert.equal(batchFn.mock.calls.length, 1);
+
+    // c99 should NOT be batched (second registerBatch was ignored)
+    assert.equal(handler.isBatchedCall('c99'), false);
+  });
 });

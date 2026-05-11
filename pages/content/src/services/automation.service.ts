@@ -78,6 +78,7 @@ export interface ToolExecutionCompleteDetail {
   skipAutoInsertCheck?: boolean;
   callId?: string;
   functionName?: string;
+  status?: 'success' | 'error';
 }
 
 export interface AutomationState {
@@ -600,6 +601,18 @@ export class AutomationService {
       if (!automationState) {
         logger.debug('[AutomationService] Could not get automation state for batch, skipping');
         return;
+      }
+
+      // Update automation state on window for render_prescript access
+      await this.exposeAutomationStateToWindow();
+
+      // Auto Execute logging for batch
+      if (automationState.autoExecute) {
+        logger.debug('[AutomationService] Auto Execute: Batch completed', {
+          batchId: merged.batchId,
+          callCount: merged.callCount,
+          flushReason: merged.flushReason,
+        });
       }
 
       if (automationState.autoInsert) {
