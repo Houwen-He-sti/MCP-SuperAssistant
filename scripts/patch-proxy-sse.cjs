@@ -31,16 +31,25 @@ if (!fs.existsSync(TARGET)) {
 
 const src = fs.readFileSync(TARGET, 'utf8');
 
+// Match module-level Server line — the one that appears BEFORE `const sessions`
+// (not the handler-level one inside app.get which is our fix)
+const MODULE_LEVEL_SERVER_RE = /const server = new Server\(.+\);\s*\n\s*const sessions/;
+
 // ── Idempotency check ────────────────────────────────────────────────
-if (src.includes(PATCH_MARKER) || (src.includes('cleanupSession') && !src.includes('sseTransport.onerror'))) {
+// Primary: unique marker injected by this script
+// Secondary: structural check for pre-marker patches (cleanupSession present,
+//   old transport callbacks gone, AND module-level Server gone)
+const alreadyPatchedWithoutMarker =
+  src.includes('cleanupSession') &&
+  !src.includes('sseTransport.onerror') &&
+  !MODULE_LEVEL_SERVER_RE.test(src);
+if (src.includes(PATCH_MARKER) || alreadyPatchedWithoutMarker) {
   console.log('[patch-proxy-sse] Already patched — skipping.');
   process.exit(0);
 }
 
 // ── Verify original patterns exist ──────────────────────────────────
-// Match module-level Server line (handles nested braces like { capabilities: {} })
-const MODULE_LEVEL_SERVER_LINE = /^(\s*)const server = new Server\(.+\);\s*$/m;
-if (!MODULE_LEVEL_SERVER_LINE.test(src)) {
+if (!MODULE_LEVEL_SERVER_RE.test(src)) {
   console.error('[patch-proxy-sse] Cannot find module-level "const server = new Server(...)" line.');
   console.error('[patch-proxy-sse] File may have changed or already been patched without marker.');
   process.exit(1);
@@ -55,7 +64,7 @@ if (!src.includes('sseTransport.onerror')) {
 let patched = src;
 
 // ── Step 1: Remove module-level `const server = new Server(...)` ────
-patched = patched.replace(MODULE_LEVEL_SERVER_LINE, '');
+patched = patched.replace(MODULE_LEVEL_SERVER_RE, 'const sessions');
 // Verify removal succeeded
 if (patched === src) {
   console.error('[patch-proxy-sse] Failed to remove module-level Server line.');
@@ -131,7 +140,7 @@ if (failures.length > 0) {
 }
 
 // Verify module-level Server is gone
-if (MODULE_LEVEL_SERVER_LINE.test(patched)) {
+if (MODULE_LEVEL_SERVER_RE.test(patched)) {
   console.error('[patch-proxy-sse] Post-patch verification FAILED: module-level Server still present.');
   process.exit(1);
 }
