@@ -5,13 +5,13 @@
  * Uses minimal DOM stubs — no real browser needed.
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   findAssistantMessageContainer,
   scanAssistantMessage,
+  getToolCallDedupeKey,
   type ToolCall,
-  type ToolCallBatch,
 } from './batchScan.ts';
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ describe('findAssistantMessageContainer', () => {
     const block = makeElement({}, msg);
     const result = findAssistantMessageContainer(block);
     assert.notEqual(result, null);
-    assert.equal(result!.messageId, 'msg-conv-turn-42');
+    assert.equal(result!.messageId, 'conv-turn-42');
   });
 });
 
@@ -179,5 +179,30 @@ describe('scanAssistantMessage', () => {
     // Second batch: synthetic orphan
     assert.ok(batches[1].sourceMessageId.startsWith('synthetic-'));
     assert.deepEqual(batches[1].expectedCallIds, ['c2']);
+  });
+
+  it('does not merge calls from different containers lacking IDs (WeakMap)', () => {
+    // Two different assistant message elements, both without data-message-id
+    const msgA = makeElement({ 'data-message-author-role': 'assistant' });
+    const msgB = makeElement({ 'data-message-author-role': 'assistant' });
+    const call1 = makeToolCall('c1', 'b1', makeElement({}, msgA));
+    const call2 = makeToolCall('c2', 'b2', makeElement({}, msgB));
+
+    const batches = scanAssistantMessage([call1, call2]);
+    assert.equal(batches.length, 2, 'Should produce separate batches for different containers');
+    assert.notEqual(batches[0].sourceMessageId, batches[1].sourceMessageId);
+  });
+});
+
+describe('getToolCallDedupeKey', () => {
+  it('produces key from messageId and callId', () => {
+    assert.equal(getToolCallDedupeKey('msg-42', 'c1'), 'msg-42::c1');
+  });
+
+  it('different messageIds produce different keys', () => {
+    assert.notEqual(
+      getToolCallDedupeKey('msg-A', 'c1'),
+      getToolCallDedupeKey('msg-B', 'c1'),
+    );
   });
 });

@@ -53,6 +53,22 @@ export interface ToolCallBatch {
 // ---------------------------------------------------------------------------
 
 /**
+ * Stable synthetic ID map for assistant message elements that lack an explicit ID.
+ * Keyed by DOM element reference so the same element always gets the same ID.
+ */
+const syntheticIdMap = new WeakMap<Element, string>();
+let syntheticIdCounter = 0;
+
+function getOrCreateSyntheticId(element: Element): string {
+  let id = syntheticIdMap.get(element);
+  if (!id) {
+    id = `synthetic-msg-${++syntheticIdCounter}`;
+    syntheticIdMap.set(element, id);
+  }
+  return id;
+}
+
+/**
  * Find the assistant message container for a given block element.
  * Returns { element, messageId } or null if not inside a recognized container.
  */
@@ -64,8 +80,9 @@ export function findAssistantMessageContainer(
 
   const messageId =
     msg.getAttribute('data-message-id') ??
-    // Fallback: use a stable attribute combination
-    `msg-${msg.getAttribute('data-testid') ?? 'unknown'}`;
+    msg.getAttribute('data-testid') ??
+    // Fallback: assign a stable synthetic ID per element instance
+    getOrCreateSyntheticId(msg);
 
   return { element: msg, messageId };
 }
@@ -120,4 +137,20 @@ export function scanAssistantMessage(calls: ToolCall[]): ToolCallBatch[] {
   }
 
   return batches;
+}
+
+// ---------------------------------------------------------------------------
+// Dedup key helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a deduplication key for a tool call within a batch.
+ * Key = sourceMessageId + callId — prevents re-execution when MutationObserver
+ * re-scans the same assistant message.
+ */
+export function getToolCallDedupeKey(
+  sourceMessageId: string,
+  callId: string,
+): string {
+  return `${sourceMessageId}::${callId}`;
 }
