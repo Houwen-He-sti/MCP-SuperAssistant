@@ -20,6 +20,8 @@ const fs = require('fs');
 const path = require('path');
 
 const TARGET = path.join(__dirname, '..', 'packages', 'proxy', 'dist', 'gateways', 'stdioToSse.js');
+// Unique marker to detect if patch has been applied
+const PATCH_MARKER = '/* PATCHED: per-connection-server */';
 
 if (!fs.existsSync(TARGET)) {
   console.error('[patch-proxy-sse] Target file not found:', TARGET);
@@ -29,31 +31,43 @@ if (!fs.existsSync(TARGET)) {
 
 const src = fs.readFileSync(TARGET, 'utf8');
 
-// Check if already patched (per-connection pattern has cleanupSession)
-if (src.includes('cleanupSession')) {
+// ── Idempotency check ────────────────────────────────────────────────
+if (src.includes(PATCH_MARKER) || (src.includes('cleanupSession') && !src.includes('sseTransport.onerror'))) {
   console.log('[patch-proxy-sse] Already patched — skipping.');
   process.exit(0);
 }
 
-// Verify the original pattern exists
-const MODULE_LEVEL_SERVER = /const server = new Server\([^)]+\).*\n\s*const sessions/;
-if (!MODULE_LEVEL_SERVER.test(src)) {
-  console.error('[patch-proxy-sse] Cannot find module-level Server pattern. File may have changed.');
+// ── Verify original patterns exist ──────────────────────────────────
+// Match module-level Server line (handles nested braces like { capabilities: {} })
+const MODULE_LEVEL_SERVER_LINE = /^(\s*)const server = new Server\(.+\);\s*$/m;
+if (!MODULE_LEVEL_SERVER_LINE.test(src)) {
+  console.error('[patch-proxy-sse] Cannot find module-level "const server = new Server(...)" line.');
+  console.error('[patch-proxy-sse] File may have changed or already been patched without marker.');
+  process.exit(1);
+}
+
+// Verify original handler has the single-server pattern (transport-level callbacks)
+if (!src.includes('sseTransport.onerror')) {
+  console.error('[patch-proxy-sse] Cannot find original SSE handler pattern (sseTransport.onerror).');
   process.exit(1);
 }
 
 let patched = src;
 
-// 1. Remove module-level `const server = new Server(...)`
-patched = patched.replace(
-  /^\s*const server = new Server\(\{[^}]+\},\s*\{[^}]+\}\);\n/m,
-  ''
-);
+// ── Step 1: Remove module-level `const server = new Server(...)` ────
+patched = patched.replace(MODULE_LEVEL_SERVER_LINE, '');
+// Verify removal succeeded
+if (patched === src) {
+  console.error('[patch-proxy-sse] Failed to remove module-level Server line.');
+  process.exit(1);
+}
 
-// 2. Replace the SSE GET handler
+// ── Step 2: Replace the SSE GET handler ─────────────────────────────
+// Match from app.get(ssePath...) to the closing of the handler (before app.post)
 const ORIGINAL_HANDLER = /app\.get\(ssePath, async \(req, res\) => \{[\s\S]*?sseTransport\.onerror[\s\S]*?req\.on\('close'[\s\S]*?\}\);\n\s*\}\);/;
 
-const FIXED_HANDLER = `app.get(ssePath, async (req, res) => {
+const FIXED_HANDLER = `${PATCH_MARKER}
+    app.get(ssePath, async (req, res) => {
         logger.info(\`New SSE connection from \${req.ip}\`);
         setResponseHeaders({
             res,
@@ -77,7 +91,7 @@ const FIXED_HANDLER = `app.get(ssePath, async (req, res) => {
         try {
             await server.connect(sseTransport);
         } catch (err) {
-            logger.error(\`Failed to connect server for session \${sessionId}:\`, err);
+            logger.error(\`Failed to connect server for session \${sessionId} (headersSent=\${res.headersSent}):\`, err);
             await cleanupSession('connect.failed');
             if (!res.headersSent) res.status(500).end('Server connect failed');
             return;
@@ -91,11 +105,40 @@ const FIXED_HANDLER = `app.get(ssePath, async (req, res) => {
         };
     });`;
 
-if (ORIGINAL_HANDLER.test(patched)) {
-  patched = patched.replace(ORIGINAL_HANDLER, FIXED_HANDLER);
-} else {
-  console.error('[patch-proxy-sse] Cannot find original SSE handler pattern.');
-  console.error('[patch-proxy-sse] The file may already be partially patched or have changed.');
+if (!ORIGINAL_HANDLER.test(patched)) {
+  console.error('[patch-proxy-sse] Cannot find original SSE handler block after step 1.');
+  console.error('[patch-proxy-sse] Aborting — file NOT modified (step 1 was in-memory only).');
+  process.exit(1);
+}
+
+patched = patched.replace(ORIGINAL_HANDLER, FIXED_HANDLER);
+
+// ── Post-patch verification ─────────────────────────────────────────
+const checks = [
+  [PATCH_MARKER, 'patch marker'],
+  ['cleanupSession', 'cleanup function'],
+  ['server.onclose', 'server lifecycle callback'],
+  ['await server.connect(sseTransport)', 'server.connect in handler'],
+];
+const failures = checks.filter(([pattern]) => !patched.includes(pattern));
+if (failures.length > 0) {
+  console.error('[patch-proxy-sse] Post-patch verification FAILED:');
+  for (const [, label] of failures) {
+    console.error('  - Missing: ' + label);
+  }
+  console.error('[patch-proxy-sse] File NOT written.');
+  process.exit(1);
+}
+
+// Verify module-level Server is gone
+if (MODULE_LEVEL_SERVER_LINE.test(patched)) {
+  console.error('[patch-proxy-sse] Post-patch verification FAILED: module-level Server still present.');
+  process.exit(1);
+}
+
+// Verify original transport-level callbacks are gone
+if (patched.includes('sseTransport.onerror')) {
+  console.error('[patch-proxy-sse] Post-patch verification FAILED: old sseTransport.onerror still present.');
   process.exit(1);
 }
 
