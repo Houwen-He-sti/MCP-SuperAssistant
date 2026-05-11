@@ -17,6 +17,7 @@ export {
 } from './automation.service';
 
 export { ToolResultRenderer } from './tool-result-renderer';
+export { ToolLoopCardRenderer } from './tool-loop-card-renderer';
 
 // Export initialization function for all services
 export async function initializeAllServices(): Promise<void> {
@@ -30,6 +31,10 @@ export async function initializeAllServices(): Promise<void> {
     // Initialize tool result renderer (independent from automation service)
     const { ToolResultRenderer } = await import('./tool-result-renderer');
     await ToolResultRenderer.getInstance().initialize();
+
+    // Initialize tool-loop card renderer (Gate 6C — semantic cards)
+    const { ToolLoopCardRenderer } = await import('./tool-loop-card-renderer');
+    await ToolLoopCardRenderer.getInstance().start();
     
     logger.debug('[Services] All services initialized successfully');
   } catch (error) {
@@ -50,6 +55,10 @@ export async function cleanupAllServices(): Promise<void> {
     // Cleanup tool result renderer
     const { ToolResultRenderer } = await import('./tool-result-renderer');
     ToolResultRenderer.getInstance().cleanup();
+
+    // Cleanup tool-loop card renderer (Gate 6C)
+    const { ToolLoopCardRenderer } = await import('./tool-loop-card-renderer');
+    ToolLoopCardRenderer.getInstance().stop();
     
     logger.debug('[Services] All services cleaned up successfully');
   } catch (error) {
