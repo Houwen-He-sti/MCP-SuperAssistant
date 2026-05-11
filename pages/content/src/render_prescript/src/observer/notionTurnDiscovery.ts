@@ -21,7 +21,7 @@
  * Check if the current page is a Notion host.
  */
 export function isNotionHost(hostname: string): boolean {
-  return hostname === 'notion.so' || hostname.endsWith('.notion.so');
+    return hostname === 'notion.so' || hostname.endsWith('.notion.so');
 }
 
 /**
@@ -29,7 +29,7 @@ export function isNotionHost(hostname: string): boolean {
  * This is intentionally broad — actual parsing is done by functionResultParser.
  */
 export function containsFunctionResultLikeText(text: string): boolean {
-  return text.includes('<function_results') || text.includes('<function_result ');
+    return text.includes('<function_results') || text.includes('<function_result ');
 }
 
 /**
@@ -41,32 +41,32 @@ export function containsFunctionResultLikeText(text: string): boolean {
  * This avoids hardcoding wrapper depth (e.g. `:scope > div`).
  */
 export function findPossibleTurnLanes(container: HTMLElement): HTMLElement[] {
-  const lanes: HTMLElement[] = [];
+    const lanes: HTMLElement[] = [];
 
-  // Check the container itself and all descendant divs
-  const candidates = [container, ...Array.from(container.querySelectorAll('div'))];
+    // Check the container itself and all descendant divs
+    const candidates = [container, ...Array.from(container.querySelectorAll('div'))];
 
-  for (const node of candidates) {
-    if (!(node instanceof HTMLElement)) continue;
+    for (const node of candidates) {
+        if (!(node instanceof HTMLElement)) continue;
 
-    const directChildren = Array.from(node.children).filter(
-      (child): child is HTMLElement => child instanceof HTMLElement,
-    );
+        const directChildren = Array.from(node.children).filter(
+            (child): child is HTMLElement => child instanceof HTMLElement,
+        );
 
-    // A turn lane should have multiple turn children
-    if (directChildren.length < 2) continue;
+        // A turn lane should have multiple turn children
+        if (directChildren.length < 2) continue;
 
-    // At least one direct child must contain function_results text
-    const hasFunctionResultChild = directChildren.some(child =>
-      containsFunctionResultLikeText(child.textContent || ''),
-    );
+        // At least one direct child must contain function_results text
+        const hasFunctionResultChild = directChildren.some(child =>
+            containsFunctionResultLikeText(child.textContent || ''),
+        );
 
-    if (!hasFunctionResultChild) continue;
+        if (!hasFunctionResultChild) continue;
 
-    lanes.push(node);
-  }
+        lanes.push(node);
+    }
 
-  return lanes;
+    return lanes;
 }
 
 /**
@@ -80,35 +80,35 @@ export function findPossibleTurnLanes(container: HTMLElement): HTMLElement[] {
  *               can be a test container for unit tests)
  */
 export function getNotionFunctionResultCandidates(root: ParentNode = document): HTMLElement[] {
-  const candidates: HTMLElement[] = [];
+    const candidates: HTMLElement[] = [];
 
-  const containers = Array.from(root.querySelectorAll('.notion-selectable-container'));
+    const containers = Array.from(root.querySelectorAll('.notion-selectable-container'));
 
-  for (const container of containers) {
-    if (!(container instanceof HTMLElement)) continue;
+    for (const container of containers) {
+        if (!(container instanceof HTMLElement)) continue;
 
-    const lanes = findPossibleTurnLanes(container);
+        const lanes = findPossibleTurnLanes(container);
 
-    for (const lane of lanes) {
-      for (const child of Array.from(lane.children)) {
-        if (!(child instanceof HTMLElement)) continue;
+        for (const lane of lanes) {
+            for (const child of Array.from(lane.children)) {
+                if (!(child instanceof HTMLElement)) continue;
 
-        const text = child.textContent || '';
+                const text = child.textContent || '';
 
-        // Guard 1: must contain function_results-like text
-        if (!containsFunctionResultLikeText(text)) continue;
+                // Guard 1: must contain function_results-like text
+                if (!containsFunctionResultLikeText(text)) continue;
 
-        // Guard 2: must NOT contain AI content root
-        // In Notion AI Chat, AI responses live under [data-content-editable-root]
-        if (child.querySelector('[data-content-editable-root]')) continue;
+                // Guard 2: must NOT contain AI content root
+                // In Notion AI Chat, AI responses live under [data-content-editable-root]
+                if (child.querySelector('[data-content-editable-root]')) continue;
 
-        // Guard 3: deduplicate — don't add the same element twice
-        if (!candidates.includes(child)) {
-          candidates.push(child);
+                // Guard 3: deduplicate — don't add the same element twice
+                if (!candidates.includes(child)) {
+                    candidates.push(child);
+                }
+            }
         }
-      }
     }
-  }
 
-  return candidates;
+    return candidates;
 }

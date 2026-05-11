@@ -19,6 +19,7 @@ import {
   type McpClientLike,
   type StreamToolBridgeConfig,
 } from './streamToolBridge';
+import { normalizeToUiEvent } from './toolLoopUiEvents';
 import type { StreamEvent } from './types';
 
 /**
@@ -154,6 +155,12 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
         window.dispatchEvent(new CustomEvent('mcp-superassistant:model-ack', {
           detail: { type: event.type, nonce: event.nonce, callId: event.callId, functionName: event.functionName, latencyMs: event.latencyMs },
         }));
+
+        // Gate 6B: Also dispatch normalized UI event for content script consumption
+        const uiEvent = normalizeToUiEvent(event);
+        if (uiEvent) {
+          window.dispatchEvent(new CustomEvent('mcp-superassistant:tool-loop-event', { detail: uiEvent }));
+        }
       }
     },
   });
@@ -182,6 +189,14 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
       } else {
         const level = event.status === 'failed' ? 'warn' : 'debug';
         console[level]('[StreamToolBridge]', event.status, event.phase || '', event.errorCode || '');
+      }
+
+      // Gate 6B: Dispatch normalized UI event via CustomEvent for content script consumption
+      if (typeof window !== 'undefined') {
+        const uiEvent = normalizeToUiEvent(event);
+        if (uiEvent) {
+          window.dispatchEvent(new CustomEvent('mcp-superassistant:tool-loop-event', { detail: uiEvent }));
+        }
       }
     },
   });

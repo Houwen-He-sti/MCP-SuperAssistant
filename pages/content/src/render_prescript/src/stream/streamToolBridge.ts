@@ -41,6 +41,8 @@ export interface StreamToolExecutionEvent {
   error?: string;
   errorCode?: string;
   durationMs?: number;
+  /** Gate 6B: Injection outcome for UI event mapping. Only set when status='succeeded' and autoInsert attempted. */
+  injectOutcome?: InjectOutcome;
 }
 
 export interface BridgeHandoffAckEvent {
@@ -362,6 +364,11 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       return;
     }
 
+    // Gate 6B: Emit reserved status — identity resolved + dedup gate passed.
+    // Note: circuit breaker and mcpClient checks happen AFTER this point,
+    // so 'reserved' means "detected and accepted for processing", not "execution guaranteed".
+    emit(streamId, identity, 'reserved');
+
     // Step 4b (Gate 5): Circuit breaker check — only after valid + reserved + non-duplicate
     sweepExpiredEntries();
     const maxCalls = config.circuitBreaker?.maxToolCallsPerStream ?? DEFAULT_MAX_TOOL_CALLS_PER_STREAM;
@@ -498,7 +505,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
       switch (outcome) {
         case 'RESULT_SUBMITTED':
-          emit(streamId, identity, 'succeeded', { result, durationMs });
+          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
           // Gate 5c.1: Register nonce first, then emit bridge handoff ACK
           if (nonce && ackTracker) {
             ackTracker.registerPending(nonce, callId, identity.name!);
@@ -514,7 +521,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           }
           return;
         case 'RESULT_INJECTED':
-          emit(streamId, identity, 'succeeded', { result, durationMs });
+          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
           return;
         case 'INJECT_SKIPPED_NO_ADAPTER':
           emit(streamId, identity, 'failed', {
@@ -522,6 +529,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
             error: 'No adapter available for DOM injection',
             errorCode: 'ADAPTER_MISSING',
             durationMs,
+            injectOutcome: outcome,
           });
           return;
         case 'INJECT_SKIPPED_NO_INSPECT':
@@ -529,10 +537,11 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
             result, durationMs,
             error: 'Cannot inspect input content — insert skipped (fail-closed)',
             errorCode: 'INSERT_SKIPPED_NO_INSPECT',
+            injectOutcome: outcome,
           });
           return;
         case 'INJECT_SKIPPED_DRAFT':
-          emit(streamId, identity, 'succeeded', { result, durationMs });
+          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
           return;
         case 'INSERT_FAILED':
           emit(streamId, identity, 'failed', {
@@ -540,6 +549,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
             error: injectError || 'insertText failed',
             errorCode: 'INSERT_FAILED',
             durationMs: Date.now() - startTime,
+            injectOutcome: outcome,
           });
           return;
         case 'SUBMIT_FAILED':
@@ -548,6 +558,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
             error: injectError || 'submitForm failed',
             errorCode: 'SUBMIT_FAILED',
             durationMs: Date.now() - startTime,
+            injectOutcome: outcome,
           });
           return;
       }
