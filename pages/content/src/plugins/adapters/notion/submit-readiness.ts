@@ -1,15 +1,15 @@
 export type SubmitClickResult =
     | {
-          ok: true;
-          attempts: number;
-      }
+        ok: true;
+        attempts: number;
+    }
     | {
-          ok: false;
-          // 'aborted' reserved for future cancellation if needed
-          reason: 'button_not_found' | 'button_disabled' | 'click_failed';
-          attempts: number;
-          error?: unknown;
-      };
+        ok: false;
+        // 'aborted' reserved for future cancellation if needed
+        reason: 'button_not_found' | 'button_disabled' | 'click_failed';
+        attempts: number;
+        error?: unknown;
+    };
 
 export interface SubmitContext<TButton> {
     getSubmitButton(): TButton | null;

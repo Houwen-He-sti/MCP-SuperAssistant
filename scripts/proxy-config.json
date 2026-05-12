@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "committee-bridge": {
+            "command": "uv",
+            "args": [
+                "run",
+                "--directory",
+                "c:\\Users\\houwen\\Documents\\VS Code Dir\\committee-bridge-mcp",
+                "committee-bridge-mcp",
+                "--transport",
+                "stdio"
+            ]
+        }
+    }
+}

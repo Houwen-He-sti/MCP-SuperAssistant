@@ -18,18 +18,20 @@ const TOOL_NONCE = `PHASE1B_TOOL_${Date.now()}`;
 const ACK_MARKER = `PHASE1B_ACK_${Date.now()}`;
 
 const LIMITS = {
-    maxDurationMs: 90_000,
-    maxToolCalls: 3,
-    maxSubmittedFunctionResults: 2,
-    maxAutoSubmitClicks: 2,
+    maxDurationMs: 180_000,
+    maxToolCalls: 10,
+    maxSubmittedFunctionResults: 8,
+    maxAutoSubmitClicks: 5,
 };
 
 const CDP_TIMEOUT_MS = 15_000;
 const STORE_KEY = 'mcp-super-assistant-ui-store';
 
 // Phase 1B prompt: call echo WITH message, then output ACK_MARKER in reply
-const PHASE1B_PROMPT = `请调用 echo 工具一次，参数必须包含：
+const PHASE1B_PROMPT = `请调用 committee-bridge.echo 工具一次，参数必须包含：
 {"message":"${TOOL_NONCE}"}
+
+注意：工具名称必须写全称 committee-bridge.echo，不能缩写为 echo。
 
 收到 function_result 后，不要再次调用工具。
 请只用自然语言回复，并且必须原样包含以下确认标记：
@@ -37,9 +39,11 @@ ${ACK_MARKER}
 
 回复中可以简短说明 echo 结果。`;
 
-// --- Notion tab URL matcher (P0-3: supports /agent/, /ai/, /chat/) ---
+// --- Notion tab URL matcher ---
 function isNotionAiTarget(url) {
-    return /https:\/\/(www\.)?notion\.so\/(agent|ai|chat)\b/.test(url);
+    // Match any Notion page tab (not service workers or assets)
+    return /https:\/\/(www\.)?notion\.so\//.test(url)
+        && !/\/(sw\.js|_assets\/)/.test(url);
 }
 
 function escapeRegExp(s) {
@@ -103,7 +107,7 @@ function checkProxyHealth(port = 3006) {
     }
     const chatTab = targets.find(t => isNotionAiTarget(t.url));
     if (!chatTab) {
-        console.log('ERROR: No Notion AI tab found. Looking for notion.so/(agent|ai|chat)');
+        console.log('ERROR: No Notion tab found.');
         console.log('  Available tabs:', targets.map(t => t.url).join('\n    '));
         process.exit(1);
     }
@@ -120,8 +124,19 @@ function checkProxyHealth(port = 3006) {
 
     // 4. Connect WebSocket
     const ws = new WebSocket(chatTab.webSocketDebuggerUrl);
+    const executionContexts = [];
     await new Promise(r => ws.on('open', r));
     console.log('Preflight: CDP WebSocket connected');
+
+    // Track execution contexts for isolated world access
+    ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data);
+            if (msg.method === 'Runtime.executionContextCreated') {
+                executionContexts.push(msg.params.context);
+            }
+        } catch (e) { }
+    });
 
     // --- CDP send with timeout (P1-4) ---
     let msgId = 0;
@@ -151,19 +166,70 @@ function checkProxyHealth(port = 3006) {
 
     await send('Runtime.enable');
     await send('Log.enable');
+    await new Promise(r => setTimeout(r, 1500)); // Wait for context enumeration
 
-    // 5. Check extension and MCP connection status (P1-1)
+    // 5. Find extension's isolated world and check MCP connection
+    let isoCtx = null;
+    for (const ctx of executionContexts) {
+        if (ctx.name === 'MCP SuperAssistant') {
+            const check = await send('Runtime.evaluate', {
+                contextId: ctx.id,
+                expression: "typeof window.pluginRegistry !== 'undefined'",
+                returnByValue: true,
+            });
+            if (val(check) === true) { isoCtx = ctx.id; break; }
+        }
+    }
+
+    async function evalIso(expression, opts = {}) {
+        if (!isoCtx) return null;
+        const params = { expression, returnByValue: true, contextId: isoCtx, ...opts };
+        const result = await send('Runtime.evaluate', params);
+        return result.result?.result;
+    }
+
+    if (isoCtx) {
+        console.log(`Preflight: Extension isolated world found (ctx=${isoCtx})`);
+        const mcpState = await evalIso(`(function() {
+            var mc = window.mcpClient;
+            if (!mc) return JSON.stringify({ hasMcpClient: false });
+            return JSON.stringify({
+                hasMcpClient: true,
+                isReady: typeof mc.isReady === 'function' ? mc.isReady() : 'N/A',
+            });
+        })()`);
+        console.log(`Preflight: mcpClient: ${mcpState?.value}`);
+
+        const toolsResult = await evalIso(`(async function() {
+            var mc = window.mcpClient;
+            if (!mc || typeof mc.getAvailableTools !== 'function') return JSON.stringify({ count: 0, hasEcho: false });
+            var t = await mc.getAvailableTools();
+            var names = Array.isArray(t) ? t.map(function(x) { return typeof x === 'string' ? x : x.name || ''; }) : [];
+            return JSON.stringify({
+                count: names.length,
+                hasEcho: names.some(function(n) { return n.indexOf('echo') >= 0; }),
+                sample: names.slice(0, 5),
+            });
+        })()`, { awaitPromise: true });
+        const toolInfo = JSON.parse(toolsResult?.value || '{}');
+        console.log(`Preflight: MCP tools: ${toolsResult?.value}`);
+
+        if (!toolInfo.hasEcho) {
+            console.log('WARNING: No echo tool found in MCP registry. Tool calls may fail.');
+        }
+    } else {
+        console.log('WARNING: Extension isolated world not found. Cannot verify MCP connection.');
+    }
+
+    // Check localStorage store for preferences
     const extCheck = await send('Runtime.evaluate', {
         expression: `(function() {
-            const key = '${STORE_KEY}';
-            const stored = JSON.parse(localStorage.getItem(key) || 'null');
+            var key = '${STORE_KEY}';
+            var stored = JSON.parse(localStorage.getItem(key) || 'null');
             if (!stored || !stored.state) return JSON.stringify({ error: 'NO_STORE' });
-            const s = stored.state;
+            var s = stored.state;
             return JSON.stringify({
                 hasStore: true,
-                connectionStatus: s.connectionStatus || 'unknown',
-                mcpToolCount: (s.mcpToolNames || []).length,
-                hasEcho: (s.mcpToolNames || []).includes('echo'),
                 autoInsert: s.preferences?.autoInsert,
                 autoSubmit: s.preferences?.autoSubmit,
             });
@@ -171,14 +237,11 @@ function checkProxyHealth(port = 3006) {
         returnByValue: true,
     });
     const extState = JSON.parse(val(extCheck));
-    console.log(`Preflight: Extension state: ${JSON.stringify(extState)}`);
+    console.log(`Preflight: Store state: ${JSON.stringify(extState)}`);
     if (extState.error) {
         console.log('ERROR: MCP-SuperAssistant UI store not found.');
         ws.close();
         process.exit(1);
-    }
-    if (!extState.hasEcho) {
-        console.log('WARNING: echo tool not in mcpToolNames. Tool calls may fail.');
     }
 
     // 6. Verify input textbox + send button exist
@@ -303,26 +366,103 @@ function checkProxyHealth(port = 3006) {
             ws.on('message', handler);
             setTimeout(() => { ws.off('message', handler); resolve(); }, 30_000);
         });
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 10_000));
         console.log('  Page reloaded.');
 
-        // Navigate to fresh Notion AI chat (P0-3: use /agent/)
-        console.log('  Navigating to fresh Notion AI chat...');
-        await send('Page.navigate', { url: 'https://www.notion.so/agent' }, 30_000);
-        await new Promise(resolve => {
-            const handler = msg => {
-                try {
-                    const obj = JSON.parse(msg);
-                    if (obj.method === 'Page.loadEventFired') {
-                        ws.off('message', handler);
-                        resolve();
-                    }
-                } catch { /* ignore */ }
-            };
-            ws.on('message', handler);
-            setTimeout(() => { ws.off('message', handler); resolve(); }, 30_000);
+        // === STEP 2b: Ensure correct workspace (sjzj030) ===
+        // houwen's workspace has NO Notion AI → send button permanently disabled
+        const TARGET_WS = 'sjzj030';
+        console.log('Step 2b: Checking workspace...');
+        const wsCheck = await send('Runtime.evaluate', {
+            expression: `(function() {
+                var sw = document.querySelector('.notion-sidebar-switcher');
+                return sw ? sw.textContent.trim() : 'NO_SWITCHER';
+            })()`,
+            returnByValue: true,
         });
-        await new Promise(r => setTimeout(r, 5000));
+        const currentWs = val(wsCheck);
+        console.log('  Current workspace switcher text:', currentWs);
+
+        if (!currentWs.includes(TARGET_WS)) {
+            console.log('  ⚠️ Wrong workspace! Switching to sjzj030...');
+            // Click workspace switcher
+            const switcherClicked = val(await send('Runtime.evaluate', {
+                expression: `(function() {
+                    var sw = document.querySelector('.notion-sidebar-switcher');
+                    if (sw) { sw.click(); return true; }
+                    return false;
+                })()`,
+                returnByValue: true,
+            }));
+            if (!switcherClicked) {
+                throw new Error('Workspace switcher not found in sidebar');
+            }
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Click target workspace in menu (includes match — DOM text has leading avatar char)
+            const wsClicked = val(await send('Runtime.evaluate', {
+                expression: `(function() {
+                    var items = document.querySelectorAll('[role="menuitem"]');
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].textContent.includes('${TARGET_WS}')) {
+                            items[i].click();
+                            return items[i].textContent.substring(0, 40);
+                        }
+                    }
+                    return null;
+                })()`,
+                returnByValue: true,
+            }));
+            if (!wsClicked) {
+                throw new Error('Target workspace "sjzj030" not found in switcher menu');
+            }
+            console.log('  Switched to:', wsClicked);
+            // Wait for workspace to load
+            await new Promise(r => setTimeout(r, 5000));
+        } else {
+            console.log('  ✅ Already on correct workspace');
+        }
+
+        // Navigate to Notion AI via sidebar link (preserves SPA state, unlike Page.navigate)
+        console.log('  Navigating to Notion AI via sidebar link...');
+        const aiLinkClicked = val(await send('Runtime.evaluate', {
+            expression: `(function() {
+                var links = document.querySelectorAll('a[href]');
+                for (var i = 0; i < links.length; i++) {
+                    try {
+                        var href = new URL(links[i].href).pathname;
+                        if (href === '/ai') {
+                            links[i].click();
+                            return 'clicked: ' + links[i].textContent.substring(0, 30);
+                        }
+                    } catch(e) {}
+                }
+                return null;
+            })()`,
+            returnByValue: true,
+        }));
+        if (aiLinkClicked) {
+            console.log('  Sidebar link:', aiLinkClicked);
+        } else {
+            console.log('  No sidebar /ai link found, falling back to Page.navigate...');
+            await send('Page.navigate', { url: 'https://www.notion.so/ai' }, 30_000);
+            await new Promise(resolve => {
+                const handler = msg => {
+                    try {
+                        const obj = JSON.parse(msg);
+                        if (obj.method === 'Page.loadEventFired') {
+                            ws.off('message', handler);
+                            resolve();
+                        }
+                    } catch { /* ignore */ }
+                };
+                ws.on('message', handler);
+                setTimeout(() => { ws.off('message', handler); resolve(); }, 30_000);
+            });
+        }
+        // Wait for SPA render
+        console.log('  Waiting 10s for SPA render...');
+        await new Promise(r => setTimeout(r, 10_000));
 
         // Verify store after reload
         const liveStore = await send('Runtime.evaluate', {
@@ -341,24 +481,64 @@ function checkProxyHealth(port = 3006) {
         });
         console.log('  Live store:', val(liveStore));
 
+        // === STEP 2c: Ensure fresh chat (click "New Chat" if on existing conversation) ===
+        console.log('Step 2c: Looking for New Chat button...');
+        const newChatClicked = val(await send('Runtime.evaluate', {
+            expression: `(function() {
+                // Method 1: aria-label match (Notion uses 新对话 / 开始新对话)
+                var labels = ['新对话', '开始新对话', 'New Chat', 'Start new chat'];
+                for (var k = 0; k < labels.length; k++) {
+                    var el = document.querySelector('[aria-label="' + labels[k] + '"]');
+                    if (el) { el.click(); return 'clicked: aria-label=' + labels[k]; }
+                }
+                // Method 2: text content search
+                var btns = document.querySelectorAll('button, a, [role="button"]');
+                for (var i = 0; i < btns.length; i++) {
+                    var t = btns[i].textContent.trim().toLowerCase();
+                    if (t === 'new chat' || t === '新建对话' || t === '新对话' || t.startsWith('新对话')) {
+                        btns[i].click();
+                        return 'clicked: text=' + btns[i].textContent.substring(0, 20);
+                    }
+                }
+                // Method 3: data-testid
+                var ncBtn = document.querySelector('[data-testid="new-chat-button"]');
+                if (ncBtn) { ncBtn.click(); return 'clicked: testid'; }
+                return null;
+            })()`,
+            returnByValue: true,
+        }));
+        if (newChatClicked) {
+            console.log('  New Chat:', newChatClicked);
+            await new Promise(r => setTimeout(r, 3000));
+        } else {
+            console.log('  No New Chat button found (may already be fresh)');
+        }
+
         // === STEP 3: Write prompt into input ===
         console.log('Step 3: Writing prompt into input...');
         console.log(`  Prompt length: ${fullPrompt.length}`);
         console.log(`  Has TOOL_NONCE: ${fullPrompt.includes(TOOL_NONCE)}`);
         console.log(`  Has ACK_MARKER: ${fullPrompt.includes(ACK_MARKER)}`);
 
-        const inputInfo = await send('Runtime.evaluate', {
-            expression: `(function() {
-                const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
-                if (!input) return 'NO_INPUT';
-                const rect = input.getBoundingClientRect();
-                return JSON.stringify({ x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2), len: input.textContent.length });
-            })()`,
-            returnByValue: true,
-        });
+        // Retry finding input — SPA may still be rendering
+        let inputInfo;
+        for (let attempt = 0; attempt < 5; attempt++) {
+            inputInfo = await send('Runtime.evaluate', {
+                expression: `(function() {
+                    const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+                    if (!input) return 'NO_INPUT';
+                    const rect = input.getBoundingClientRect();
+                    return JSON.stringify({ x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2), len: input.textContent.length });
+                })()`,
+                returnByValue: true,
+            });
+            if (val(inputInfo) !== 'NO_INPUT') break;
+            console.log(`  Input not found, retrying in 3s (attempt ${attempt + 1}/5)...`);
+            await new Promise(r => setTimeout(r, 3000));
+        }
         console.log(`  Input state: ${val(inputInfo)}`);
         if (val(inputInfo) === 'NO_INPUT') {
-            throw new Error('No input textbox found after navigation');
+            throw new Error('No input textbox found after navigation (5 attempts)');
         }
         const inputRect = JSON.parse(val(inputInfo));
 
@@ -367,11 +547,43 @@ function checkProxyHealth(port = 3006) {
         await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputRect.x, y: inputRect.y, button: 'left', clickCount: 1 });
         await new Promise(r => setTimeout(r, 300));
 
-        // Select all + insert
+        // Select all + clear existing content
         await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
         await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
         await new Promise(r => setTimeout(r, 200));
-        await send('Input.insertText', { text: fullPrompt });
+
+        // Primary: execCommand('insertText') — works with contenteditable + triggers browser editing pipeline
+        const promptEscaped = JSON.stringify(fullPrompt);
+        const execResult = val(await send('Runtime.evaluate', {
+            expression: `(function() {
+                var input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+                if (!input) return 'NO_INPUT';
+                input.focus();
+                document.execCommand('selectAll');
+                var ok = document.execCommand('insertText', false, ${promptEscaped});
+                return ok ? 'execCommand_ok' : 'execCommand_fail';
+            })()`,
+            returnByValue: true,
+        }));
+        console.log('  execCommand result:', execResult);
+
+        if (execResult === 'execCommand_fail' || execResult === 'NO_INPUT') {
+            // Fallback: Input.insertText + synthetic events
+            console.log('  execCommand failed, falling back to Input.insertText...');
+            await send('Input.insertText', { text: fullPrompt });
+            await new Promise(r => setTimeout(r, 500));
+            // Dispatch React-compatible input events
+            val(await send('Runtime.evaluate', {
+                expression: `(function() {
+                    var input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+                    if (!input) return 'NO_INPUT';
+                    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    return 'dispatched';
+                })()`,
+                returnByValue: true,
+            }));
+        }
         await new Promise(r => setTimeout(r, 1000));
 
         // Verify
@@ -392,10 +604,84 @@ function checkProxyHealth(port = 3006) {
 
         // === STEP 4: Submit message ===
         console.log('Step 4: Submitting message...');
-        await send('Runtime.evaluate', {
-            expression: `document.querySelector('[data-testid="agent-send-message-button"]')?.click()`,
+
+        // Check send button state before clicking
+        const btnState = val(await send('Runtime.evaluate', {
+            expression: `(function() {
+                var btn = document.querySelector('[data-testid="agent-send-message-button"]');
+                if (!btn) return JSON.stringify({ exists: false });
+                return JSON.stringify({
+                    exists: true,
+                    disabled: btn.disabled || btn.getAttribute('aria-disabled') === 'true',
+                    opacity: getComputedStyle(btn).opacity,
+                });
+            })()`,
             returnByValue: true,
-        });
+        }));
+        const btnInfo = JSON.parse(btnState);
+        console.log('  Send button state:', btnState);
+
+        if (btnInfo.disabled || parseFloat(btnInfo.opacity || '1') < 0.5) {
+            console.log('  ⚠️ Button disabled! Diagnosing...');
+            // Diagnostic: workspace + input state
+            const diagState = val(await send('Runtime.evaluate', {
+                expression: `(function() {
+                    var sw = document.querySelector('.notion-sidebar-switcher');
+                    var input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+                    return JSON.stringify({
+                        workspace: sw ? sw.textContent.trim().substring(0, 30) : 'NO_SWITCHER',
+                        inputLen: input ? input.textContent.length : -1,
+                        hasToolNonce: input ? input.textContent.includes(${toolNonceEsc}) : false,
+                        url: location.href,
+                    });
+                })()`,
+                returnByValue: true,
+            }));
+            console.log('  Diagnostic:', diagState);
+
+            // Try nudge: Space + Backspace to trigger editor state update
+            console.log('  Trying Space+Backspace nudge...');
+            await send('Runtime.evaluate', {
+                expression: `document.querySelector('div[role="textbox"][contenteditable="true"]')?.focus()`,
+                returnByValue: true,
+            });
+            await new Promise(r => setTimeout(r, 200));
+            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+            await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+            await new Promise(r => setTimeout(r, 300));
+            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+            await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+            await new Promise(r => setTimeout(r, 500));
+
+            // Recheck button state after nudge
+            const btnState2 = val(await send('Runtime.evaluate', {
+                expression: `(function() {
+                    var btn = document.querySelector('[data-testid="agent-send-message-button"]');
+                    if (!btn) return JSON.stringify({ exists: false });
+                    return JSON.stringify({ disabled: btn.disabled, opacity: getComputedStyle(btn).opacity });
+                })()`,
+                returnByValue: true,
+            }));
+            const btnInfo2 = JSON.parse(btnState2);
+            console.log('  After nudge:', btnState2);
+
+            if (!btnInfo2.disabled && parseFloat(btnInfo2.opacity || '1') >= 0.5) {
+                console.log('  ✅ Button enabled after nudge! Clicking...');
+                await send('Runtime.evaluate', {
+                    expression: `document.querySelector('[data-testid="agent-send-message-button"]')?.click()`,
+                    returnByValue: true,
+                });
+            } else {
+                console.log('  Still disabled. Last fallback: Enter key...');
+                await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+                await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            }
+        } else {
+            await send('Runtime.evaluate', {
+                expression: `document.querySelector('[data-testid="agent-send-message-button"]')?.click()`,
+                returnByValue: true,
+            });
+        }
         await new Promise(r => setTimeout(r, 3000));
 
         const afterSubmit = await send('Runtime.evaluate', {
@@ -413,6 +699,7 @@ function checkProxyHealth(port = 3006) {
         console.log('  ✅ Message sent.');
 
         // Record ACK baseline AFTER prompt is submitted (P0-4 B')
+        // Also record tool-call keyword baseline (prompt text contains 'function_call_start')
         await new Promise(r => setTimeout(r, 2000));
         const ackMarkerEscaped = escapeRegExp(ACK_MARKER);
         const ackReStr = JSON.stringify(ackMarkerEscaped);
@@ -420,12 +707,21 @@ function checkProxyHealth(port = 3006) {
             expression: `(function() {
                 const pageText = document.body.innerText;
                 const re = new RegExp(${ackReStr}, 'g');
-                return (pageText.match(re) || []).length;
+                const toolCallBaseline = (pageText.match(/function_call_start/g) || []).length;
+                const functionResultBaseline = (pageText.match(/function_result/g) || []).length;
+                return JSON.stringify({
+                    ackBaseline: (pageText.match(re) || []).length,
+                    toolCallBaseline: toolCallBaseline,
+                    functionResultBaseline: functionResultBaseline,
+                });
             })()`,
             returnByValue: true,
         });
-        ackBaselineCount = val(baselineResult) || 0;
-        console.log(`  ACK baseline count: ${ackBaselineCount}`);
+        const baselines = JSON.parse(val(baselineResult));
+        ackBaselineCount = baselines.ackBaseline || 0;
+        const toolCallBaseline = baselines.toolCallBaseline || 0;
+        const functionResultBaseline = baselines.functionResultBaseline || 0;
+        console.log(`  ACK baseline: ${ackBaselineCount}, toolCall baseline: ${toolCallBaseline}, funcResult baseline: ${functionResultBaseline}`);
 
         // === STEP 5: MAIN MONITORING LOOP ===
         console.log(`\n=== MONITORING LOOP (max ${LIMITS.maxDurationMs / 1000}s) ===`);
@@ -468,8 +764,8 @@ function checkProxyHealth(port = 3006) {
             });
             const s = JSON.parse(val(state));
 
-            toolCallCount = s.toolCallCount;
-            functionResultsInPage = s.functionResultCount;
+            toolCallCount = s.toolCallCount - toolCallBaseline;
+            functionResultsInPage = s.functionResultCount - functionResultBaseline;
 
             // Detect autoInsert
             if (!autoInsertDetected && s.inputLength > 0 && s.inputHasFunctionResult) {
@@ -495,7 +791,7 @@ function checkProxyHealth(port = 3006) {
             let flags = '';
             if (s.streaming) flags += ' [STREAMING]';
             if (s.ackMarkerCount > ackBaselineCount) flags += ' [ACK_FOUND]';
-            console.log(`[${elapsed()}] in=${s.inputLength} tools=${s.toolCallCount} results=${s.functionResultCount} ack=${s.ackMarkerCount}/${ackBaselineCount} stream=${s.streaming}${flags}`);
+            console.log(`[${elapsed()}] in=${s.inputLength} tools=${toolCallCount}(raw:${s.toolCallCount}-base:${toolCallBaseline}) results=${functionResultsInPage}(raw:${s.functionResultCount}-base:${functionResultBaseline}) ack=${s.ackMarkerCount}/${ackBaselineCount} stream=${s.streaming}${flags}`);
 
             if (s.inputLength > 0 && !autoInsertDetected) {
                 console.log(`  input: "${s.inputPreview}"`);

@@ -1,7 +1,7 @@
+import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
 
 /**
  * Notion AI Adapter — supports both:
@@ -19,7 +19,8 @@ import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../compo
 const BRIDGE_PROMPT = wrapWithSystemPromptTag(assembleNotionBridgePrompt());
 
 import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
-import { waitForSubmitButtonAndClick, isNotionSubmitButtonReady } from './notion/submit-readiness.js';import { createNotionSubmitContext } from './notion/submit-context';
+import { createNotionSubmitContext } from './notion/submit-context';
+import { waitForSubmitButtonAndClick } from './notion/submit-readiness.js';
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
     readonly version = '1.1.0';
