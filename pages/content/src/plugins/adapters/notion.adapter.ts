@@ -383,20 +383,8 @@ export class NotionAdapter extends BaseAdapterPlugin {
             return null;
         };
 
-        const result = await waitForSubmitButtonAndClick({
-            getSubmitButton: getButton,
-            isSubmitButtonReady: (btn) => {
-                const rect = btn.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) return false;
-                if ((btn as any).disabled === true) return false;
-                if (window.getComputedStyle(btn).pointerEvents === "none") return false;
-                return isNotionSubmitButtonReady(btn);
-            },
-            clickSubmitButton: (btn) => {
-                btn.click();
-            },
-            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-        }, {
+        const context = this.createSubmitContext(getButton);
+        const result = await waitForSubmitButtonAndClick(context, {
             maxAttempts: 50,
             intervalMs: 100, // Waits up to 5s total
         });
@@ -425,6 +413,28 @@ export class NotionAdapter extends BaseAdapterPlugin {
             this.emitExecutionFailed("submitForm", fullMsg);
             return false;
         }
+    }
+
+
+    // Exposed for testing
+    createSubmitContext(getButton: () => HTMLElement | null) {
+        return {
+            getSubmitButton: getButton,
+            isSubmitButtonReady: (btn: any) => {
+                // Generic click-safety guards. Notion's observed readiness contract is:
+                // disabled iff aria-disabled === "true"; enabled when the attribute is absent.
+                // These guards only avoid clicking invisible/native-disabled/non-hit-testable nodes.
+                const rect = btn.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return false;
+                if (btn.disabled === true) return false;
+                if (window.getComputedStyle(btn).pointerEvents === "none") return false;
+                return isNotionSubmitButtonReady(btn);
+            },
+            clickSubmitButton: (btn: any) => {
+                btn.click();
+            },
+            sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+        };
     }
 
     // ── URL tracking (SPA) ─────────────────────────────────────────────

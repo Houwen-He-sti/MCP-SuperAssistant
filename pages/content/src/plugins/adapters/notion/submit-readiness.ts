@@ -5,7 +5,8 @@ export type SubmitClickResult =
       }
     | {
           ok: false;
-          reason: 'button_not_found' | 'button_disabled' | 'click_failed' | 'aborted';
+          // 'aborted' reserved for future cancellation if needed
+          reason: 'button_not_found' | 'button_disabled' | 'click_failed';
           attempts: number;
           error?: unknown;
       };

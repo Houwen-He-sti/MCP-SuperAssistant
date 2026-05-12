@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import {
     waitForSubmitButtonAndClick,
-    type SubmitClickResult,
     type SubmitContext,
     isNotionSubmitButtonReady,
     type NotionSubmitButtonLike
