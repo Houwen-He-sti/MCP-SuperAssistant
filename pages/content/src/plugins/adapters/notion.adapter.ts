@@ -19,6 +19,7 @@ import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../compo
 const BRIDGE_PROMPT = wrapWithSystemPromptTag(assembleNotionBridgePrompt());
 
 import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
+import { waitForSubmitButtonAndClick, isNotionSubmitButtonReady } from './notion/submit-readiness.js';
 
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
@@ -362,69 +363,66 @@ export class NotionAdapter extends BaseAdapterPlugin {
      */
     async submitForm(options?: { formElement?: HTMLFormElement }): Promise<boolean> {
         if (!this.isSupported()) {
-            this.context.logger.debug('Not on supported page, skipping submitForm');
+            this.context.logger.debug("Not on supported page, skipping submitForm");
             return false;
         }
 
-        this.context.logger.debug('Attempting to submit Notion AI chat input');
+        this.context.logger.debug("Attempting to submit Notion AI chat input (with polling)");
 
         // Try native agent selectors first, then legacy fallback
         const allSelectors = [
-            ...this.selectors.NATIVE_SUBMIT_BUTTON.split(', '),
-            ...this.selectors.SUBMIT_BUTTON.split(', '),
+            ...this.selectors.NATIVE_SUBMIT_BUTTON.split(", "),
+            ...this.selectors.SUBMIT_BUTTON.split(", "),
         ];
 
-        let submitButton: HTMLElement | null = null;
-        for (const sel of allSelectors) {
-            submitButton = document.querySelector(sel.trim()) as HTMLElement | null;
-            if (submitButton) break;
-        }
-
-        if (!submitButton) {
-            this.context.logger.error('Could not find Notion AI send button');
-            this.emitExecutionFailed('submitForm', 'Send button not found');
-            return false;
-        }
-
-        try {
-            // Check visibility
-            const rect = submitButton.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) {
-                this.context.logger.warn('Notion AI send button is not visible');
-                this.emitExecutionFailed('submitForm', 'Send button is not visible');
-                return false;
+        const getButton = (): HTMLElement | null => {
+            for (const sel of allSelectors) {
+                const btn = document.querySelector(sel.trim()) as HTMLElement | null;
+                if (btn) return btn;
             }
+            return null;
+        };
 
-            // Check disabled state (Notion uses DIV, so check aria-disabled and pointer-events)
-            if (submitButton.getAttribute('aria-disabled') === 'true' ||
-                (submitButton as any).disabled === true ||
-                window.getComputedStyle(submitButton).pointerEvents === 'none') {
-                this.context.logger.warn('Notion AI send button is disabled');
-                this.emitExecutionFailed('submitForm', 'Send button is disabled');
-                return false;
-            }
+        const result = await waitForSubmitButtonAndClick({
+            getSubmitButton: getButton,
+            isSubmitButtonReady: (btn) => {
+                const rect = btn.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return false;
+                if ((btn as any).disabled === true) return false;
+                if (window.getComputedStyle(btn).pointerEvents === "none") return false;
+                return isNotionSubmitButtonReady(btn);
+            },
+            clickSubmitButton: (btn) => {
+                btn.click();
+            },
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        }, {
+            maxAttempts: 50,
+            intervalMs: 100, // Waits up to 5s total
+        });
 
-            submitButton.click();
-
+        if (result.ok) {
             // Increment conversation count after successful submit on native agent
             if (this.isNativeAiAgent()) {
                 this.conversationMessageCount++;
             }
 
-            this.emitExecutionCompleted('submitForm', {
-                formElement: options?.formElement?.tagName || 'unknown',
+            this.emitExecutionCompleted("submitForm", {
+                formElement: options?.formElement?.tagName || "unknown",
             }, {
                 success: true,
-                method: 'submitButton.click',
+                method: "submitButton.click",
                 buttonSelector: this.selectors.SUBMIT_BUTTON,
+                attempts: result.attempts,
             });
 
-            this.context.logger.debug('Notion AI chat input submitted successfully');
+            this.context.logger.debug("Notion AI chat input submitted successfully after " + result.attempts + " attempts");
             return true;
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            this.context.logger.error(`Error submitting Notion AI chat input: ${msg}`);
-            this.emitExecutionFailed('submitForm', msg);
+        } else {
+            const reasonMsg = result.reason === "button_disabled" ? "Send button is disabled or detached" : result.reason === "button_not_found" ? "Send button not found" : "Click failed";
+            const fullMsg = "Could not submit: " + reasonMsg + " (" + result.attempts + " attempts)";
+            this.context.logger.error(fullMsg);
+            this.emitExecutionFailed("submitForm", fullMsg);
             return false;
         }
     }
