@@ -33,6 +33,9 @@ describe('NotionAdapter route functions', () => {
     });
 
     describe('isSupportedPath()', () => {
+        it('should return false for /ai/chat/123 without native input', () => {
+            assert.equal(isSupportedPath('/ai/chat/123', false), false);
+        });
         it('should return false for /ai without native input', () => {
             assert.equal(isSupportedPath('/ai', false), false);
         });
