@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-check-extension.cjs — Check if MCP-SuperAssistant extension detected the jsonl tool call
 const WebSocket = require('ws');
 const http = require('http');

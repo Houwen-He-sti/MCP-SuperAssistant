@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-check-latest.cjs — Check Notion AI's latest response after result injection
 const WebSocket = require('ws');
 const http = require('http');

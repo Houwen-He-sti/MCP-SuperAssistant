@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-submit-result.cjs — Submit the injected MCP result to Notion AI
 const WebSocket = require('ws');
 const http = require('http');

@@ -117,6 +117,30 @@ const limits = {
 };
 ```
 
+## Tested Path Clarification (P1-3)
+
+Phase 1B 测试的是 **AutomationService path (L9+)**，不是 streamToolBridge path (L5)。
+
+### 两条路径的区别
+
+| | AutomationService (L9+) | streamToolBridge (L5) |
+|---|---|---|
+| 触发条件 | Zustand store preferences.autoSubmit = true | stream_cutoff event from scanner |
+| 数据流 | DOM mutation observer → tool execution → result insertion → auto-submit | stream intercept → handler → callTool → insertText |
+| 本测试是否覆盖 | ✅ 是 | ❌ 否 |
+
+### 为什么测 AutomationService
+
+- Phase 1A 已验证 B-route 管道（scanner → execute → event → autoInsert）
+- Phase 1B 增加 autoSubmit = true 后，**AutomationService** 负责观察 DOM mutation 并提交
+- streamToolBridge 是独立代码路径，需要单独的测试（Phase 1B-stream，待定）
+
+### 验证方法
+
+AutomationService 行为通过以下 console log 特征确认：
+- `[AutomationService]` prefix
+- `Auto` / `submit` / `insert` 关键词
+
 ## 测试脚本
 
 `scripts/notion-phase1b-auto-submit.cjs`
@@ -129,7 +153,7 @@ node notion-phase1b-auto-submit.cjs
 ```
 
 前提条件：
-- Chrome 打开 notion.so/ai
+- Chrome 打开 notion.so/agent（注意：不是 /ai 或 /chat）
 - CDP 端口 9222
 - MCP proxy 运行在 3006
 - 扩展已加载

@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-check-result.cjs — Check the MCP tool call result content
 const WebSocket = require('ws');
 const http = require('http');

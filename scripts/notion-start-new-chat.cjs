@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-start-new-chat.cjs — Start new conversation in Notion AI, dismiss overlays
 const WebSocket = require('ws');
 const http = require('http');

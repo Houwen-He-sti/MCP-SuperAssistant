@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-new-chat.cjs — Click "New Page" button in Notion AI to start a fresh conversation
 // Uses CDP to interact with Notion browser tab
 const WebSocket = require('ws');

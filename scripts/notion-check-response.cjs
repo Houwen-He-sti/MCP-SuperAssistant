@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-check-response.cjs — Check the actual DOM content of Notion AI response
 const WebSocket = require('ws');
 const http = require('http');

@@ -1,3 +1,4 @@
+// Diagnostic helper for Phase 1B investigation. Not part of the canonical regression path.
 // notion-click-insert.cjs — Click the Insert button to re-inject MCP result into conversation
 const WebSocket = require('ws');
 const http = require('http');
