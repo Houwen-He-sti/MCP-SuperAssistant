@@ -29,4 +29,11 @@ export type {
     StreamFunctionCallEvent,
     StreamLifecycleEvent
 } from './types';
+export type {
+    InterceptRequestContext,
+    StreamChunkContent,
+    StreamFormat,
+    StreamProviderAdapter,
+    StreamProviderRegistration
+} from './stream-provider.types';
 
