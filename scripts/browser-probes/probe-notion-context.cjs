@@ -106,21 +106,23 @@ async function probeNotionContext() {
             });
 
             // Build domDivObservation summary (no raw content)
-            const domDivSummary = domDivResult
-                ? {
-                    found: !!domDivResult.domDivFound,
-                    textPresent: !!(domDivResult.context || domDivResult.error),
-                    textLength: domDivResult.domDivFound
-                        ? JSON.stringify(domDivResult).length
-                        : 0,
-                    ok: !!(domDivResult.context && domDivResult.context.ok),
-                    hasContext: !!(domDivResult.context),
-                    pageIdPresent: !!(domDivResult.context && domDivResult.context.page && domDivResult.context.page.id),
-                    workspaceStatus: (domDivResult.context && domDivResult.context.workspace)
-                        ? domDivResult.context.workspace.status || 'unknown'
-                        : 'absent'
+            // Defensive: don't assume specific nested payload shape since
+            // the debug hook writer may change independently.
+            const domDivSummary = (() => {
+                if (!domDivResult) {
+                    return { found: false, textPresent: false, textLength: 0, topLevelKeys: [], hasAnyId: false };
                 }
-                : { found: false, textPresent: false, textLength: 0, ok: false, hasContext: false, pageIdPresent: false, workspaceStatus: 'absent' };
+                const found = !!domDivResult.domDivFound;
+                const textPresent = !!(domDivResult.context || domDivResult.error);
+                const textLength = found ? JSON.stringify(domDivResult).length : 0;
+                const ctx = domDivResult.context;
+                const topLevelKeys = ctx ? Object.keys(ctx) : [];
+                // Check for any ID-like field (defensive: don't assume .page.id vs .page.pageId)
+                const hasAnyId = ctx
+                    ? JSON.stringify(ctx).includes('"id"') || JSON.stringify(ctx).includes('"pageId"') || JSON.stringify(ctx).includes('"uuid"')
+                    : false;
+                return { found, textPresent, textLength, topLevelKeys, hasAnyId };
+            })();
 
             // Redacted target info from first successful result
             let targetInfo = { tabTitlePresent: false, urlRedacted: true, origin: '', pathnamePreview: '' };
