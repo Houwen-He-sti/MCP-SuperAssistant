@@ -112,9 +112,10 @@ async function probeNotionContext() {
                 if (!domDivResult) {
                     return { found: false, textPresent: false, textLength: 0, topLevelKeys: [], hasAnyId: false };
                 }
-                const found = !!domDivResult.domDivFound;
-                const textPresent = !!(domDivResult.context || domDivResult.error);
-                const textLength = found ? JSON.stringify(domDivResult).length : 0;
+                // Defensive found: null/undefined → false; explicit domDivFound===false → false; any other object → true
+                const found = domDivResult != null && domDivResult.domDivFound !== false;
+                const textPresent = !!(domDivResult.context || domDivResult.error || domDivResult.ok);
+                const textLength = domDivResult != null ? JSON.stringify(domDivResult).length : 0;
                 const ctx = domDivResult.context;
                 const topLevelKeys = ctx ? Object.keys(ctx) : [];
                 // Check for any ID-like field (defensive: don't assume .page.id vs .page.pageId)
