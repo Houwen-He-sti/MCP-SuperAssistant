@@ -15,6 +15,20 @@ function delay(ms) {
     return new Promise(r => setTimeout(r, ms));
 }
 
+// Parse CLI args
+const args = process.argv.slice(2);
+let port = 9222;
+let urlFilter = 'notion.so';
+let timeoutMs = 5000;
+let shouldReload = false;
+
+for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port' && args[i + 1]) port = parseInt(args[++i], 10);
+    else if (args[i] === '--url-filter' && args[i + 1]) urlFilter = args[++i];
+    else if (args[i] === '--timeout-ms' && args[i + 1]) timeoutMs = parseInt(args[++i], 10);
+    else if (args[i] === '--reload') shouldReload = true;
+}
+
 /**
  * Observation-only CDP probe for Notion adapter debug hook.
  * 
@@ -24,13 +38,13 @@ function delay(ms) {
  * Does NOT: click, type, submit, inject UI, execute MCP tools.
  * Returns structured diagnostic matrix.
  */
-async function probeNotionContext(port) {
+async function probeNotionContext() {
     try {
         const tabs = await getJSON(`http://127.0.0.1:${port}/json/list`);
-        const notionTab = tabs.find(t => t.url && t.url.includes('notion.so'));
+        const notionTab = tabs.find(t => t.url && t.url.includes(urlFilter));
 
         if (!notionTab) {
-            console.log(JSON.stringify({ error: "No Notion.so tab found." }, null, 2));
+            console.log(JSON.stringify({ error: `No tab found matching filter: ${urlFilter}` }, null, 2));
             process.exit(0);
         }
 
@@ -43,13 +57,14 @@ async function probeNotionContext(port) {
         let loadFired = false;
         let resolved = false;
         let responsesReceived = 0;
+        let probesStarted = false;
 
         function finish() {
             if (resolved) return;
             resolved = true;
             ws.close();
 
-            const successfulContexts = probeResults.filter(r => r.value && r.value.hasGetCurrentNotionContext && r.value.result && r.value.result.ok !== false);
+            const successfulContexts = probeResults.filter(r => r.value && r.value.result && r.value.result.ok === true);
             const debugRootFound = probeResults.some(r => r.value && r.value.hasDebugRoot);
             const contextFunctionFound = probeResults.some(r => r.value && r.value.hasGetCurrentNotionContext);
 
@@ -60,9 +75,22 @@ async function probeNotionContext(port) {
                 }
             });
 
+            // Check for timeouts
+            const respondedContextIds = new Set(probeResults.map(r => r.contextId));
+            contexts.forEach(c => {
+                if (!respondedContextIds.has(c.id)) {
+                    failureKinds.add(`timeout_in_context_${c.id}`);
+                    probeResults.push({
+                        contextId: c.id,
+                        value: { error: "timeout" }
+                    });
+                }
+            });
+
             let targetInfo = { tabTitlePresent: false, urlRedacted: true, origin: "", pathnamePreview: "" };
-            if (probeResults.length > 0 && probeResults[0].value && probeResults[0].value.target) {
-                targetInfo = probeResults[0].value.target;
+            const validResult = probeResults.find(r => r.value && r.value.target);
+            if (validResult) {
+                targetInfo = validResult.value.target;
             }
 
             console.log(JSON.stringify({
@@ -73,8 +101,7 @@ async function probeNotionContext(port) {
                 domDivObservation: domDivResult ? {
                     found: true,
                     textPresent: !!domDivResult.context || !!domDivResult.error,
-                    textLength: JSON.stringify(domDivResult).length,
-                    raw: domDivResult
+                    textLength: JSON.stringify(domDivResult).length
                 } : { found: false },
                 executionContexts: contexts.map(c => ({
                     id: c.id,
@@ -85,9 +112,10 @@ async function probeNotionContext(port) {
                 })),
                 probeResults: probeResults.map(r => ({
                     contextId: r.contextId,
-                    hasDebugRoot: r.value.hasDebugRoot,
-                    hasGetCurrentNotionContext: r.value.hasGetCurrentNotionContext,
-                    result: r.value.result
+                    hasDebugRoot: r.value ? !!r.value.hasDebugRoot : false,
+                    hasGetCurrentNotionContext: r.value ? !!r.value.hasGetCurrentNotionContext : false,
+                    result: r.value ? r.value.result : { ok: false, error: "no_value" },
+                    error: r.value && r.value.error ? r.value.error : undefined
                 })),
                 summary: {
                     contextsChecked: contexts.length,
@@ -99,37 +127,16 @@ async function probeNotionContext(port) {
             }, null, 2));
         }
 
-        ws.on('open', async () => {
-            ws.send(JSON.stringify({ id: msgId++, method: 'Page.enable' }));
-            ws.send(JSON.stringify({ id: msgId++, method: 'Runtime.enable' }));
-            ws.send(JSON.stringify({ id: msgId++, method: 'Page.reload' }));
-        });
+        function runProbes() {
+            if (probesStarted) return;
+            probesStarted = true;
 
-        ws.on('message', async (data) => {
-            const resp = JSON.parse(data);
-
-            // Track execution contexts
-            if (resp.method === 'Runtime.executionContextCreated') {
-                const ctx = resp.params.context;
-                contexts.push({
-                    id: ctx.id,
-                    origin: ctx.origin || 'unknown',
-                    name: ctx.name || '',
-                    auxData: ctx.auxData || null
-                });
-            }
-
-            // After page load + extension injection delay, run probes
-            if (resp.method === 'Page.loadEventFired' && !loadFired) {
-                loadFired = true;
-                await delay(5000);
-
-                // Probe 1: Check DOM div (visible from any context that can access document)
-                ws.send(JSON.stringify({
-                    id: 1000,
-                    method: 'Runtime.evaluate',
-                    params: {
-                        expression: `(() => {
+            // Probe 1: Check DOM div (visible from any context that can access document)
+            ws.send(JSON.stringify({
+                id: 1000,
+                method: 'Runtime.evaluate',
+                params: {
+                    expression: `(() => {
               const el = document.getElementById('mcp-debug-observation');
               if (el) {
                 try { return JSON.parse(el.innerText); }
@@ -137,12 +144,12 @@ async function probeNotionContext(port) {
               }
               return { domDivFound: false };
             })()`,
-                        returnByValue: true
-                    }
-                }));
+                    returnByValue: true
+                }
+            }));
 
-                // Probe 2: Evaluate in EACH execution context
-                const probeExpression = `(() => {
+            // Probe 2: Evaluate in EACH execution context
+            const probeExpression = `(() => {
           const root = globalThis.__MCP_SUPERASSISTANT_DEBUG__;
           
           let redactedHref = location.href;
@@ -176,8 +183,8 @@ async function probeNotionContext(port) {
           } else {
             try {
               const raw = root.getCurrentNotionContext();
-              if (raw === undefined) {
-                res.result = { ok: false, error: 'getCurrentNotionContext returned undefined' };
+              if (raw === undefined || raw === null) {
+                res.result = { ok: false, error: 'getCurrentNotionContext returned ' + String(raw) };
               } else {
                 if (raw && raw.context && raw.context.page) {
                   const urlObj = new URL(raw.context.page.url);
@@ -194,25 +201,56 @@ async function probeNotionContext(port) {
           return res;
         })()`;
 
-                if (contexts.length === 0) {
-                    finish();
-                    return;
-                }
+            if (contexts.length === 0) {
+                finish();
+                return;
+            }
 
-                for (const ctx of contexts) {
-                    ws.send(JSON.stringify({
-                        id: 2000 + ctx.id,
-                        method: 'Runtime.evaluate',
-                        params: {
-                            expression: probeExpression,
-                            returnByValue: true,
-                            contextId: ctx.id
-                        }
-                    }));
-                }
+            for (const ctx of contexts) {
+                ws.send(JSON.stringify({
+                    id: 2000 + ctx.id,
+                    method: 'Runtime.evaluate',
+                    params: {
+                        expression: probeExpression,
+                        returnByValue: true,
+                        contextId: ctx.id
+                    }
+                }));
+            }
 
-                // Fallback timeout in case some contexts don't respond
-                setTimeout(() => finish(), 5000);
+            // Fallback timeout in case some contexts don't respond
+            setTimeout(() => finish(), timeoutMs);
+        }
+
+        ws.on('open', async () => {
+            ws.send(JSON.stringify({ id: msgId++, method: 'Page.enable' }));
+            ws.send(JSON.stringify({ id: msgId++, method: 'Runtime.enable' }));
+            if (shouldReload) {
+                ws.send(JSON.stringify({ id: msgId++, method: 'Page.reload' }));
+            } else {
+                // Wait a bit for contexts to be reported
+                setTimeout(runProbes, 1000);
+            }
+        });
+
+        ws.on('message', async (data) => {
+            const resp = JSON.parse(data);
+
+            // Track execution contexts
+            if (resp.method === 'Runtime.executionContextCreated') {
+                const ctx = resp.params.context;
+                contexts.push({
+                    id: ctx.id,
+                    origin: ctx.origin || 'unknown',
+                    name: ctx.name || '',
+                    auxData: ctx.auxData || null
+                });
+            }
+
+            // After page load + extension injection delay, run probes
+            if (resp.method === 'Page.loadEventFired' && shouldReload && !loadFired) {
+                loadFired = true;
+                setTimeout(runProbes, 3000);
             }
 
             // Collect DOM div result
@@ -248,4 +286,4 @@ async function probeNotionContext(port) {
     }
 }
 
-probeNotionContext(9222);
+probeNotionContext();
