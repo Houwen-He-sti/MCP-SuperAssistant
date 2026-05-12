@@ -7,29 +7,14 @@
  * @module notion.routes
  */
 
-// ── Legacy path detection ──────────────────────────────────────────
-
-/**
- * Returns true if the pathname belongs to a legacy Notion AI panel
- * (/ai, /ai/*, /agent/*).
- *
- * Note: /chat is NOT a legacy path — it is the native Notion AI chat route.
- */
-export function isLegacyPath(pathname: string): boolean {
-    return pathname === '/ai'
-        || pathname.startsWith('/ai/')
-        || pathname.startsWith('/agent/');
-}
-
 // ── Native AI agent route ──────────────────────────────────────────
 
 /**
  * Returns true if the pathname is a native AI agent route.
- * Native AI agent appears on /chat and regular Notion workspace pages,
- * but not on /ai or /agent/.
+ * Native AI agent appears on /chat and regular Notion workspace pages.
  *
  * /chat is the dedicated native AI chat page (always a native route).
- * Other non-legacy paths require DOM verification by the caller.
+ * Other paths require DOM verification by the caller.
  *
  * IMPORTANT: This only checks the URL. The caller MUST also verify
  * that the native AI DOM elements (e.g. NATIVE_SUBMIT_BUTTON) exist
@@ -38,8 +23,8 @@ export function isLegacyPath(pathname: string): boolean {
 export function isNativeAiRoute(pathname: string): boolean {
     // /chat is the native Notion AI chat page
     if (pathname.startsWith('/chat')) return true;
-    // Any path that is not a legacy path is potentially native
-    return !isLegacyPath(pathname);
+    // Any other path is potentially native (Workspace fallback)
+    return true;
 }
 
 // ── Supported path detection ───────────────────────────────────────
@@ -52,9 +37,6 @@ export function isNativeAiRoute(pathname: string): boolean {
  * @param hasNativeInput - whether a native AI chat input element exists on the page
  */
 export function isSupportedPath(pathname: string, hasNativeInput: boolean): boolean {
-    // Legacy paths (/ai, /agent/) are always supported
-    if (isLegacyPath(pathname)) return true;
-
     // /chat is always supported (native AI chat page)
     if (pathname.startsWith('/chat')) return true;
 
