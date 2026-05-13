@@ -147,6 +147,39 @@ const resultB = extractWorkspaceInfoFromDocument(domB);
 assert(resultB.workspaceName === null, 'returns null workspaceName when not found');
 assert(resultB.confidence === 'not_found', 'confidence is not_found when absent');
 
+// ─── TDD-2: WorkspaceMismatchError + checkWorkspace contract ─────────────
+console.log('\n--- TDD-2: WorkspaceMismatchError + checkWorkspace contract ---');
+const { WorkspaceMismatchError, checkWorkspace } = require('./lib/cdp-preflight.cjs');
+assert(typeof WorkspaceMismatchError === 'function' && WorkspaceMismatchError.prototype instanceof Error,
+    'WorkspaceMismatchError is an Error subclass');
+
+// Case A: match — should not throw
+const matchResult = checkWorkspace('sjzj030的工作空间', 'sjzj030的工作空间');
+assert(matchResult.matched === true, 'checkWorkspace returns matched=true when same workspace');
+assert(matchResult.error === null, 'checkWorkspace returns no error when matched');
+
+// Case B: mismatch — should throw WorkspaceMismatchError
+let threwCorrectly = false;
+try {
+    checkWorkspace('houwen的工作空间', 'sjzj030的工作空间');
+} catch (e) {
+    threwCorrectly = (e instanceof WorkspaceMismatchError) &&
+        e.detected === 'houwen的工作空间' &&
+        e.expected === 'sjzj030的工作空间';
+}
+assert(threwCorrectly, 'checkWorkspace throws WorkspaceMismatchError on mismatch with detected/expected fields');
+
+// Case C: null detected — should throw with detected=null
+let threwNull = false;
+try {
+    checkWorkspace(null, 'sjzj030的工作空间');
+} catch (e) {
+    threwNull = (e instanceof WorkspaceMismatchError) &&
+        e.detected === null &&
+        e.expected === 'sjzj030的工作空间';
+}
+assert(threwNull, 'checkWorkspace throws when detected is null');
+
 // ─── Summary ───────────────────────────────────────────────────────────────
 console.log(`\n${'='.repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);

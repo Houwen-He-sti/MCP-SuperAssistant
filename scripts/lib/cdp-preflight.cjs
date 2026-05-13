@@ -64,6 +64,31 @@ function readWorkspaceConfig() {
 // Read required workspace at module load time
 const REQUIRED_WORKSPACE = process.env.NOTION_WORKSPACE || readWorkspaceConfig() || 'sjzj030的工作空间';
 
+// ─── WorkspaceMismatchError ──────────────────────────────────────────────
+class WorkspaceMismatchError extends Error {
+    constructor(detected, expected) {
+        super(
+            `❌ Wrong workspace: detected "${detected}", required "${expected}".\n` +
+            `   Please switch to "${expected}" in Notion sidebar, then re-run.\n` +
+            `   (AI quota may be exhausted in the wrong workspace)`
+        );
+        this.name = 'WorkspaceMismatchError';
+        this.detected = detected;
+        this.expected = expected;
+    }
+}
+
+// ─── checkWorkspace (pure function, no CDP) ─────────────────────────────
+// Compares detected workspace against expected. Throws WorkspaceMismatchError
+// on mismatch, returns { matched: true, error: null } on match.
+function checkWorkspace(detected, expected) {
+    if (detected && detected.toLowerCase().includes(expected.toLowerCase())) {
+        return { matched: true, error: null };
+    }
+    const err = new WorkspaceMismatchError(detected, expected);
+    throw err;
+}
+
 // ─── Workspace extraction (pure function, testable without CDP) ───────────
 //
 // Extracts the workspace name from a DOM-like root object by walking
@@ -361,4 +386,4 @@ async function preflight(opts = {}) {
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument, WorkspaceMismatchError, checkWorkspace };
