@@ -47,6 +47,7 @@ const {
     repoNameMatches,
     validateEvidenceMetadata,
     buildSmokeBodyContract,
+    buildComposerProbeExpression,
 } = require('./lib/l5b2-writeback-preflight.cjs');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
@@ -610,34 +611,7 @@ async function phase1Preflight(ws, tab) {
 
     // Check 4: Notion AI composer/input presence (empty state)
     const composerCheck = await cdpSend(ws, 'Runtime.evaluate', {
-        expression: `(function() {
-            const input = document.querySelector('div[role="textbox"][contenteditable="true"]')
-                || document.querySelector('[class*="notion-ai"] [contenteditable="true"]');
-            // /chat page may use different submit button selectors
-            const submitSelectors = [
-                '[aria-label="\u53d1\u9001"]',
-                '[aria-label="Send"]',
-                'button[type="submit"]',
-                '[data-testid="chat-send-button"]',
-                '[class*="send-button"]',
-                '[class*="submit"]',
-                'button[aria-label*="send" i]',
-                'button[aria-label*="\u53d1\u9001"]',
-            ];
-            let submitBtn = null;
-            for (const sel of submitSelectors) {
-                submitBtn = document.querySelector(sel);
-                if (submitBtn) break;
-            }
-            return JSON.stringify({
-                hasInput: !!input,
-                inputTag: input ? input.tagName : null,
-                inputContentLen: input ? input.textContent.length : 0,
-                hasSubmitButton: !!submitBtn,
-                submitButtonLabel: submitBtn ? (submitBtn.getAttribute('aria-label') || submitBtn.textContent.substring(0, 30)) : null,
-                inputRole: input ? input.getAttribute('role') : null,
-            });
-        })()`,
+        expression: buildComposerProbeExpression(),
         returnByValue: true,
     });
     const composer = JSON.parse(composerCheck.result.value);
@@ -646,34 +620,7 @@ async function phase1Preflight(ws, tab) {
 
     // Check 4b: Notion AI composer/input presence (with text — submit button may appear only when input has content)
     const composerWithText = await cdpSend(ws, 'Runtime.evaluate', {
-        expression: `(function() {
-            const input = document.querySelector('div[role="textbox"][contenteditable="true"]')
-                || document.querySelector('[class*="notion-ai"] [contenteditable="true"]');
-            if (input) {
-                input.textContent = 'test';
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-            const submitSelectors = [
-                '[aria-label="\u53d1\u9001"]',
-                '[aria-label="Send"]',
-                'button[type="submit"]',
-                '[data-testid="chat-send-button"]',
-                '[class*="send-button"]',
-                '[class*="submit"]',
-                'button[aria-label*="send" i]',
-                'button[aria-label*="\u53d1\u9001"]',
-            ];
-            let submitBtn = null;
-            for (const sel of submitSelectors) {
-                submitBtn = document.querySelector(sel);
-                if (submitBtn) break;
-            }
-            return JSON.stringify({
-                hasSubmitButton: !!submitBtn,
-                submitButtonLabel: submitBtn ? (submitBtn.getAttribute('aria-label') || submitBtn.textContent.substring(0, 30)) : null,
-                submitButtonVisible: submitBtn ? (submitBtn.offsetParent !== null) : false,
-            });
-        })()`,
+        expression: buildComposerProbeExpression({ insertText: 'test' }),
         returnByValue: true,
     });
     const composerTextState = JSON.parse(composerWithText.result.value);

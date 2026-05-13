@@ -376,6 +376,80 @@ function buildCommentOnPrJsonl({ callId, number, body }) {
     return rows.map(row => JSON.stringify(row)).join('\n');
 }
 
+function buildComposerProbeExpression(options = {}) {
+    const insertText = Object.prototype.hasOwnProperty.call(options, 'insertText')
+        ? options.insertText
+        : null;
+    const insertTextLiteral = JSON.stringify(insertText);
+
+    return `(function() {
+        const input = document.querySelector('div[role="textbox"][contenteditable="true"]')
+            || document.querySelector('[class*="notion-ai"] [contenteditable="true"]');
+        if (input && ${insertTextLiteral} !== null) {
+            input.textContent = ${insertTextLiteral};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        function buttonSummary(button) {
+            const aria = button.getAttribute('aria-label') || '';
+            const className = typeof button.className === 'string' ? button.className : '';
+            const text = button.textContent || '';
+            const typeAttr = button.getAttribute('type') || null;
+            const typeProperty = button.type || null;
+            const testId = button.getAttribute('data-testid') || '';
+            const visible = button.offsetHeight > 0 || button.offsetWidth > 0 || button.offsetParent !== null;
+            return {
+                tag: button.tagName,
+                typeAttr,
+                typeProperty,
+                aria,
+                className: className.substring(0, 120),
+                text: text.substring(0, 80),
+                testId,
+                visible,
+            };
+        }
+
+        function submitMatchReason(summary) {
+            const aria = summary.aria.toLowerCase();
+            const className = summary.className.toLowerCase();
+            const testId = summary.testId.toLowerCase();
+            if (summary.typeAttr === 'submit') return 'type_attr_submit';
+            if (summary.typeProperty === 'submit') return 'type_property_submit';
+            if (aria === 'send' || aria === '发送') return 'aria_send';
+            if (aria.includes('send') || aria.includes('发送')) return 'aria_contains_send';
+            if (testId.includes('chat-send-button')) return 'testid_chat_send_button';
+            if (className.includes('send-button') || className.includes('submit')) return 'class_send_or_submit';
+            return null;
+        }
+
+        const buttonCandidates = Array.from(document.querySelectorAll('button')).map(buttonSummary);
+        let submitButton = null;
+        let submitButtonMatchReason = null;
+        for (const candidate of buttonCandidates) {
+            const reason = submitMatchReason(candidate);
+            if (reason) {
+                submitButton = candidate;
+                submitButtonMatchReason = reason;
+                break;
+            }
+        }
+
+        return JSON.stringify({
+            hasInput: !!input,
+            inputTag: input ? input.tagName : null,
+            inputContentLen: input ? input.textContent.length : 0,
+            inputRole: input ? input.getAttribute('role') : null,
+            inputContenteditable: input ? input.getAttribute('contenteditable') : null,
+            hasSubmitButton: !!submitButton,
+            submitButtonLabel: submitButton ? (submitButton.aria || submitButton.text || submitButton.typeProperty) : null,
+            submitButtonVisible: submitButton ? submitButton.visible : false,
+            submitButtonMatchReason,
+            buttonCandidates,
+        });
+    })()`;
+}
+
 module.exports = {
     createMcpBridgeInventorySequence,
     extractToolNamesFromToolsList,
@@ -388,4 +462,5 @@ module.exports = {
     validateEvidenceMetadata,
     buildSmokeBodyContract,
     buildCommentOnPrJsonl,
+    buildComposerProbeExpression,
 };

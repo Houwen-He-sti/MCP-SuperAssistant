@@ -117,7 +117,7 @@ const stopBtn = document.querySelector('[aria-label="停止"], [aria-label="Stop
 
 **重要**：
 - `/agent/` 路由已废弃，当前有效路由是 `/chat` 和 `/ai`
-- 提交按钮 `button[type="submit"]` 没有 `aria-label`，只能通过 `type` 属性选择
+- 提交按钮没有 `aria-label`，而且可能没有 `type` attribute；DOM property `button.type` 仍会返回默认值 `submit`。因此 selector probe 不能只用 `button[type="submit"]`，必须枚举 `document.querySelectorAll('button')` 后检查 `button.type === "submit"`。
 - Enter 键可以作为提交的 fallback
 
 ### 2.3 CDP WebSocket 通信模式

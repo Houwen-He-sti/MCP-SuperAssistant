@@ -24,6 +24,7 @@ const {
     validateEvidenceMetadata,
     buildSmokeBodyContract,
     buildCommentOnPrJsonl,
+    buildComposerProbeExpression,
 } = require('./lib/l5b2-writeback-preflight.cjs');
 const fs = require('fs');
 const path = require('path');
@@ -319,6 +320,73 @@ assert(observationScript.includes('classifyPhase1Verdict({'), 'observation scrip
 assert(!observationScript.includes("let preflightLevel = 'PREFLIGHT_OK'"), 'observation script no longer starts Phase 1 from PREFLIGHT_OK');
 assert(!observationScript.includes('repoMatches: true'), 'observation script does not hard-code repoMatches=true');
 assert(!observationScript.includes('evidenceContextOk: true'), 'observation script does not hard-code evidenceContextOk=true');
+
+console.log('\n--- L5B-2 TDD: composer probe expression ---');
+function runComposerProbeExpression(expression, fakeDocument) {
+    const vm = require('vm');
+    const sandbox = {
+        document: fakeDocument,
+        Event: function Event(type, options) {
+            this.type = type;
+            this.options = options || {};
+        },
+        JSON,
+        Array,
+    };
+    return JSON.parse(vm.runInNewContext(expression, sandbox));
+}
+
+function fakeButton(attrs = {}) {
+    return {
+        tagName: 'BUTTON',
+        type: attrs.typeProperty || 'button',
+        textContent: attrs.textContent || '',
+        className: attrs.className || '',
+        offsetHeight: attrs.visible === false ? 0 : 10,
+        offsetWidth: attrs.visible === false ? 0 : 10,
+        offsetParent: attrs.visible === false ? null : {},
+        getAttribute(name) {
+            if (name === 'type') return attrs.typeAttr || null;
+            if (name === 'aria-label') return attrs.ariaLabel || null;
+            if (name === 'data-testid') return attrs.testId || null;
+            return null;
+        },
+    };
+}
+
+function fakeInput() {
+    return {
+        tagName: 'DIV',
+        textContent: '',
+        className: '',
+        getAttribute(name) {
+            if (name === 'role') return 'textbox';
+            if (name === 'contenteditable') return 'true';
+            return null;
+        },
+        dispatchEvent() {},
+    };
+}
+
+const buttonPropertyOnlyDoc = {
+    input: fakeInput(),
+    buttons: [fakeButton({ typeProperty: 'submit', typeAttr: null })],
+    querySelector(selector) {
+        if (selector.includes('role="textbox"')) return this.input;
+        return null;
+    },
+    querySelectorAll(selector) {
+        return selector === 'button' ? this.buttons : [];
+    },
+};
+const propertyOnlyProbe = runComposerProbeExpression(buildComposerProbeExpression(), buttonPropertyOnlyDoc);
+assert(propertyOnlyProbe.hasInput, 'composer probe detects contenteditable input');
+assert(propertyOnlyProbe.hasSubmitButton, 'composer probe detects submit button by button.type property without type attribute');
+assertEqual(propertyOnlyProbe.submitButtonMatchReason, 'type_property_submit', 'composer probe records type_property_submit reason');
+
+const insertProbe = runComposerProbeExpression(buildComposerProbeExpression({ insertText: 'probe' }), buttonPropertyOnlyDoc);
+assertEqual(buttonPropertyOnlyDoc.input.textContent, 'probe', 'composer probe can insert probe text when requested');
+assert(insertProbe.hasSubmitButton, 'composer probe with inserted text still detects submit button');
 
 console.log('\n--- L5B-2 TDD: exact body contract preparation ---');
 const bodyContract = buildSmokeBodyContract({ runId: 'L5B2-OBS-123', reviewer: 'Notion AI' });
