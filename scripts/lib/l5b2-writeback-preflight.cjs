@@ -157,6 +157,17 @@ function parseBridgeWriteInventory(bridgeInfo, expectedTool = DEFAULT_TOOL_NAME)
     };
 }
 
+function repoNameMatches(actual, expected) {
+    if (typeof actual !== 'string' || typeof expected !== 'string') {
+        return false;
+    }
+    const normalize = value => value.trim().toLowerCase();
+    if (!actual.trim() || normalize(actual) === 'unknown') {
+        return false;
+    }
+    return normalize(actual) === normalize(expected);
+}
+
 function firstFailureVerdict(failures) {
     const priority = [
         ['gh_auth_failed', 'GH_AUTH_FAILED'],
@@ -257,8 +268,12 @@ function isSha256(value) {
     return typeof value === 'string' && /^[a-fA-F0-9]{64}$/.test(value);
 }
 
+function isGitCommit(value) {
+    return typeof value === 'string' && /^[a-fA-F0-9]{40}$/.test(value);
+}
+
 function hasText(value) {
-    return typeof value === 'string' && value.trim().length > 0;
+    return typeof value === 'string' && value.trim().length > 0 && value.trim().toLowerCase() !== 'unknown';
 }
 
 function validateRepoMetadata(repo, prefix, failures) {
@@ -266,8 +281,8 @@ function validateRepoMetadata(repo, prefix, failures) {
         failures.push(`${prefix}_missing`);
         return;
     }
-    if (!hasText(repo.branch)) failures.push(`${prefix}.branch_missing`);
-    if (!hasText(repo.commit)) failures.push(`${prefix}.commit_missing`);
+    if (!hasText(repo.branch)) failures.push(`${prefix}.branch_invalid`);
+    if (!isGitCommit(repo.commit)) failures.push(`${prefix}.commit_invalid`);
     if (typeof repo.dirty !== 'boolean') failures.push(`${prefix}.dirty_missing`);
 }
 
@@ -366,6 +381,7 @@ module.exports = {
     extractToolNamesFromToolsList,
     extractBridgeInfoFromToolCallResult,
     parseBridgeWriteInventory,
+    repoNameMatches,
     evaluateWriteGate,
     classifyPhase1Verdict,
     classifyPhase2Verdict,

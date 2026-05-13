@@ -17,6 +17,7 @@ const {
     extractToolNamesFromToolsList,
     extractBridgeInfoFromToolCallResult,
     parseBridgeWriteInventory,
+    repoNameMatches,
     evaluateWriteGate,
     classifyPhase1Verdict,
     classifyPhase2Verdict,
@@ -24,6 +25,8 @@ const {
     buildSmokeBodyContract,
     buildCommentOnPrJsonl,
 } = require('./lib/l5b2-writeback-preflight.cjs');
+const fs = require('fs');
+const path = require('path');
 
 let passed = 0;
 let failed = 0;
@@ -128,6 +131,11 @@ assert(!wrongBucketInventory.ok, 'comment_on_pr outside git_write fails');
 assertIncludes(wrongBucketInventory.failures, 'comment_on_pr_not_write_enabled', 'wrong bucket reports write-enabled failure');
 
 console.log('\n--- L5B-2 TDD: full-mode write gate ---');
+assert(repoNameMatches('Houwen-He-sti/VSCode-Dir', 'Houwen-He-sti/VSCode-Dir'), 'repoNameMatches accepts exact owner/repo');
+assert(repoNameMatches('houwen-he-sti/vscode-dir', 'Houwen-He-sti/VSCode-Dir'), 'repoNameMatches is case-insensitive');
+assert(!repoNameMatches('Houwen-He-sti/MCP-SuperAssistant', 'Houwen-He-sti/VSCode-Dir'), 'repoNameMatches rejects wrong repo');
+assert(!repoNameMatches('unknown', 'Houwen-He-sti/VSCode-Dir'), 'repoNameMatches rejects unknown repo');
+
 const gateOk = evaluateWriteGate({
     ghAuthOk: true,
     bridgeReachable: true,
@@ -290,6 +298,27 @@ assertIncludes(metadataNoHash.failures, 'script_sha256_missing', 'missing script
 const metadataBadMode = validateEvidenceMetadata({ ...validMetadata, mode: 'maybe' });
 assert(!metadataBadMode.ok, 'invalid mode fails metadata validation');
 assertIncludes(metadataBadMode.failures, 'mode_invalid', 'invalid mode failure is explicit');
+
+const metadataUnknownRootCommit = validateEvidenceMetadata({
+    ...validMetadata,
+    root_repo: { ...validMetadata.root_repo, commit: 'unknown' },
+});
+assert(!metadataUnknownRootCommit.ok, 'unknown root repo commit fails metadata validation');
+assertIncludes(metadataUnknownRootCommit.failures, 'root_repo.commit_invalid', 'unknown root commit failure is explicit');
+
+const metadataUnknownBranch = validateEvidenceMetadata({
+    ...validMetadata,
+    mcp_superassistant_repo: { ...validMetadata.mcp_superassistant_repo, branch: 'unknown' },
+});
+assert(!metadataUnknownBranch.ok, 'unknown subrepo branch fails metadata validation');
+assertIncludes(metadataUnknownBranch.failures, 'mcp_superassistant_repo.branch_invalid', 'unknown branch failure is explicit');
+
+console.log('\n--- L5B-2 TDD: actual observation script integration guard ---');
+const observationScript = fs.readFileSync(path.join(__dirname, 'l5b2-obs-mcp-write-back.cjs'), 'utf8');
+assert(observationScript.includes('classifyPhase1Verdict({'), 'observation script uses classifyPhase1Verdict for Phase 1 verdict');
+assert(!observationScript.includes("let preflightLevel = 'PREFLIGHT_OK'"), 'observation script no longer starts Phase 1 from PREFLIGHT_OK');
+assert(!observationScript.includes('repoMatches: true'), 'observation script does not hard-code repoMatches=true');
+assert(!observationScript.includes('evidenceContextOk: true'), 'observation script does not hard-code evidenceContextOk=true');
 
 console.log('\n--- L5B-2 TDD: exact body contract preparation ---');
 const bodyContract = buildSmokeBodyContract({ runId: 'L5B2-OBS-123', reviewer: 'Notion AI' });

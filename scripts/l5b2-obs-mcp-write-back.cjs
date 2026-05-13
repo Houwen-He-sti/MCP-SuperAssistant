@@ -43,6 +43,8 @@ const {
     extractBridgeInfoFromToolCallResult,
     evaluateWriteGate,
     classifyPhase2Verdict,
+    classifyPhase1Verdict,
+    repoNameMatches,
     validateEvidenceMetadata,
     buildSmokeBodyContract,
 } = require('./lib/l5b2-writeback-preflight.cjs');
@@ -58,6 +60,7 @@ const TEST_START_TIME = new Date().toISOString();
 const SCRIPT_PATH = __filename;
 const MCP_SUPERASSISTANT_ROOT = path.resolve(__dirname, '..');
 const ROOT_REPO = path.resolve(MCP_SUPERASSISTANT_ROOT, '..');
+const EXPECTED_REPO = 'Houwen-He-sti/VSCode-Dir';
 
 // ─── CDP send helper ────────────────────────────────────────────────────────
 
@@ -180,6 +183,33 @@ function collectRunMetadata({ targetUrl, endedAt }) {
         started_at: TEST_START_TIME,
         ended_at: endedAt || TEST_START_TIME,
     };
+}
+
+function readCurrentGhRepoName() {
+    try {
+        return execSync('gh repo view --json nameWithOwner --jq .nameWithOwner', {
+            cwd: ROOT_REPO,
+            encoding: 'utf-8',
+            timeout: 10000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+    } catch {
+        return 'unknown';
+    }
+}
+
+function validateCurrentEvidenceContext() {
+    const targetUrl = evidence.runMetadata?.target_url || 'unknown';
+    const metadata = collectRunMetadata({
+        targetUrl,
+        endedAt: new Date().toISOString(),
+    });
+    const validation = validateEvidenceMetadata(metadata);
+    evidence.runMetadata = {
+        ...metadata,
+        validation,
+    };
+    return validation;
 }
 
 // ─── P1-2: Execution Context Enumeration ────────────────────────────────────
@@ -360,14 +390,24 @@ async function checkWriteGate() {
         log('GATE', '  ⏭️  Skipping (bridge not reachable)');
     }
 
+    // Check 4: repo context and evidence metadata must be real, not assumed.
+    log('GATE', 'Check 4: repo/evidence context...');
+    const actualRepo = readCurrentGhRepoName();
+    const repoMatches = repoNameMatches(actualRepo, EXPECTED_REPO);
+    const metadataValidation = validateCurrentEvidenceContext();
+    results.repo = { expected: EXPECTED_REPO, actual: actualRepo, matches: repoMatches };
+    results.evidenceContext = metadataValidation;
+    log('GATE', `  repo: actual=${actualRepo} expected=${EXPECTED_REPO} matches=${repoMatches}`);
+    log('GATE', `  evidence metadata: ${metadataValidation.ok ? 'ok' : `invalid (${metadataValidation.failures.join(', ')})`}`);
+
     const gate = evaluateWriteGate({
         ghAuthOk: results.ghAuth,
         bridgeReachable: results.bridgeReachable,
         mcpSessionOk: results.bridgeSessionOk && results.bridgeToolsListOk,
         toolsListResult,
         bridgeInfo: results.bridgeInfo,
-        repoMatches: true,
-        evidenceContextOk: true,
+        repoMatches,
+        evidenceContextOk: metadataValidation.ok,
     });
 
     results.gateVerdict = gate.verdict;
@@ -652,31 +692,37 @@ async function phase1Preflight(ws, tab) {
     const submitButtonVisible = composerTextState.submitButtonVisible;
     const canSubmit = hasInput && (hasSubmitButtonEmpty || hasSubmitButtonWithText);
 
-    // Determine preflight level
-    let preflightLevel = 'PREFLIGHT_OK';
     const blockers = [];
     const warnings = [];
 
     if (!extActivated) {
-        preflightLevel = 'PREFLIGHT_BLOCKED_NO_EXTENSION';
         blockers.push('Extension DOM injection not detected');
-    } else if (!hasInput) {
-        preflightLevel = 'PREFLIGHT_BLOCKED_NO_INPUT';
+    }
+    if (!hasInput) {
         blockers.push('Composer input not found');
-    } else if (!canSubmit) {
-        preflightLevel = 'PREFLIGHT_BLOCKED_SUBMIT_SELECTOR';
+    }
+    if (hasInput && !canSubmit) {
         blockers.push('Submit button not detected (empty or with text)');
-    } else if (!submitButtonVisible) {
-        preflightLevel = 'PREFLIGHT_PARTIAL_DOM_ONLY';
+    }
+    if (canSubmit && !submitButtonVisible) {
         warnings.push('Submit button detected but not visible — may need CSS inspection');
     }
 
     // Bridge check result
     if (evidence.phase1.mcpProxy && evidence.phase1.mcpProxy.status === 'error') {
-        if (preflightLevel === 'PREFLIGHT_OK') {
-            preflightLevel = 'PREFLIGHT_PARTIAL_DOM_ONLY';
-        }
         warnings.push('Bridge MCP not reachable (localhost:3006) — Phase 2 blocked');
+    }
+
+    let preflightLevel = classifyPhase1Verdict({
+        domComposerObserved: extActivated && hasInput && canSubmit,
+        bridgeInventoryOk: false,
+    });
+    if (!extActivated) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_NO_EXTENSION';
+    } else if (!hasInput) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_NO_INPUT';
+    } else if (!canSubmit) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_SUBMIT_SELECTOR';
     }
 
     evidence.preflightLevel = preflightLevel;
