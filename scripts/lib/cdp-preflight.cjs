@@ -64,6 +64,48 @@ function readWorkspaceConfig() {
 // Read required workspace at module load time
 const REQUIRED_WORKSPACE = process.env.NOTION_WORKSPACE || readWorkspaceConfig() || 'sjzj030的工作空间';
 
+// ─── Workspace extraction (pure function, testable without CDP) ───────────
+//
+// Extracts the workspace name from a DOM-like root object by walking
+// text nodes. In browser context, pass `document.body`. In unit tests,
+// pass a synthetic object with childNodes tree.
+//
+// Returns: { workspaceName: string | null, confidence: string, matchedText: string | null }
+//
+function extractWorkspaceInfoFromDocument(root) {
+    const WORKSPACE_PATTERN = '的工作空间';
+    if (!root) {
+        return { workspaceName: null, confidence: 'no_root', matchedText: null };
+    }
+
+    // Recursively walk all text nodes in the DOM tree
+    const stack = [root];
+    while (stack.length > 0) {
+        const node = stack.pop();
+        if (!node) continue;
+
+        if (node.nodeType === 3) { // TEXT_NODE
+            const text = (node.textContent || '').trim();
+            if (text.includes(WORKSPACE_PATTERN)) {
+                return {
+                    workspaceName: text,
+                    confidence: 'text_match',
+                    matchedText: text,
+                };
+            }
+        }
+
+        // Push children in reverse order for depth-first traversal
+        if (node.childNodes) {
+            for (let i = node.childNodes.length - 1; i >= 0; i--) {
+                stack.push(node.childNodes[i]);
+            }
+        }
+    }
+
+    return { workspaceName: null, confidence: 'not_found', matchedText: null };
+}
+
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 
 function getTargets() {
@@ -319,4 +361,4 @@ async function preflight(opts = {}) {
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument };

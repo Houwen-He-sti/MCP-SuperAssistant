@@ -111,6 +111,42 @@ delete process.env.WORKSPACE_ROOT;
 delete process.env.NOTION_WORKSPACE;
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
+// ─── TDD-1: extractWorkspaceInfoFromDocument contract ────────────────────
+console.log('\n--- TDD-1: extractWorkspaceInfoFromDocument contract ---');
+// Current production code does NOT export extractWorkspaceInfoFromDocument yet.
+// Test expresses the target contract BEFORE implementation.
+const { extractWorkspaceInfoFromDocument } = require('./lib/cdp-preflight.cjs');
+assert(typeof extractWorkspaceInfoFromDocument === 'function', 'extractWorkspaceInfoFromDocument is exported as a function');
+
+// Helper: build a minimal synthetic DOM that mimics Notion sidebar text node structure.
+function buildSyntheticDocument(workspaceText) {
+    // Minimal fake DOM: a root with a text node inside nested divs
+    // We only need the function to traverse text nodes like in the browser.
+    // Because cjs unit tests run in Node, we provide a minimal adapter object
+    // that exposes TreeWalker semantics the pure function expects.
+    const root = {
+        childNodes: [
+            {
+                nodeType: 3, // TEXT_NODE
+                textContent: workspaceText
+            }
+        ]
+    };
+    return root;
+}
+
+// Case A: workspace text present
+const domA = buildSyntheticDocument('sjzj030的工作空间');
+const resultA = extractWorkspaceInfoFromDocument(domA);
+assert(resultA.workspaceName === 'sjzj030的工作空间', 'returns workspaceName when text present');
+assert(typeof resultA.confidence === 'string' && resultA.confidence.length > 0, 'returns non-empty confidence');
+
+// Case B: no workspace text
+const domB = buildSyntheticDocument('Notion AI');
+const resultB = extractWorkspaceInfoFromDocument(domB);
+assert(resultB.workspaceName === null, 'returns null workspaceName when not found');
+assert(resultB.confidence === 'not_found', 'confidence is not_found when absent');
+
 // ─── Summary ───────────────────────────────────────────────────────────────
 console.log(`\n${'='.repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
