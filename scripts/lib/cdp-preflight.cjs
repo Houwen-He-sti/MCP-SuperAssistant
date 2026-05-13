@@ -160,22 +160,90 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         throw new Error('No Notion tab found in Chrome. Open Notion first.');
     }
 
-    // Check workspace: detect via page title or DOM
-    // 从配置文件读取的 REQUIRED_WORKSPACE 定义了所需的工作空间
-    // 当前检测逻辑：如果标题包含所需工作空间名称的子串，则认为匹配
+    // Check workspace: detect via DOM query (NOT tab title)
+    // Tab title is extension-injected label (e.g., "[notion-tab-0] Notion AI | Notion")
+    // Actual workspace name is in Notion sidebar DOM
     const requiredWorkspaceLower = REQUIRED_WORKSPACE.toLowerCase();
-    const currentTitle = (notionTab.title || '').toLowerCase();
-    const isCorrectWorkspace = currentTitle.includes(requiredWorkspaceLower);
+    let currentWorkspace = null;
+
+    try {
+        const ws = new WebSocket(notionTab.webSocketDebuggerUrl);
+        await new Promise(r => ws.on('open', r));
+
+        // Query DOM for workspace name in sidebar
+        const expr = `
+            (function() {
+                // Strategy 1: Find text nodes containing workspace name pattern
+                const walker = document.createTreeWalker(
+                    document.body,
+                    NodeFilter.SHOW_TEXT,
+                    null,
+                    false
+                );
+                
+                let node;
+                while (node = walker.nextNode()) {
+                    const text = node.textContent.trim();
+                    if (text.includes('的工作空间')) {
+                        return text;
+                    }
+                }
+                
+                // Strategy 2: Find elements with white-space:nowrap in sidebar
+                const sidebar = document.querySelector('.notion-sidebar');
+                if (sidebar) {
+                    const divs = sidebar.querySelectorAll('div');
+                    for (const div of divs) {
+                        const style = window.getComputedStyle(div);
+                        if (style.whiteSpace === 'nowrap') {
+                            const text = div.textContent?.trim();
+                            if (text && text.includes('的工作空间')) {
+                                return text;
+                            }
+                        }
+                    }
+                }
+                
+                return null;
+            })()
+        `;
+
+        const result = await new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), 5000);
+            const handler = (msg) => {
+                const o = JSON.parse(msg);
+                if (o.id === 1) {
+                    clearTimeout(timeout);
+                    ws.removeListener('message', handler);
+                    resolve(o?.result?.result?.value);
+                }
+            };
+            ws.on('message', handler);
+            ws.send(JSON.stringify({
+                id: 1,
+                method: 'Runtime.evaluate',
+                params: { expression: expr, returnByValue: true }
+            }));
+        });
+
+        ws.close();
+        currentWorkspace = result;
+    } catch (err) {
+        console.log(`⚠️  DOM query failed: ${err.message}`);
+    }
+
+    // If DOM query failed, fall back to tab title (less reliable but won't break)
+    if (!currentWorkspace) {
+        console.log('⚠️  Falling back to tab title detection (unreliable)');
+        currentWorkspace = notionTab.title || '';
+    }
+
+    const isCorrectWorkspace = currentWorkspace.toLowerCase().includes(requiredWorkspaceLower);
 
     if (!isCorrectWorkspace) {
-        // 检测到错误的工作空间，抛出明确的错误信息
-        const detectedWorkspace = currentTitle.includes('houwen') ? 'houwen' :
-            currentTitle.includes('sjzj030') ? 'sjzj030' : 'unknown';
-
         throw new Error(
-            `❌ Wrong workspace: detected "${detectedWorkspace}", required "${REQUIRED_WORKSPACE}".\n` +
+            `❌ Wrong workspace: detected "${currentWorkspace}", required "${REQUIRED_WORKSPACE}".\n` +
             `   Please switch to "${REQUIRED_WORKSPACE}" in Notion sidebar, then re-run.\n` +
-            `   Current page title: ${notionTab.title}\n` +
             `   (AI quota may be exhausted in the wrong workspace)`
         );
     }
