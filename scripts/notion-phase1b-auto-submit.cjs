@@ -18,10 +18,10 @@ const TOOL_NONCE = `PHASE1B_TOOL_${Date.now()}`;
 const ACK_MARKER = `PHASE1B_ACK_${Date.now()}`;
 
 const LIMITS = {
-    maxDurationMs: 90_000,
-    maxToolCalls: 3,
-    maxSubmittedFunctionResults: 2,
-    maxAutoSubmitClicks: 2,
+    maxDurationMs: 120_000,
+    maxToolCalls: 15,
+    maxSubmittedFunctionResults: 5,
+    maxAutoSubmitClicks: 5,
 };
 
 const CDP_TIMEOUT_MS = 15_000;
@@ -37,9 +37,11 @@ ${ACK_MARKER}
 
 回复中可以简短说明 echo 结果。`;
 
-// --- Notion tab URL matcher (P0-3: supports /agent/, /ai/, /chat/) ---
+// --- Notion tab URL matcher: only /chat (GPT review P1+P2 fix) ---
 function isNotionAiTarget(url) {
-    return /https:\/\/(www\.)?notion\.so\/(agent|ai|chat)\b/.test(url);
+    // Only match Notion AI chat pages to avoid hijacking regular doc tabs
+    // P2: tighten regex to require /chat followed by query, path, or end
+    return /https:\/\/(www\.)?notion\.so\/chat(?:[\/?#]|$)/.test(url);
 }
 
 function escapeRegExp(s) {
@@ -152,7 +154,7 @@ function checkProxyHealth(port = 3006) {
     await send('Runtime.enable');
     await send('Log.enable');
 
-    // 5. Check extension and MCP connection status (P1-1)
+    // 5. Check extension state (adapted to current store structure)
     const extCheck = await send('Runtime.evaluate', {
         expression: `(function() {
             const key = '${STORE_KEY}';
@@ -161,9 +163,7 @@ function checkProxyHealth(port = 3006) {
             const s = stored.state;
             return JSON.stringify({
                 hasStore: true,
-                connectionStatus: s.connectionStatus || 'unknown',
-                mcpToolCount: (s.mcpToolNames || []).length,
-                hasEcho: (s.mcpToolNames || []).includes('echo'),
+                mcpEnabled: s.mcpEnabled ?? false,
                 autoInsert: s.preferences?.autoInsert,
                 autoSubmit: s.preferences?.autoSubmit,
             });
@@ -177,8 +177,8 @@ function checkProxyHealth(port = 3006) {
         ws.close();
         process.exit(1);
     }
-    if (!extState.hasEcho) {
-        console.log('WARNING: echo tool not in mcpToolNames. Tool calls may fail.');
+    if (!extState.mcpEnabled) {
+        console.log('WARNING: mcpEnabled is false. Tool calls may fail.');
     }
 
     // 6. Verify input textbox + send button exist
@@ -231,10 +231,13 @@ function checkProxyHealth(port = 3006) {
             const obj = JSON.parse(msg);
             if (obj.method === 'Runtime.consoleAPICalled') {
                 const text = (obj.params.args || []).map(a => a.value || a.description || '').join(' ');
+                // Broaden capture: include any extension-related logs
                 if (text.includes('Auto') || text.includes('submit') || text.includes('insert') ||
                     text.includes(TOOL_NONCE) || text.includes(ACK_MARKER) ||
-                    text.includes('adapter') || text.includes('[AutomationService]')) {
-                    allLogs.push(`[${elapsed()}] ${text.substring(0, 200)}`);
+                    text.includes('adapter') || text.includes('[AutomationService]') ||
+                    text.includes('[MCP') || text.includes('[Bridge') || text.includes('tool:') ||
+                    text.includes('execution') || text.includes('result') || text.includes('click')) {
+                    allLogs.push(`[${elapsed()}] ${text.substring(0, 300)}`);
                 }
             }
         } catch { /* ignore parse errors from CDP events */ }
@@ -306,9 +309,9 @@ function checkProxyHealth(port = 3006) {
         await new Promise(r => setTimeout(r, 5000));
         console.log('  Page reloaded.');
 
-        // Navigate to fresh Notion AI chat (P0-3: use /agent/)
+        // Navigate to fresh Notion AI chat (use /chat per PR #49 decision)
         console.log('  Navigating to fresh Notion AI chat...');
-        await send('Page.navigate', { url: 'https://www.notion.so/agent' }, 30_000);
+        await send('Page.navigate', { url: 'https://www.notion.so/chat' }, 30_000);
         await new Promise(resolve => {
             const handler = msg => {
                 try {
@@ -362,17 +365,27 @@ function checkProxyHealth(port = 3006) {
         }
         const inputRect = JSON.parse(val(inputInfo));
 
-        // Click to focus
-        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: inputRect.x, y: inputRect.y, button: 'left', clickCount: 1 });
-        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputRect.x, y: inputRect.y, button: 'left', clickCount: 1 });
-        await new Promise(r => setTimeout(r, 300));
-
-        // Select all + insert
-        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
-        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
-        await new Promise(r => setTimeout(r, 200));
-        await send('Input.insertText', { text: fullPrompt });
-        await new Promise(r => setTimeout(r, 1000));
+        // Direct DOM injection via Runtime.evaluate (most reliable for Notion contenteditable)
+        console.log('  Using direct DOM injection for prompt injection...');
+        const injectResult = await send('Runtime.evaluate', {
+            expression: `(function() {
+                const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+                if (!input) return JSON.stringify({ error: 'NO_INPUT' });
+                // Clear existing content
+                input.textContent = '';
+                // Insert the full prompt
+                input.textContent = ${JSON.stringify(fullPrompt)};
+                // Dispatch input event to trigger Notion's internal handlers
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                return JSON.stringify({ length: input.textContent.length });
+            })()`,
+            returnByValue: true,
+        });
+        const injectState = JSON.parse(val(injectResult));
+        console.log(`  Inject result: ${val(injectResult)}`);
+        if (injectState.error) {
+            throw new Error('Direct DOM injection failed — ' + injectState.error);
+        }
 
         // Verify
         const toolNonceEsc = JSON.stringify(TOOL_NONCE);
@@ -387,7 +400,7 @@ function checkProxyHealth(port = 3006) {
         const pasteState = JSON.parse(val(verifyPaste));
         console.log(`  Paste verify: ${val(verifyPaste)}`);
         if (!pasteState.hasToolNonce) {
-            throw new Error('Input.insertText failed — TOOL_NONCE not in input');
+            throw new Error('Direct DOM injection failed — TOOL_NONCE not in input');
         }
 
         // === STEP 4: Submit message ===
