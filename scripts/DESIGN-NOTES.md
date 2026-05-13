@@ -198,6 +198,10 @@ while (Date.now() - startTime < TIMEOUT_MS) {
 - 页面上下文确保 + 工作空间验证 ([`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:155))
 - 完整预检 ([`preflight()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:234))
 - 工作空间配置读取 ([`readWorkspaceConfig()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:30) → [`REQUIRED_WORKSPACE`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:65))
+- 工作空间 DOM 提取纯函数 ([`extractWorkspaceInfoFromDocument()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:128))
+- CDP 表达式生成 seam ([`buildWorkspaceDetectionExpression()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:162))
+- typed workspace guard ([`WorkspaceMismatchError`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:68), [`checkWorkspace()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:84), [`enforceWorkspaceInfo()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:169))
+- polling 状态核心 ([`WorkspaceHealthMonitor`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:96))
 
 **工作空间配置优先级**：
 ```
@@ -210,14 +214,21 @@ NOTION_WORKSPACE 环境变量 > config/workspace.toml [notion].required_workspac
 required_workspace = "sjzj030的工作空间"
 ```
 
-**工作空间检测方式**：通过 CDP `Runtime.evaluate` 查询 Notion 侧边栏 DOM，搜索包含 `的工作空间` 的文本节点。Tab title 是扩展注入的标签（如 `[notion-tab-0] Notion AI | Notion`），不是工作空间标识。
+**工作空间检测方式**：通过 CDP `Runtime.evaluate` 查询 Notion 侧边栏 DOM，运行由 `buildWorkspaceDetectionExpression()` 生成的表达式，并复用 `extractWorkspaceInfoFromDocument(document.body)` 搜索包含 `的工作空间` 的文本节点。Tab title 是扩展注入的标签（如 `[notion-tab-0] Notion AI | Notion`），不是工作空间标识。
 
 DOM 观察证据（[`observe-workspace-dom.cjs`](MCP-SuperAssistant/scripts/observe-workspace-dom.cjs) 发现）：
 ```html
 <div style="color: var(--c-texPri); font-weight: 500; white-space: nowrap; ...">sjzj030的工作空间</div>
 ```
 
-如果 DOM 查询失败，回退到 tab title 检测（不可靠）。如果检测到工作空间不匹配，[`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:171) 会抛出异常并提示用户手动切换。
+如果 DOM 查询失败或未检测到工作空间，workspace guard 会 fail-closed：`ensureAgentPage()` 通过 `enforceWorkspaceInfo()` / `checkWorkspace()` 抛出 `WorkspaceMismatchError`。Tab title 只作为诊断信息保存在错误对象上，不再作为通过 workspace guard 的 fallback。
+
+**TDD contract**：
+- `extractWorkspaceInfoFromDocument(root)` 是无 CDP 依赖的纯提取函数。
+- `buildWorkspaceDetectionExpression()` 返回可直接传给 `Runtime.evaluate({ expression })` 的 IIFE 字符串；测试会在 Node `vm` 中注入最小 `document.body` fixture 执行该表达式。
+- `enforceWorkspaceInfo(workspaceInfo, expected)` 只接受 DOM 检测结果；即使 tab title 含有 expected workspace，`workspaceInfo.workspaceName === null` 也必须 fail-closed。
+- `ensureAgentPage(agentUrl, deps)` 保持原默认调用方式，同时允许测试注入 `getTargets`、`WebSocket`、`sleep` 和 `requiredWorkspace`。fake-CDP wiring 测试覆盖 `Runtime.evaluate` → `workspaceInfo` → `WorkspaceMismatchError` 的生产路径，不需要导航或 reload 真实浏览器。
+- `WorkspaceHealthMonitor` 只负责连续失败计数和 drift 判定；真实 polling 接入仍由后续 consumer 脚本完成。
 
 **使用方式**：
 ```javascript

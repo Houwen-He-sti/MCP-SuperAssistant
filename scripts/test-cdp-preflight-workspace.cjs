@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 let passed = 0;
 let failed = 0;
@@ -228,11 +229,195 @@ monE.recordCheck(null);
 assert(monE.consecutiveFailures === 1, 'null detected counts as failure');
 assert(monE.shouldDriftFail() === true, 'shouldDriftFail returns true when null at threshold');
 
-// ─── Summary ───────────────────────────────────────────────────────────────
-console.log(`\n${'='.repeat(50)}`);
-console.log(`Results: ${passed} passed, ${failed} failed`);
-if (failed > 0) {
-    process.exit(1);
-} else {
-    console.log('All tests passed! ✅');
+// ─── TDD-4a: CDP workspace detection expression seam ─────────────────────
+console.log('\n--- TDD-4a: CDP workspace detection expression seam ---');
+delete process.env.NOTION_WORKSPACE;
+delete process.env.WORKSPACE_ROOT;
+Object.keys(require.cache).forEach(k => {
+    if (k.includes('cdp-preflight')) delete require.cache[k];
+});
+const {
+    buildWorkspaceDetectionExpression,
+    enforceWorkspaceInfo,
+    WorkspaceMismatchError: Tdd4WorkspaceMismatchError,
+} = require('./lib/cdp-preflight.cjs');
+
+assert(typeof buildWorkspaceDetectionExpression === 'function',
+    'buildWorkspaceDetectionExpression is exported');
+assert(typeof enforceWorkspaceInfo === 'function',
+    'enforceWorkspaceInfo is exported');
+
+function evaluateWorkspaceExpression(root) {
+    const expression = buildWorkspaceDetectionExpression();
+    assert(typeof expression === 'string' && expression.trim().length > 0,
+        'buildWorkspaceDetectionExpression returns a non-empty expression string');
+    return vm.runInNewContext(expression, {
+        document: { body: root },
+    });
 }
+
+const exprResultA = evaluateWorkspaceExpression(buildSyntheticDocument('sjzj030的工作空间'));
+assert(exprResultA.workspaceName === 'sjzj030的工作空间',
+    'CDP expression returns workspaceName from document.body');
+assert(exprResultA.confidence === 'text_match',
+    'CDP expression returns text_match confidence');
+
+const multiWorkspaceDom = {
+    childNodes: [
+        { nodeType: 3, textContent: 'sjzj030的工作空间' },
+        { nodeType: 3, textContent: 'houwen的工作空间' },
+    ],
+};
+const exprResultB = evaluateWorkspaceExpression(multiWorkspaceDom);
+assert(exprResultB.workspaceName === 'sjzj030的工作空间',
+    'CDP expression keeps first document-order workspace candidate');
+
+const exprResultC = evaluateWorkspaceExpression(null);
+assert(exprResultC.workspaceName === null,
+    'CDP expression handles missing document.body as no workspace');
+assert(exprResultC.confidence === 'no_root',
+    'CDP expression returns no_root confidence for missing body');
+
+const enforced = enforceWorkspaceInfo(
+    { workspaceName: 'sjzj030的工作空间', confidence: 'text_match' },
+    'sjzj030的工作空间'
+);
+assert(enforced.matched === true, 'enforceWorkspaceInfo returns matched=true on DOM match');
+
+let failClosedOnMissingDom = false;
+try {
+    enforceWorkspaceInfo(
+        {
+            workspaceName: null,
+            confidence: 'not_found',
+            titleObserved: 'sjzj030的工作空间',
+        },
+        'sjzj030的工作空间'
+    );
+} catch (e) {
+    failClosedOnMissingDom = e instanceof Tdd4WorkspaceMismatchError &&
+        e.detected === null &&
+        e.expected === 'sjzj030的工作空间';
+}
+assert(failClosedOnMissingDom,
+    'enforceWorkspaceInfo fails closed when DOM workspace is missing even if title contains expected workspace');
+
+// ─── TDD-4b: ensureAgentPage wiring with fake CDP ─────────────────────────
+console.log('\n--- TDD-4b: ensureAgentPage workspace wiring with fake CDP ---');
+process.env.CDP_PORT = '9';
+Object.keys(require.cache).forEach(k => {
+    if (k.includes('cdp-preflight')) delete require.cache[k];
+});
+
+async function runEnsureAgentPageWiringTests() {
+    const {
+        ensureAgentPage: ensureAgentPageUnderTest,
+        WorkspaceMismatchError: WiringWorkspaceMismatchError,
+    } = require('./lib/cdp-preflight.cjs');
+
+    function createFakeWebSocket(runtimeValue, sentMessages) {
+        return class FakeWebSocket {
+            constructor(url) {
+                this.url = url;
+                this.handlers = {};
+            }
+
+            on(event, handler) {
+                if (event === 'open') {
+                    handler();
+                } else {
+                    this.handlers[event] = handler;
+                }
+                return this;
+            }
+
+            removeListener(event, handler) {
+                if (this.handlers[event] === handler) {
+                    delete this.handlers[event];
+                }
+            }
+
+            send(raw) {
+                const msg = JSON.parse(raw);
+                sentMessages.push(msg);
+                if (msg.method !== 'Runtime.evaluate') {
+                    throw new Error(`Unexpected CDP method in fake websocket: ${msg.method}`);
+                }
+                this.handlers.message(JSON.stringify({
+                    id: msg.id,
+                    result: {
+                        result: {
+                            value: runtimeValue,
+                        },
+                    },
+                }));
+            }
+
+            close() {}
+        };
+    }
+
+    const fakeTargets = [{
+        type: 'page',
+        url: 'https://www.notion.so/ai',
+        title: '[notion-tab-0] Notion AI | Notion',
+        webSocketDebuggerUrl: 'ws://fake-notion-tab',
+    }];
+
+    const successMessages = [];
+    const successPage = await ensureAgentPageUnderTest('https://www.notion.so/chat', {
+        getTargets: async () => fakeTargets,
+        WebSocket: createFakeWebSocket({
+            workspaceName: 'sjzj030的工作空间',
+            confidence: 'text_match',
+            matchedText: 'sjzj030的工作空间',
+        }, successMessages),
+        sleep: async () => {},
+    });
+
+    assert(successPage.workspaceInfo.workspaceName === 'sjzj030的工作空间',
+        'ensureAgentPage returns workspaceInfo from fake CDP result');
+    assert(successMessages.length === 1 && successMessages[0].method === 'Runtime.evaluate',
+        'ensureAgentPage uses Runtime.evaluate for workspace detection');
+
+    const missingMessages = [];
+    let threwMissingWorkspace = false;
+    try {
+        await ensureAgentPageUnderTest('https://www.notion.so/chat', {
+            getTargets: async () => fakeTargets,
+            WebSocket: createFakeWebSocket({
+                workspaceName: null,
+                confidence: 'no_root',
+                matchedText: null,
+            }, missingMessages),
+            sleep: async () => {},
+        });
+    } catch (e) {
+        threwMissingWorkspace = e instanceof WiringWorkspaceMismatchError &&
+            e.detected === null &&
+            e.titleObserved === '[notion-tab-0] Notion AI | Notion' &&
+            e.workspaceInfo?.confidence === 'no_root';
+    }
+    assert(threwMissingWorkspace,
+        'ensureAgentPage fails closed with WorkspaceMismatchError and title diagnostic when DOM workspace is missing');
+}
+
+// ─── Summary ───────────────────────────────────────────────────────────────
+function finish() {
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`Results: ${passed} passed, ${failed} failed`);
+    if (failed > 0) {
+        process.exit(1);
+    } else {
+        console.log('All tests passed! ✅');
+    }
+}
+
+runEnsureAgentPageWiringTests()
+    .then(finish)
+    .catch(err => {
+        console.log(`  ❌ ensureAgentPage fake-CDP wiring test threw: ${err.message}`);
+        failed++;
+        console.error(err.stack || err);
+        finish();
+    });
