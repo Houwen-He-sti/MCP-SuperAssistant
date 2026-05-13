@@ -16,10 +16,8 @@
  *   Phase 1 + 2 (full smoke test):
  *     node l5b2-obs-mcp-write-back.cjs --full
  *
- *   Phase 2 requires BRIDGE_ENABLE_WRITES=true in committee-bridge env.
- *   If running under VS Code Roo, temporarily set in config/mcp-servers.json:
- *     "BRIDGE_ENABLE_WRITES": "true"
- *   Then reconnect the MCP server. Revert after smoke test.
+ *   Phase 2 requires BRIDGE_ENABLE_WRITES=true in the local committee-bridge env.
+ *   Do not commit BRIDGE_ENABLE_WRITES=true to shared config.
  *
  * Environment:
  *   CDP_PORT=9222 (default)
@@ -37,6 +35,14 @@ const http = require('http');
 const { execSync } = require('child_process');
 const { createHash, randomUUID } = require('crypto');
 const { preflight, sleep, getTargets } = require('./lib/cdp-preflight.cjs');
+const {
+    createMcpBridgeInventorySequence,
+    extractToolNamesFromToolsList,
+    extractBridgeInfoFromToolCallResult,
+    evaluateWriteGate,
+    classifyPhase2Verdict,
+    buildSmokeBodyContract,
+} = require('./lib/l5b2-writeback-preflight.cjs');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
 const FULL_MODE = process.argv.includes('--full');
@@ -73,31 +79,9 @@ function cdpSend(ws, method, params = {}) {
 // P1-4: Rich multi-line body exercises: ACK marker, reviewer line, neutralized mention,
 //        code fence, line count — all verifiable.
 
-const TEST_BODY = [
-    `## L5B-2 Pre-Observation Test`,
-    ``,
-    `**Run ID:** \`${RUN_ID}\``,
-    `**ACK:** L5B2-OBS-MCP-001`,
-    `**Reviewer:** @opu-47 (neutralized — actual mention suppressed)`,
-    ``,
-    `### Verification Checklist`,
-    ``,
-    `- [x] ACK marker present`,
-    `- [x] Multi-line body`,
-    `- [x] Code fence below`,
-    ``,
-    `\`\`\`json`,
-    `{`,
-    `  "test": true,`,
-    `  "run_id": "${RUN_ID}",`,
-    `  "source": "l5b2-obs-mcp-write-back.cjs",`,
-    `  "timestamp": "${TEST_START_TIME}"`,
-    `}`,
-    `\`\`\``,
-    ``,
-    `> Line count: 20+ lines — tests multi-line comment body handling.`,
-    `> Author: Opus 4.7 via MCP-SuperAssistant → committee-bridge → GitHub API`,
-].join('\n');
+const TEST_BODY_CONTRACT = buildSmokeBodyContract({ runId: RUN_ID, reviewer: 'Notion AI' });
+const TEST_BODY = TEST_BODY_CONTRACT.body;
+const TEST_BODY_SHA256 = TEST_BODY_CONTRACT.sha256;
 
 // ─── P1-1: Natural language prompt (NO executable JSONL) ────────────────────
 // Instead of embedding JSONL function_call in the user message (which could be
@@ -114,29 +98,7 @@ const TEST_PROMPT = [
     ``,
     `Comment body content:`,
     ``,
-    `## L5B-2 Pre-Observation Test`,
-    ``,
-    `**Run ID:** \`${RUN_ID}\``,
-    `**ACK:** L5B2-OBS-MCP-001`,
-    `**Reviewer:** @opu-47 (neutralized — actual mention suppressed)`,
-    ``,
-    `### Verification Checklist`,
-    ``,
-    `- [x] ACK marker present`,
-    `- [x] Multi-line body`,
-    `- [x] Code fence below`,
-    ``,
-    `\`\`\`json`,
-    `{`,
-    `  "test": true,`,
-    `  "run_id": "${RUN_ID}",`,
-    `  "source": "l5b2-obs-mcp-write-back.cjs",`,
-    `  "timestamp": "${TEST_START_TIME}"`,
-    `}`,
-    `\`\`\``,
-    ``,
-    `> Line count: 20+ lines — tests multi-line comment body handling.`,
-    `> Author: Opus 4.7 via MCP-SuperAssistant → committee-bridge → GitHub API`,
+    TEST_BODY,
 ].join('\n');
 
 // ─── Observation log collector ──────────────────────────────────────────────
@@ -253,6 +215,9 @@ async function checkWriteGate() {
         bridgeWritesEnabled: false,
         commentOnPrExists: false,
         bridgeWorkspaceOk: false,
+        toolNames: [],
+        bridgeInfo: null,
+        gateVerdict: null,
         failures: [],
     };
 
@@ -267,7 +232,6 @@ async function checkWriteGate() {
             results.ghAuth = true;
             log('GATE', '  ✅ gh CLI authenticated');
         } else {
-            results.failures.push('gh auth: not logged in');
             log('GATE', '  ❌ gh CLI not authenticated');
         }
     } catch (err) {
@@ -276,7 +240,6 @@ async function checkWriteGate() {
             results.ghAuth = true;
             log('GATE', '  ✅ gh CLI authenticated');
         } else {
-            results.failures.push(`gh auth failed: ${output.substring(0, 100)}`);
             log('GATE', `  ❌ gh CLI auth failed: ${output.substring(0, 200)}`);
         }
     }
@@ -296,55 +259,56 @@ async function checkWriteGate() {
         log('GATE', `  ✅ MCP proxy responding: ${healthBody.substring(0, 100)}`);
         results.bridgeReachable = true;
     } catch (err) {
-        results.failures.push(`bridge unreachable: ${err.message}`);
         log('GATE', `  ❌ MCP proxy not accessible: ${err.message}`);
     }
 
     // Check 3: MCP JSON-RPC session + tool inventory (fail-closed)
     log('GATE', 'Check 3: MCP JSON-RPC bridge inventory...');
+    let toolsListResult = null;
     if (results.bridgeReachable) {
         try {
-            const bridgeInfo = await mcpJsonRpcCall('get_bridge_info', {});
-            log('GATE', `  Bridge info: version=${bridgeInfo.server_version || 'unknown'} tools=${JSON.stringify(bridgeInfo.tools || [])}`);
+            const inventory = await mcpBridgeInventoryCheck();
+            toolsListResult = inventory.toolsListResult;
+            const bridgeInfo = inventory.bridgeInfo;
+            const toolNames = extractToolNamesFromToolsList(toolsListResult);
+            results.toolNames = toolNames;
+            results.bridgeInfo = bridgeInfo;
+            results.bridgeSessionOk = true;
+            results.bridgeToolsListOk = true;
+            results.bridgeWritesEnabled = bridgeInfo?.writes_enabled === true;
+            results.commentOnPrExists = toolNames.includes('comment_on_pr') &&
+                Array.isArray(bridgeInfo?.tools?.git_write) &&
+                bridgeInfo.tools.git_write.includes('comment_on_pr');
 
-            // Check writes_enabled
-            if (bridgeInfo.writes_enabled === true) {
-                results.bridgeWritesEnabled = true;
-                log('GATE', '  ✅ writes_enabled: true');
-            } else {
-                results.failures.push(`writes_enabled=${bridgeInfo.writes_enabled}`);
-                log('GATE', `  ❌ writes_enabled: ${bridgeInfo.writes_enabled} (need true)`);
-            }
+            log('GATE', `  tools/list: ${JSON.stringify(toolNames)}`);
+            log('GATE', `  Bridge info: version=${bridgeInfo?.version || bridgeInfo?.server_version || 'unknown'} tools.git_write=${JSON.stringify(bridgeInfo?.tools?.git_write || [])}`);
 
-            // Check comment_on_pr in tools
-            const tools = bridgeInfo.tools || [];
-            if (tools.includes('comment_on_pr')) {
-                results.commentOnPrExists = true;
-                log('GATE', '  ✅ comment_on_pr tool available');
-            } else {
-                results.failures.push('comment_on_pr not in tools');
-                log('GATE', `  ❌ comment_on_pr not found in tools: ${JSON.stringify(tools)}`);
-            }
-
-            // Check workspace
             if (bridgeInfo.workspace_root) {
                 results.bridgeWorkspaceOk = true;
                 log('GATE', `  ✅ workspace: ${bridgeInfo.workspace_root}`);
             } else {
                 log('GATE', '  ⚠️  workspace_root not reported');
             }
-
-            results.bridgeSessionOk = true;
-            results.bridgeToolsListOk = true;
         } catch (err) {
-            results.failures.push(`bridge JSON-RPC: ${err.message}`);
             log('GATE', `  ❌ Bridge JSON-RPC failed: ${err.message}`);
-            log('GATE', '     Attempted: initialize → initialized → tools/call get_bridge_info');
+            log('GATE', '     Attempted: initialize → initialized → tools/list → tools/call get_bridge_info');
         }
     } else {
-        results.failures.push('bridge unreachable — skipping JSON-RPC check');
         log('GATE', '  ⏭️  Skipping (bridge not reachable)');
     }
+
+    const gate = evaluateWriteGate({
+        ghAuthOk: results.ghAuth,
+        bridgeReachable: results.bridgeReachable,
+        mcpSessionOk: results.bridgeSessionOk && results.bridgeToolsListOk,
+        toolsListResult,
+        bridgeInfo: results.bridgeInfo,
+        repoMatches: true,
+        evidenceContextOk: true,
+    });
+
+    results.gateVerdict = gate.verdict;
+    results.failures = gate.failures;
 
     // Summary
     log('GATE', '');
@@ -354,8 +318,9 @@ async function checkWriteGate() {
     log('GATE', `  bridge session:   ${results.bridgeSessionOk ? '✅' : '❌ BLOCKER'}`);
     log('GATE', `  writes_enabled:   ${results.bridgeWritesEnabled ? '✅' : '❌ BLOCKER'}`);
     log('GATE', `  comment_on_pr:    ${results.commentOnPrExists ? '✅' : '❌ BLOCKER'}`);
+    log('GATE', `  gate verdict:     ${results.gateVerdict}`);
 
-    const canProceed = results.failures.length === 0;
+    const canProceed = gate.ok;
     if (!canProceed) {
         log('GATE', '');
         log('GATE', `❌ BLOCKER: ${results.failures.length} failure(s) — cannot proceed to Phase 2`);
@@ -369,26 +334,36 @@ async function checkWriteGate() {
 
 // ─── MCP JSON-RPC helper (for bridge inventory check) ────────────────────────
 let _mcpSessionId = null;
-let _mcpRpcId = 0;
 
-function mcpJsonRpcCall(method, params) {
+function parseMcpHttpResponse(data, expectResponse) {
+    const trimmed = data.trim();
+    if (!trimmed && !expectResponse) return {};
+    if (!trimmed) throw new Error('empty MCP response');
+
+    if (trimmed.startsWith('event:') || trimmed.startsWith('data:')) {
+        const dataLines = trimmed
+            .split(/\r?\n/)
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.slice('data:'.length).trim())
+            .filter(Boolean);
+        if (dataLines.length === 0) {
+            if (!expectResponse) return {};
+            throw new Error(`SSE response had no data lines: ${trimmed.substring(0, 200)}`);
+        }
+        return JSON.parse(dataLines[dataLines.length - 1]);
+    }
+
+    return JSON.parse(trimmed);
+}
+
+function mcpPostJsonRpcBody(body, options = {}) {
+    const expectResponse = options.expectResponse !== false;
     return new Promise((resolve, reject) => {
-        const id = ++_mcpRpcId;
-        const body = JSON.stringify({
-            jsonrpc: '2.0',
-            id,
-            method: method === 'initialize' ? 'initialize' : 'tools/call',
-            params: method === 'initialize' ? {
-                protocolVersion: '2024-11-05',
-                capabilities: {},
-                clientInfo: { name: 'l5b2-obs-script', version: 'v3' },
-            } : {
-                name: method,
-                arguments: params,
-            },
-        });
-
-        const headers = { 'Content-Type': 'application/json' };
+        const payload = JSON.stringify(body);
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/event-stream',
+        };
         if (_mcpSessionId) {
             headers['Mcp-Session-Id'] = _mcpSessionId;
         }
@@ -401,7 +376,6 @@ function mcpJsonRpcCall(method, params) {
             headers,
             timeout: 10000,
         }, (res) => {
-            // Capture session ID from response headers
             const sessionId = res.headers['mcp-session-id'];
             if (sessionId) _mcpSessionId = sessionId;
 
@@ -409,39 +383,51 @@ function mcpJsonRpcCall(method, params) {
             res.on('data', c => data += c);
             res.on('end', () => {
                 try {
-                    const parsed = JSON.parse(data);
+                    const parsed = parseMcpHttpResponse(data, expectResponse);
                     if (parsed.error) reject(new Error(`JSON-RPC error: ${JSON.stringify(parsed.error)}`));
                     else resolve(parsed.result || {});
                 } catch (e) {
-                    reject(new Error(`JSON-RPC parse error: ${data.substring(0, 200)}`));
+                    reject(new Error(`MCP response parse error: ${e.message}; body=${data.substring(0, 200)}`));
                 }
             });
         });
 
         req.on('error', reject);
-        req.write(body);
+        req.write(payload);
         req.end();
     });
 }
 
-async function mcpInitializeAndCall(method, params) {
-    // Step 1: initialize
-    await mcpJsonRpcCall('initialize', {});
-    // Step 2: send initialized notification
-    const notifBody = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
-    await new Promise((resolve, reject) => {
-        const headers = { 'Content-Type': 'application/json' };
-        if (_mcpSessionId) headers['Mcp-Session-Id'] = _mcpSessionId;
-        const req = http.request({
-            hostname: 'localhost', port: 3006, path: '/mcp', method: 'POST',
-            headers, timeout: 5000,
-        }, (res) => { res.resume(); res.on('end', resolve); });
-        req.on('error', reject);
-        req.write(notifBody);
-        req.end();
+async function mcpBridgeInventoryCheck() {
+    _mcpSessionId = null;
+    const sequence = createMcpBridgeInventorySequence({
+        clientName: 'l5b2-obs-script',
+        clientVersion: 'v3',
     });
-    // Step 3: call tool
-    return await mcpJsonRpcCall(method, params);
+    const executed = [];
+    let toolsListResult = null;
+    let bridgeInfo = null;
+
+    for (const step of sequence) {
+        log('GATE', `  MCP ${step.step}: ${step.body.method}`);
+        const result = await mcpPostJsonRpcBody(step.body, { expectResponse: step.kind !== 'notification' });
+        executed.push({ step: step.step, method: step.body.method });
+        if (step.step === 'tools_list') {
+            toolsListResult = result;
+        }
+        if (step.step === 'get_bridge_info') {
+            bridgeInfo = extractBridgeInfoFromToolCallResult(result);
+        }
+    }
+
+    if (!toolsListResult) {
+        throw new Error('tools/list did not return a result');
+    }
+    if (!bridgeInfo) {
+        throw new Error('get_bridge_info did not return bridge info');
+    }
+
+    return { sequence: executed, toolsListResult, bridgeInfo };
 }
 
 // ─── Phase 1: Preflight (enhanced with P1-2 and P1-3) ──────────────────────
@@ -1002,8 +988,8 @@ async function phase2SmokeTest(ws) {
         });
         log('PHASE-2', `Comments after test start (${TEST_START_TIME}): ${postTestComments.length}`);
 
-        // Look for our test comment by RUN_ID (unique per run)
-        const matchingComments = comments.filter(c =>
+        // Look for our test comment by RUN_ID (unique per run), scoped to this run window.
+        const matchingComments = postTestComments.filter(c =>
             c.body && c.body.includes(RUN_ID)
         );
         log('PHASE-2', `Comments matching RUN_ID ${RUN_ID}: ${matchingComments.length}`);
@@ -1035,6 +1021,7 @@ async function phase2SmokeTest(ws) {
             // Compute SHA-256 of the body
             const bodySha256 = createHash('sha256').update(testComment.body).digest('hex');
             log('PHASE-2', `  Body SHA-256: ${bodySha256}`);
+            log('PHASE-2', `  Expected SHA-256: ${TEST_BODY_SHA256}`);
 
             // P1-4: Exact-body verification (multi-line)
             const exactMatch = testComment.body === TEST_BODY;
@@ -1056,13 +1043,14 @@ async function phase2SmokeTest(ws) {
                 author: testComment.author?.login,
                 createdAt: testComment.createdAt,
                 bodySha256,
+                expectedSha256: TEST_BODY_SHA256,
                 exactMatch,
                 bodyLength: testComment.body.length,
                 // P1-4: verify multi-line body
                 lineCount: testComment.body.split('\n').length,
-                hasAckMarker: testComment.body.includes('L5B2-OBS-MCP-001'),
+                hasAckMarker: testComment.body.includes(TEST_BODY_CONTRACT.ack),
                 hasRunId: testComment.body.includes(RUN_ID),
-                hasCodeFence: testComment.body.includes('```json'),
+                hasCodeFence: testComment.body.includes('```text'),
                 // P1-4: mention neutralization verified by unit tests, not here
             };
         }
@@ -1105,24 +1093,37 @@ async function phase2SmokeTest(ws) {
     const hasStructuredFunctionCall = structuredEvents.some(e => e.type === 'assistant_function_call_detected');
     const hasStructuredCallTool = structuredEvents.some(e => e.type === 'call_tool_invoked');
 
-    if (evidence.phase2.prComment?.found && evidence.phase2.prComment?.exactMatch) {
+    const phase2Verdict = classifyPhase2Verdict({
+        submitConfirmed: evidence.phase2.transcriptConfirmed,
+        commentFound: evidence.phase2.prComment?.found === true,
+        exactMatch: evidence.phase2.prComment?.exactMatch === true,
+        hasAssistantFunctionCall: hasStructuredFunctionCall,
+        hasCallToolInvocation: hasStructuredCallTool,
+    });
+
+    if (phase2Verdict === 'PASS') {
         log('PHASE-2', '✅ PASS: End-to-end write-back verified (exact body match)');
         log('PHASE-2', '   Notion AI → MCP-SuperAssistant → committee-bridge → GitHub API');
         log('PHASE-2', `   Comment ID: ${evidence.phase2.prComment.id}`);
         log('PHASE-2', `   RUN_ID: ${RUN_ID}`);
         log('PHASE-2', `   Structured events: ${structuredEvents.length}`);
         evidence.verdict = 'PASS';
-    } else if (evidence.phase2.prComment?.found && !evidence.phase2.prComment?.exactMatch) {
+    } else if (phase2Verdict === 'PARTIAL_EXACT_COMMENT_WITHOUT_TOOL_EVIDENCE') {
+        log('PHASE-2', '⚠️  PARTIAL: Exact comment found but structured tool-call evidence is incomplete');
+        log('PHASE-2', '   This cannot be accepted as full Notion MCP write-back evidence');
+        evidence.verdict = phase2Verdict;
+    } else if (phase2Verdict === 'PARTIAL_BODY_MISMATCH') {
         log('PHASE-2', '⚠️  PARTIAL: Comment found but body mismatch');
         log('PHASE-2', '   Possible: MCP connector modified the body');
-        evidence.verdict = 'PARTIAL';
-    } else if (hasStructuredFunctionCall && !evidence.phase2.prComment?.found) {
+        evidence.verdict = phase2Verdict;
+    } else if (phase2Verdict === 'PARTIAL_TOOL_CALL_WITHOUT_COMMENT') {
         log('PHASE-2', '⚠️  PARTIAL: Structured function_call detected but comment not on PR');
         log('PHASE-2', '   Possible: WRITES_DISABLED, gh auth issue, or wrong PR number');
-        evidence.verdict = 'PARTIAL';
-    } else if (evidence.phase2.submitConfirmed === false) {
+        evidence.verdict = phase2Verdict;
+    } else if (phase2Verdict === 'FAIL_SUBMIT_NOT_CONFIRMED') {
         // Already set above (P1-6 fail-fast)
         log('PHASE-2', '❌ FAIL: Submit not confirmed');
+        evidence.verdict = phase2Verdict;
     } else {
         log('PHASE-2', '❌ FAIL: No structured tool-call evidence detected');
         log('PHASE-2', '   Possible causes:');
@@ -1130,7 +1131,7 @@ async function phase2SmokeTest(ws) {
         log('PHASE-2', '   2. MCP-SuperAssistant stream interceptor not active');
         log('PHASE-2', '   3. committee-bridge tools not injected via bridge prompt');
         log('PHASE-2', `   Structured events captured: ${structuredEvents.length}`);
-        evidence.verdict = 'FAIL';
+        evidence.verdict = phase2Verdict;
     }
 
     return evidence.verdict === 'PASS';
