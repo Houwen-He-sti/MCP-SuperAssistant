@@ -48,6 +48,7 @@ const {
     validateEvidenceMetadata,
     buildSmokeBodyContract,
     buildComposerProbeExpression,
+    classifyExecutionContexts,
 } = require('./lib/l5b2-writeback-preflight.cjs');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
@@ -216,13 +217,10 @@ function validateCurrentEvidenceContext() {
 // ─── P1-2: Execution Context Enumeration ────────────────────────────────────
 // Enumerate CDP execution contexts to distinguish main world / isolated world / extension context.
 
-async function enumerateContexts(ws) {
+async function enumerateContexts(ws, options = {}) {
     log('CTX', 'Enumerating CDP execution contexts...');
 
-    // Enable runtime to receive context events
-    await cdpSend(ws, 'Runtime.enable');
-
-    // Collect executionContextCreated events
+    // Collect executionContextCreated events before resetting Runtime replay.
     const contexts = [];
     const contextHandler = (raw) => {
         const msg = JSON.parse(raw);
@@ -231,6 +229,13 @@ async function enumerateContexts(ws) {
         }
     };
     ws.on('message', contextHandler);
+
+    // Force context replay for long-lived CDP sessions where Runtime may already be enabled.
+    try {
+        await cdpSend(ws, 'Runtime.disable');
+    } catch { /* ignore */ }
+
+    await cdpSend(ws, 'Runtime.enable');
 
     // Trigger a small evaluation to ensure contexts are created
     try {
@@ -245,51 +250,19 @@ async function enumerateContexts(ws) {
     ws.removeListener('message', contextHandler);
 
     // Classify contexts
-    const classified = {
-        main: [],
-        isolated: [],
-        extension: [],
-        other: [],
-    };
+    const classified = classifyExecutionContexts(contexts, {
+        mcpExtensionId: options.extensionId,
+        mcpExtensionName: options.extensionName,
+    });
 
-    for (const ctx of contexts) {
-        const origin = ctx.origin || '';
-        const aux = ctx.auxData || {};
-
-        if (origin.startsWith('chrome-extension://')) {
-            classified.extension.push({
-                id: ctx.id,
-                origin,
-                name: aux.name || 'unknown',
-                frameId: aux.frameId,
-            });
-        } else if (aux.isDefault) {
-            classified.main.push({
-                id: ctx.id,
-                origin,
-                frameId: aux.frameId,
-            });
-        } else if (origin === '' && aux.frameId) {
-            classified.isolated.push({
-                id: ctx.id,
-                origin: '(isolated)',
-                frameId: aux.frameId,
-            });
-        } else {
-            classified.other.push({
-                id: ctx.id,
-                origin,
-                frameId: aux.frameId,
-            });
-        }
-    }
-
+    log('CTX', `Total contexts: ${classified.total}`);
     log('CTX', `Main world contexts: ${classified.main.length}`);
     log('CTX', `Isolated world contexts: ${classified.isolated.length}`);
     log('CTX', `Extension contexts: ${classified.extension.length}`);
     for (const ext of classified.extension) {
         log('CTX', `  Extension: ${ext.name} (${ext.origin}) contextId=${ext.id}`);
     }
+    log('CTX', `MCP-SuperAssistant contexts: ${classified.mcpSuperAssistant.length}`);
     log('CTX', `Other contexts: ${classified.other.length}`);
 
     return classified;
@@ -536,23 +509,28 @@ async function mcpBridgeInventoryCheck() {
 
 // ─── Phase 1: Preflight (enhanced with P1-2 and P1-3) ──────────────────────
 
-async function phase1Preflight(ws, tab) {
+async function phase1Preflight(ws, tab, options = {}) {
     // Wait for SPA to fully render after reload
     await sleep(3000);
 
     log('PHASE-1', '=== Extension & DOM Injection Check (extension-aware) ===');
 
     // P1-2: Enumerate execution contexts
-    const contexts = await enumerateContexts(ws);
+    const contexts = await enumerateContexts(ws, options);
     evidence.phase1.contexts = {
+        total: contexts.total,
         mainCount: contexts.main.length,
         isolatedCount: contexts.isolated.length,
         extensionCount: contexts.extension.length,
-        extensionContexts: contexts.extension.map(e => ({
-            name: e.name,
-            origin: e.origin,
-            id: e.id,
-        })),
+        otherCount: contexts.other.length,
+        mcpSuperAssistantCount: contexts.mcpSuperAssistant.length,
+        main: contexts.main,
+        isolated: contexts.isolated,
+        extension: contexts.extension,
+        other: contexts.other,
+        extensionContexts: contexts.extension,
+        mcpSuperAssistant: contexts.mcpSuperAssistant,
+        mcpSuperAssistantContexts: contexts.mcpSuperAssistant,
     };
 
     // Check 1: Extension DOM injection signals
@@ -1227,7 +1205,10 @@ async function main() {
 
     try {
         // Phase 1: Preflight
-        const { extActivated, canSubmit, contexts, preflightLevel, blockers, warnings } = await phase1Preflight(ws, tab);
+        const { extActivated, canSubmit, contexts, preflightLevel, blockers, warnings } = await phase1Preflight(ws, tab, {
+            extensionId,
+            extensionName,
+        });
 
         if (!FULL_MODE) {
             log('PHASE-1', '');

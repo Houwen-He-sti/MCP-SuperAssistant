@@ -25,6 +25,7 @@ const {
     buildSmokeBodyContract,
     buildCommentOnPrJsonl,
     buildComposerProbeExpression,
+    classifyExecutionContexts,
 } = require('./lib/l5b2-writeback-preflight.cjs');
 const fs = require('fs');
 const path = require('path');
@@ -226,6 +227,53 @@ assertEqual(classifyPhase1Verdict({
     phase2Started: true,
 }), 'SUBMIT_NOT_CONFIRMED_STOP', 'missing transcript confirmation is stop verdict');
 
+console.log('\n--- L5B-2 TDD: CDP execution context classification ---');
+const sampleContexts = [
+    {
+        id: 174,
+        origin: 'https://www.notion.so',
+        name: '',
+        auxData: { isDefault: true, frameId: 'main-frame', type: 'default' },
+    },
+    {
+        id: 199,
+        origin: 'chrome-extension://hkjclekhnaffnhldgpmjnohihjmblbpj',
+        name: 'MCP SuperAssistant',
+        auxData: { name: 'stale-name', frameId: 'main-frame', type: 'isolated' },
+    },
+    {
+        id: 213,
+        origin: 'chrome-extension://hkjclekhnaffnhldgpmjnohihjmblbpj',
+        name: '',
+        auxData: { name: 'MCP SuperAssistant', frameId: 'identity-frame', type: 'isolated' },
+    },
+    {
+        id: 220,
+        origin: '',
+        name: 'Playwright utility',
+        auxData: { frameId: 'main-frame', type: 'isolated' },
+    },
+    {
+        id: 230,
+        origin: 'https://aif.notion.so',
+        name: '',
+        auxData: { frameId: 'aif-frame', type: 'worker' },
+    },
+];
+const contextSummary = classifyExecutionContexts(sampleContexts, {
+    mcpExtensionId: 'hkjclekhnaffnhldgpmjnohihjmblbpj',
+});
+assertEqual(contextSummary.total, 5, 'context classifier records total contexts');
+assertEqual(contextSummary.main.length, 1, 'context classifier records default main worlds');
+assertEqual(contextSummary.extension.length, 2, 'context classifier records extension isolated worlds');
+assertEqual(contextSummary.isolated.length, 1, 'context classifier records blank-origin isolated worlds');
+assertEqual(contextSummary.other.length, 1, 'context classifier records other contexts');
+assertEqual(contextSummary.mcpSuperAssistant.length, 2, 'context classifier records focused MCP-SuperAssistant contexts');
+assertEqual(contextSummary.extension[0].name, 'MCP SuperAssistant', 'context classifier prefers ctx.name over auxData.name');
+assertEqual(contextSummary.extension[0].type, 'isolated', 'context classifier preserves auxData.type');
+assertEqual(contextSummary.mcpSuperAssistant[0].frameId, 'main-frame', 'MCP focused summary preserves frame id');
+assert(contextSummary.mcpSuperAssistant.some(ctx => ctx.frameId === 'identity-frame'), 'MCP focused summary includes identity-frame context');
+
 console.log('\n--- L5B-2 TDD: Phase 2 verdict classification ---');
 assertEqual(classifyPhase2Verdict({
     submitConfirmed: false,
@@ -320,6 +368,19 @@ assert(observationScript.includes('classifyPhase1Verdict({'), 'observation scrip
 assert(!observationScript.includes("let preflightLevel = 'PREFLIGHT_OK'"), 'observation script no longer starts Phase 1 from PREFLIGHT_OK');
 assert(!observationScript.includes('repoMatches: true'), 'observation script does not hard-code repoMatches=true');
 assert(!observationScript.includes('evidenceContextOk: true'), 'observation script does not hard-code evidenceContextOk=true');
+const enumerateStart = observationScript.indexOf('async function enumerateContexts');
+const enumerateEnd = observationScript.indexOf('// ─── P1-3', enumerateStart);
+const enumerateSource = observationScript.slice(enumerateStart, enumerateEnd);
+const listenerIndex = enumerateSource.indexOf("ws.on('message', contextHandler)");
+const runtimeDisableIndex = enumerateSource.indexOf("Runtime.disable");
+const runtimeEnableIndex = enumerateSource.indexOf("Runtime.enable");
+assert(listenerIndex >= 0, 'enumerateContexts installs an executionContextCreated listener');
+assert(runtimeDisableIndex >= 0, 'enumerateContexts calls Runtime.disable to force context replay');
+assert(runtimeEnableIndex >= 0, 'enumerateContexts calls Runtime.enable after Runtime.disable');
+assert(listenerIndex < runtimeDisableIndex, 'enumerateContexts installs listener before Runtime.disable');
+assert(runtimeDisableIndex < runtimeEnableIndex, 'enumerateContexts calls Runtime.disable before Runtime.enable');
+assert(enumerateSource.includes('catch {'), 'enumerateContexts ignores Runtime.disable errors');
+assert(enumerateSource.includes('classifyExecutionContexts(contexts'), 'enumerateContexts uses the pure context classifier');
 
 console.log('\n--- L5B-2 TDD: composer probe expression ---');
 function runComposerProbeExpression(expression, fakeDocument) {

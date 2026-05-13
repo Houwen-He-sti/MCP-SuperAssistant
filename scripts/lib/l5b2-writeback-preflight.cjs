@@ -264,6 +264,57 @@ function classifyPhase2Verdict(facts = {}) {
     return 'FAIL_NO_STRUCTURED_TOOL_CALL';
 }
 
+function normalizeExecutionContext(ctx = {}) {
+    const aux = ctx.auxData || {};
+    return {
+        id: ctx.id,
+        origin: ctx.origin || '',
+        name: ctx.name || aux.name || 'unknown',
+        frameId: aux.frameId,
+        isDefault: aux.isDefault === true,
+        type: aux.type || '',
+    };
+}
+
+function classifyExecutionContexts(contexts = [], options = {}) {
+    const mcpExtensionId = options.mcpExtensionId || '';
+    const mcpExtensionOrigin = mcpExtensionId ? `chrome-extension://${mcpExtensionId}` : '';
+    const mcpExtensionName = options.mcpExtensionName || 'MCP SuperAssistant';
+    const classified = {
+        total: Array.isArray(contexts) ? contexts.length : 0,
+        main: [],
+        isolated: [],
+        extension: [],
+        other: [],
+        mcpSuperAssistant: [],
+    };
+
+    if (!Array.isArray(contexts)) {
+        return classified;
+    }
+
+    for (const ctx of contexts) {
+        const item = normalizeExecutionContext(ctx);
+        if (item.origin.startsWith('chrome-extension://')) {
+            classified.extension.push(item);
+        } else if (item.isDefault) {
+            classified.main.push(item);
+        } else if (item.origin === '' && item.frameId) {
+            classified.isolated.push(item);
+        } else {
+            classified.other.push(item);
+        }
+
+        const matchesMcpOrigin = mcpExtensionOrigin && item.origin === mcpExtensionOrigin;
+        const matchesMcpName = item.name === mcpExtensionName;
+        if (matchesMcpOrigin || matchesMcpName) {
+            classified.mcpSuperAssistant.push(item);
+        }
+    }
+
+    return classified;
+}
+
 function isSha256(value) {
     return typeof value === 'string' && /^[a-fA-F0-9]{64}$/.test(value);
 }
@@ -463,4 +514,5 @@ module.exports = {
     buildSmokeBodyContract,
     buildCommentOnPrJsonl,
     buildComposerProbeExpression,
+    classifyExecutionContexts,
 };
