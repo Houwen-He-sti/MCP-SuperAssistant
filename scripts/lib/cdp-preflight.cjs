@@ -18,9 +18,51 @@
 
 const http = require('http');
 const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
 const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/chat';
+
+// ─── Config: read required_workspace from config/workspace.toml ─────────────
+// TOML parser for simple key = "value" format (no nested objects/arrays needed)
+
+function readWorkspaceConfig() {
+    // Default workspace root: scripts/lib → MCP-SuperAssistant → workspace root
+    const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ||
+        path.resolve(__dirname, '../../..');
+    const CONFIG_PATH = path.join(WORKSPACE_ROOT, 'config', 'workspace.toml');
+
+    try {
+        const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+
+        // Parse [notion] section for required_workspace
+        const notionMatch = content.match(/\[notion\]([\s\S]*?)(?:\n\[|$)/);
+        if (notionMatch) {
+            const workspaceMatch = notionMatch[1].match(/required_workspace\s*=\s*"([^"]+)"/);
+            if (workspaceMatch) {
+                return workspaceMatch[1];
+            }
+        }
+
+        // Fallback to [workspace] section for root
+        const rootMatch = content.match(/\[workspace\]([\s\S]*?)(?:\n\[|$)/);
+        if (rootMatch) {
+            const rootPathMatch = rootMatch[1].match(/root\s*=\s*"([^"]+)"/);
+            if (rootPathMatch) {
+                return path.join(rootPathMatch[1], 'config', 'workspace.toml');
+            }
+        }
+    } catch (err) {
+        // Config file not found or unreadable — use default
+        console.log(`⚠️  Cannot read config/workspace.toml: ${err.message}`);
+    }
+
+    return null;
+}
+
+// Read required workspace at module load time
+const REQUIRED_WORKSPACE = process.env.NOTION_WORKSPACE || readWorkspaceConfig() || 'sjzj030的工作空间';
 
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 
@@ -107,6 +149,9 @@ async function resolveExtensionId(expectedName = 'MCP SuperAssistant') {
 // SPA apps may have visually identical pages on different routes
 // that trigger different API endpoints. Always navigate explicitly.
 //
+// Workspace enforcement: sjzj030 工作空间有 AI 配额，houwen 工作空间配额已用完
+// 强制使用 sjzj030 工作空间进行 L5B-2 测试
+//
 async function ensureAgentPage(agentUrl = AGENT_URL) {
     const targets = await getTargets();
     let notionTab = targets.find(t => t.type === 'page' && t.url?.includes('notion.so'));
@@ -115,12 +160,34 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         throw new Error('No Notion tab found in Chrome. Open Notion first.');
     }
 
+    // Check workspace: detect via page title or DOM
+    // 从配置文件读取的 REQUIRED_WORKSPACE 定义了所需的工作空间
+    // 当前检测逻辑：如果标题包含所需工作空间名称的子串，则认为匹配
+    const requiredWorkspaceLower = REQUIRED_WORKSPACE.toLowerCase();
+    const currentTitle = (notionTab.title || '').toLowerCase();
+    const isCorrectWorkspace = currentTitle.includes(requiredWorkspaceLower) ||
+        currentTitle.includes('sjzj030');  // 兼容旧版标题
+
+    if (!isCorrectWorkspace) {
+        // 检测到错误的工作空间，抛出明确的错误信息
+        const detectedWorkspace = currentTitle.includes('houwen') ? 'houwen' :
+            currentTitle.includes('sjzj030') ? 'sjzj030' : 'unknown';
+
+        throw new Error(
+            `❌ Wrong workspace: detected "${detectedWorkspace}", required "${REQUIRED_WORKSPACE}".\n` +
+            `   Please switch to "${REQUIRED_WORKSPACE}" in Notion sidebar, then re-run.\n` +
+            `   Current page title: ${notionTab.title}\n` +
+            `   (AI quota may be exhausted in the wrong workspace)`
+        );
+    }
+
     // Check if already on chat page (agent page has been deprecated, /chat is the new surface)
     if (notionTab.url.includes('/chat') || notionTab.url.includes('/ai')) {
         return {
             tab: notionTab,
             navigated: false,
             url: notionTab.url,
+            workspace: REQUIRED_WORKSPACE,
         };
     }
 
@@ -185,4 +252,4 @@ async function preflight(opts = {}) {
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE };
