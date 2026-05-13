@@ -32,6 +32,8 @@
  */
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { execSync } = require('child_process');
 const { createHash, randomUUID } = require('crypto');
 const { preflight, sleep, getTargets } = require('./lib/cdp-preflight.cjs');
@@ -41,6 +43,7 @@ const {
     extractBridgeInfoFromToolCallResult,
     evaluateWriteGate,
     classifyPhase2Verdict,
+    validateEvidenceMetadata,
     buildSmokeBodyContract,
 } = require('./lib/l5b2-writeback-preflight.cjs');
 
@@ -52,6 +55,9 @@ const FULL_MODE = process.argv.includes('--full');
 
 const RUN_ID = `L5B2-OBS-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const TEST_START_TIME = new Date().toISOString();
+const SCRIPT_PATH = __filename;
+const MCP_SUPERASSISTANT_ROOT = path.resolve(__dirname, '..');
+const ROOT_REPO = path.resolve(MCP_SUPERASSISTANT_ROOT, '..');
 
 // ─── CDP send helper ────────────────────────────────────────────────────────
 
@@ -107,6 +113,7 @@ const evidence = {
     runId: RUN_ID,
     testStartTime: TEST_START_TIME,
     timestamp: new Date().toISOString(),
+    runMetadata: collectRunMetadata({ targetUrl: null, endedAt: null }),
     phase1: {},
     phase2: null,
     structuredEvents: [],
@@ -117,6 +124,62 @@ const evidence = {
 function log(phase, msg) {
     const line = `[${phase}] ${msg}`;
     console.log(line);
+}
+
+function execGit(cwd, args) {
+    try {
+        return execSync(`git ${args}`, {
+            cwd,
+            encoding: 'utf-8',
+            timeout: 10000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+    } catch {
+        return null;
+    }
+}
+
+function collectRepoMetadata(cwd) {
+    const status = execGit(cwd, 'status --porcelain') || '';
+    return {
+        branch: execGit(cwd, 'branch --show-current') || 'unknown',
+        commit: execGit(cwd, 'rev-parse HEAD') || 'unknown',
+        dirty: status.length > 0,
+        untracked_files_present: status.split(/\r?\n/).some(line => line.startsWith('?? ')),
+    };
+}
+
+function isScriptTracked() {
+    try {
+        execSync(`git ls-files --error-unmatch scripts/l5b2-obs-mcp-write-back.cjs`, {
+            cwd: MCP_SUPERASSISTANT_ROOT,
+            encoding: 'utf-8',
+            timeout: 10000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function collectRunMetadata({ targetUrl, endedAt }) {
+    const scriptContent = fs.readFileSync(SCRIPT_PATH);
+    const scriptSha256 = createHash('sha256').update(scriptContent).digest('hex');
+    return {
+        script_path: path.relative(ROOT_REPO, SCRIPT_PATH).replace(/\\/g, '/'),
+        script_sha256: scriptSha256,
+        script_git_tracked: isScriptTracked(),
+        root_repo: collectRepoMetadata(ROOT_REPO),
+        mcp_superassistant_repo: collectRepoMetadata(MCP_SUPERASSISTANT_ROOT),
+        command: `node ${process.argv.slice(1).join(' ')}`,
+        mode: FULL_MODE ? 'full' : 'phase1',
+        cdp_port: Number(CDP_PORT),
+        target_url: targetUrl || 'unknown',
+        run_id: RUN_ID,
+        started_at: TEST_START_TIME,
+        ended_at: endedAt || TEST_START_TIME,
+    };
 }
 
 // ─── P1-2: Execution Context Enumeration ────────────────────────────────────
@@ -1159,6 +1222,7 @@ async function main() {
     }
 
     const { tab, extensionId, extensionName } = preflightResult;
+    evidence.runMetadata = collectRunMetadata({ targetUrl: tab.url, endedAt: null });
     console.log(`✅ Extension: ${extensionName} (${extensionId})`);
     console.log(`✅ Page: ${tab.url.substring(0, 80)}`);
     console.log('');
@@ -1197,8 +1261,11 @@ async function main() {
     }
 
     // Write evidence file
+    const endedAt = new Date().toISOString();
+    const targetUrl = evidence.runMetadata?.target_url || tab?.url || 'unknown';
+    evidence.runMetadata = collectRunMetadata({ targetUrl, endedAt });
+    evidence.runMetadata.validation = validateEvidenceMetadata(evidence.runMetadata);
     const evidencePath = `l5b2-obs-mcp-write-back-${RUN_ID}.json`;
-    const fs = require('fs');
     fs.writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
     console.log(`\nEvidence written to: ${evidencePath}`);
 
