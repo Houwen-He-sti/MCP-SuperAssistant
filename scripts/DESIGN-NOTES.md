@@ -210,7 +210,14 @@ NOTION_WORKSPACE 环境变量 > config/workspace.toml [notion].required_workspac
 required_workspace = "sjzj030的工作空间"
 ```
 
-如果检测到 Notion 标题与所需工作空间不匹配，[`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:171) 会抛出异常并提示用户手动切换。
+**工作空间检测方式**：通过 CDP `Runtime.evaluate` 查询 Notion 侧边栏 DOM，搜索包含 `的工作空间` 的文本节点。Tab title 是扩展注入的标签（如 `[notion-tab-0] Notion AI | Notion`），不是工作空间标识。
+
+DOM 观察证据（[`observe-workspace-dom.cjs`](MCP-SuperAssistant/scripts/observe-workspace-dom.cjs) 发现）：
+```html
+<div style="color: var(--c-texPri); font-weight: 500; white-space: nowrap; ...">sjzj030的工作空间</div>
+```
+
+如果 DOM 查询失败，回退到 tab title 检测（不可靠）。如果检测到工作空间不匹配，[`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:171) 会抛出异常并提示用户手动切换。
 
 **使用方式**：
 ```javascript
