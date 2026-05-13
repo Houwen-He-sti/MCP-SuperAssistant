@@ -113,8 +113,12 @@ fs.rmSync(tmpDir, { recursive: true, force: true });
 
 // ─── TDD-1: extractWorkspaceInfoFromDocument contract ────────────────────
 console.log('\n--- TDD-1: extractWorkspaceInfoFromDocument contract ---');
-// Current production code does NOT export extractWorkspaceInfoFromDocument yet.
-// Test expresses the target contract BEFORE implementation.
+// Clear module cache to ensure fresh REQUIRED_WORKSPACE from config/workspace.toml
+delete process.env.NOTION_WORKSPACE;
+delete process.env.WORKSPACE_ROOT;
+Object.keys(require.cache).forEach(k => {
+    if (k.includes('cdp-preflight')) delete require.cache[k];
+});
 const { extractWorkspaceInfoFromDocument } = require('./lib/cdp-preflight.cjs');
 assert(typeof extractWorkspaceInfoFromDocument === 'function', 'extractWorkspaceInfoFromDocument is exported as a function');
 
@@ -179,6 +183,50 @@ try {
         e.expected === 'sjzj030的工作空间';
 }
 assert(threwNull, 'checkWorkspace throws when detected is null');
+
+// ─── TDD-3: WorkspaceHealthMonitor (polling core logic) ─────────────────
+console.log('\n--- TDD-3: WorkspaceHealthMonitor polling core ---');
+// Re-require with clean env to ensure REQUIRED_WORKSPACE is from config
+delete process.env.NOTION_WORKSPACE;
+delete process.env.WORKSPACE_ROOT;
+Object.keys(require.cache).forEach(k => {
+    if (k.includes('cdp-preflight')) delete require.cache[k];
+});
+const { WorkspaceHealthMonitor } = require('./lib/cdp-preflight.cjs');
+assert(typeof WorkspaceHealthMonitor === 'function', 'WorkspaceHealthMonitor is exported');
+
+// Case A: record success — shouldDrift returns false
+const monA = new WorkspaceHealthMonitor({ maxConsecutiveFailures: 2 });
+monA.recordCheck('sjzj030的工作空间');
+assert(monA.consecutiveFailures === 0, 'consecutiveFailures is 0 after success');
+assert(monA.shouldDriftFail() === false, 'shouldDriftFail returns false after success');
+
+// Case B: record one failure — shouldDrift returns false (below threshold)
+const monB = new WorkspaceHealthMonitor({ maxConsecutiveFailures: 2 });
+monB.recordCheck('wrong-workspace');
+assert(monB.consecutiveFailures === 1, 'consecutiveFailures is 1 after one failure');
+assert(monB.shouldDriftFail() === false, 'shouldDriftFail returns false with 1 failure');
+
+// Case C: record two consecutive failures — shouldDrift returns true
+const monC = new WorkspaceHealthMonitor({ maxConsecutiveFailures: 2 });
+monC.recordCheck('wrong-1');
+monC.recordCheck('wrong-2');
+assert(monC.consecutiveFailures === 2, 'consecutiveFailures is 2 after two failures');
+assert(monC.shouldDriftFail() === true, 'shouldDriftFail returns true at threshold');
+
+// Case D: success resets failure counter
+const monD = new WorkspaceHealthMonitor({ maxConsecutiveFailures: 3 });
+monD.recordCheck('wrong-1');
+monD.recordCheck('wrong-2');
+monD.recordCheck('sjzj030的工作空间'); // success resets
+assert(monD.consecutiveFailures === 0, 'consecutiveFailures reset after success');
+assert(monD.shouldDriftFail() === false, 'shouldDriftFail returns false after reset');
+
+// Case E: null detected counts as failure
+const monE = new WorkspaceHealthMonitor({ maxConsecutiveFailures: 1 });
+monE.recordCheck(null);
+assert(monE.consecutiveFailures === 1, 'null detected counts as failure');
+assert(monE.shouldDriftFail() === true, 'shouldDriftFail returns true when null at threshold');
 
 // ─── Summary ───────────────────────────────────────────────────────────────
 console.log(`\n${'='.repeat(50)}`);

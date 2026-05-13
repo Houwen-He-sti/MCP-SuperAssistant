@@ -89,6 +89,34 @@ function checkWorkspace(detected, expected) {
     throw err;
 }
 
+// ─── WorkspaceHealthMonitor (polling core, no CDP) ──────────────────────
+// Tracks consecutive workspace mismatch failures for drift detection.
+// Consumer calls recordCheck(detectedWorkspaceName) after each check.
+// shouldDriftFail() returns true when consecutive failures >= threshold.
+class WorkspaceHealthMonitor {
+    constructor(opts = {}) {
+        this.maxConsecutiveFailures = opts.maxConsecutiveFailures || 2;
+        this.consecutiveFailures = 0;
+    }
+
+    recordCheck(detectedWorkspace) {
+        if (!detectedWorkspace) {
+            this.consecutiveFailures++;
+            return;
+        }
+        // Compare against the expected workspace (from config)
+        if (detectedWorkspace.toLowerCase().includes(REQUIRED_WORKSPACE.toLowerCase())) {
+            this.consecutiveFailures = 0; // success resets
+        } else {
+            this.consecutiveFailures++;
+        }
+    }
+
+    shouldDriftFail() {
+        return this.consecutiveFailures >= this.maxConsecutiveFailures;
+    }
+}
+
 // ─── Workspace extraction (pure function, testable without CDP) ───────────
 //
 // Extracts the workspace name from a DOM-like root object by walking
@@ -386,4 +414,4 @@ async function preflight(opts = {}) {
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument, WorkspaceMismatchError, checkWorkspace };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument, WorkspaceMismatchError, checkWorkspace, WorkspaceHealthMonitor };
