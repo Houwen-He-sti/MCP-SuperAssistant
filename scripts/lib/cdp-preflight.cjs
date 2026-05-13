@@ -20,7 +20,7 @@ const http = require('http');
 const WebSocket = require('ws');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
-const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
+const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/chat';
 
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 
@@ -115,8 +115,8 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         throw new Error('No Notion tab found in Chrome. Open Notion first.');
     }
 
-    // Check if already on agent page
-    if (notionTab.url.includes('/agent/')) {
+    // Check if already on chat page (agent page has been deprecated, /chat is the new surface)
+    if (notionTab.url.includes('/chat') || notionTab.url.includes('/ai')) {
         return {
             tab: notionTab,
             navigated: false,
@@ -129,8 +129,20 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
     const ws = new WebSocket(notionTab.webSocketDebuggerUrl);
     await new Promise(r => ws.on('open', r));
     ws.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url: agentUrl } }));
-    await sleep(8000);
+    await sleep(3000);
     ws.close();
+
+    // Reload to trigger content script injection (SPA navigation alone won't inject content scripts)
+    console.log('🔄 Reloading page to trigger content script injection...');
+    const targets2a = await getTargets();
+    const reloadTab = targets2a.find(t => t.type === 'page' && t.url?.includes('notion.so'));
+    if (reloadTab) {
+        const ws2 = new WebSocket(reloadTab.webSocketDebuggerUrl);
+        await new Promise(r => ws2.on('open', r));
+        ws2.send(JSON.stringify({ id: 1, method: 'Page.reload', params: { ignoreCache: false } }));
+        await sleep(8000);
+        ws2.close();
+    }
 
     // Re-fetch to get updated URL/wsUrl
     const targets2 = await getTargets();
@@ -139,7 +151,7 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
     if (!notionTab) {
         throw new Error('Notion tab lost after navigation');
     }
-    if (!notionTab.url.includes('/agent/')) {
+    if (!notionTab.url.includes('/chat') && !notionTab.url.includes('/ai')) {
         throw new Error(`Navigation failed: still on ${notionTab.url}`);
     }
 
