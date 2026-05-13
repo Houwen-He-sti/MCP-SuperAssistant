@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDP 诊断脚本设计笔记 — L5B-2 预观察工作提炼</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --bg-card: #161b22;
+            --bg-code: #1c2128;
+            --bg-highlight: #1f2937;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-dim: #8b949e;
+            --blue: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --orange: #d29922;
+            --purple: #bc8cff;
+            --cyan: #39d353;
+            --pink: #f778ba;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            padding: 3rem 0 2rem;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            background: linear-gradient(135deg, var(--blue), var(--purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 1rem;
+        }
+
+        /* Section */
+        section {
+            margin: 2.5rem 0;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            color: var(--blue);
+            margin-bottom: 1.2rem;
+            padding-left: 0.8rem;
+            border-left: 4px solid var(--blue);
+        }
+
+        h3 {
+            font-size: 1.2rem;
+            color: var(--purple);
+            margin: 1.5rem 0 0.8rem;
+        }
+
+        p {
+            color: var(--text-dim);
+            margin-bottom: 1rem;
+        }
+
+        strong {
+            color: var(--text);
+        }
+
+        /* Diagram Boxes */
+        .diagram {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .diagram-title {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        .diagram pre {
+            background: none;
+            border: none;
+            padding: 0;
+            margin: 0;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.82rem;
+            line-height: 1.6;
+            color: var(--text);
+        }
+
+        /* Flow Diagram */
+        .flow {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin: 1rem 0;
+        }
+
+        .flow-step {
+            background: var(--bg-highlight);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.6rem 1rem;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .flow-step.active {
+            border-color: var(--green);
+            color: var(--green);
+        }
+
+        .flow-step.warning {
+            border-color: var(--orange);
+            color: var(--orange);
+        }
+
+        .flow-step.error {
+            border-color: var(--red);
+            color: var(--red);
+        }
+
+        .flow-arrow {
+            color: var(--text-dim);
+            font-size: 1.2rem;
+        }
+
+        /* Comparison Table */
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .comparison-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.2rem;
+        }
+
+        .comparison-box.bad {
+            border-color: var(--red);
+        }
+
+        .comparison-box.good {
+            border-color: var(--green);
+        }
+
+        .comparison-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-weight: 600;
+            margin-bottom: 0.8rem;
+        }
+
+        .comparison-box.bad .comparison-label {
+            color: var(--red);
+        }
+
+        .comparison-box.good .comparison-label {
+            color: var(--green);
+        }
+
+        /* Code */
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--bg-code);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: var(--green);
+        }
+
+        pre {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.82rem;
+            line-height: 1.6;
+            color: var(--text);
+        }
+
+        /* Insight Cards */
+        .insight-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .insight-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.2rem;
+            transition: border-color 0.2s;
+        }
+
+        .insight-card:hover {
+            border-color: var(--blue);
+        }
+
+        .insight-card h4 {
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .insight-card h4.icon {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .insight-card p {
+            font-size: 0.9rem;
+            color: var(--text-dim);
+            margin-bottom: 0;
+        }
+
+        /* Pipeline Visualization */
+        .pipeline {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            margin: 1.5rem 0;
+        }
+
+        .pipeline-stage {
+            display: flex;
+            align-items: stretch;
+        }
+
+        .pipeline-connector {
+            width: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .pipeline-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid var(--blue);
+            background: var(--bg);
+            flex-shrink: 0;
+            margin-top: 1rem;
+        }
+
+        .pipeline-dot.success {
+            border-color: var(--green);
+            background: var(--green);
+        }
+
+        .pipeline-dot.fail {
+            border-color: var(--red);
+            background: var(--red);
+        }
+
+        .pipeline-line {
+            width: 2px;
+            flex: 1;
+            background: var(--border);
+            min-height: 20px;
+        }
+
+        .pipeline-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.8rem 1.2rem;
+            flex: 1;
+            margin: 0.3rem 0;
+        }
+
+        .pipeline-content h5 {
+            font-size: 0.9rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .pipeline-content p {
+            font-size: 0.82rem;
+            color: var(--text-dim);
+            margin: 0;
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge.reuse {
+            background: rgba(59, 185, 80, 0.15);
+            color: var(--green);
+            border: 1px solid rgba(59, 185, 80, 0.3);
+        }
+
+        .badge.warning {
+            background: rgba(210, 153, 34, 0.15);
+            color: var(--orange);
+            border: 1px solid rgba(210, 153, 34, 0.3);
+        }
+
+        .badge.critical {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--red);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+        }
+
+        /* Rule Box */
+        .rule-box {
+            background: linear-gradient(135deg, rgba(88, 166, 255, 0.1), rgba(188, 140, 255, 0.1));
+            border: 1px solid rgba(88, 166, 255, 0.3);
+            border-radius: 10px;
+            padding: 1.2rem 1.5rem;
+            margin: 1rem 0;
+        }
+
+        .rule-box .rule-title {
+            font-weight: 700;
+            color: var(--blue);
+            margin-bottom: 0.5rem;
+        }
+
+        /* Checklist */
+        .checklist {
+            list-style: none;
+            padding: 0;
+            margin: 1rem 0;
+        }
+
+        .checklist li {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.6rem;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .checklist li:last-child {
+            border-bottom: none;
+        }
+
+        .check-icon {
+            color: var(--green);
+            font-weight: bold;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            margin-top: 0.1rem;
+        }
+
+        .x-icon {
+            color: var(--red);
+            font-weight: bold;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            margin-top: 0.1rem;
+        }
+
+        /* Verdict */
+        .verdict {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border: 1px solid var(--border);
+        }
+
+        .verdict h4 {
+            margin-bottom: 1rem;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 2rem 0;
+        }
+
+        footer {
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <header>
+            <h1>CDP 诊断脚本设计笔记</h1>
+            <p class="subtitle">从 L5B-2 预观察工作提炼的设计哲学、本质性发现和可复用模式</p>
+            <p class="subtitle" style="margin-top: 0.5rem;">Author: Opus 4.7 | Date: 2026-05-13</p>
+        </header>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>1. 核心设计哲学</h2>
+
+            <h3>1.1 两阶段预观察模式</h3>
+            <p>端到端路径涉及多个独立系统，直接测试全路径会遇到大量失败点，难以定位。分离为两个独立阶段：</p>
+
+            <div class="diagram">
+                <div class="diagram-title">Two-Phase Pre-Observation Architecture</div>
+                <pre>
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Phase 1: PREFLIGHT (全自动, 无需配置开关)                               │
+│                                                                         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐          │
+│  │ 扩展发现  │───→│ DOM 检测  │───→│ 输入检查  │───→│ 页面上下文│          │
+│  │ P23/P24  │    │ 注入信号  │    │ 提交按钮  │    │ /chat路由 │          │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘          │
+│       ✅              ✅              ✅               ✅                 │
+│                                                                         │
+│  结论: 基础设施就绪 → 允许进入 Phase 2                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Phase 2: SMOKE TEST (需要 BRIDGE_ENABLE_WRITES=true)                    │
+│                                                                         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐          │
+│  │ 插入 Prompt│───→│ 提交发送  │───→│ 拦截监控  │───→│ PR 验证  │          │
+│  │ content-  │    │ click/   │    │ console  │    │ gh CLI   │          │
+│  │ editable  │    │ Enter    │    │ log 分析 │    │ exact    │          │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘          │
+│                                                                         │
+│  结论: 端到端路径通畅 / 部分通畅 / 失败                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+</pre>
+            </div>
+
+            <div class="insight-grid">
+                <div class="insight-card">
+                    <h4>🎯 为什么分离？</h4>
+                    <p>Phase 1 可无限重复运行（零副作用），Phase 2 产生真实 PR comment。分离后，基础设施问题不会浪费 Phase 2 的配置切换成本。</p>
+                </div>
+                <div class="insight-card">
+                    <h4>🔄 可复用性</h4>
+                    <p>任何涉及多个独立系统（扩展 + SPA + 外部 API）的端到端测试都应采用此模式。</p>
+                </div>
+            </div>
+
+            <h3>1.2 扩展感知的检测策略</h3>
+
+            <div class="comparison">
+                <div class="comparison-box bad">
+                    <div class="comparison-label">❌ 不可靠</div>
+                    <pre><code>// Content scripts 运行在隔离世界
+const mcpClient = window.mcpClient;
+// → undefined (主世界无法访问)</code></pre>
+                </div>
+                <div class="comparison-box good">
+                    <div class="comparison-label">✅ 可靠</div>
+                    <pre><code>// 检测 DOM 注入信号
+document.querySelectorAll('[class*="mcp-"]').length
+document.querySelector('.mcp-popover')
+// → DOM 可见, 不受隔离世界限制</code></pre>
+                </div>
+            </div>
+
+            <div class="rule-box">
+                <div class="rule-title">本质性发现</div>
+                Content scripts 的注入是 <strong>DOM 可见的</strong>，但其 <strong>状态是不可见的</strong>。检测扩展激活只能依赖 DOM 信号，不能依赖全局状态。
+            </div>
+
+            <h3>1.3 运行时扩展发现</h3>
+
+            <div class="diagram">
+                <div class="diagram-title">Extension Discovery Flow</div>
+                <pre>
+┌──────────────────┐
+│  Chrome CDP API   │
+│  /json endpoint  │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐    不匹配     ┌──────────────────┐
+│ 策略 1: Service  │──────────────→│ 策略 2: Extension │
+│ Worker + getMani │              │ Page Title 检查   │
+│ fest().name      │              │                  │
+└────────┬─────────┘              └────────┬─────────┘
+         │ 匹配                            │ 匹配
+         ▼                                ▼
+┌──────────────────┐              ┌──────────────────┐
+│ 返回 extensionId │              │ 返回 extensionId │
+│ ✅ 运行时发现    │              │ ✅ 运行时发现    │
+└──────────────────┘              └──────────────────┘
+
+❌ 旧方式: 硬编码 'hkjclekhnaffnhldgpmjnohihjmblbpj'
+✅ 新方式: 运行时匹配 'MCP SuperAssistant' 名称
+</pre>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>2. 关键技术发现</h2>
+
+            <h3>2.1 SPA 导航不触发 Content Script 注入</h3>
+
+            <div class="diagram">
+                <div class="diagram-title">Chrome Content Script Injection Triggers</div>
+                <pre>
+                    ┌─────────────────────────┐
+                    │  Content Script 注入条件 │
+                    └────────────┬────────────┘
+                                 │
+         ┌───────────────────────┼───────────────────────┐
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+│ ✅ 页面首次加载   │   │ ✅ 扩展安装/更新  │   │ ✅ scripting     │
+│                 │   │                 │   │ .executeScript  │
+└─────────────────┘   └─────────────────┘   └─────────────────┘
+
+         ┌───────────────────────┐
+         │  ❌ SPA 内部导航      │
+         │  (Notion 路由切换)    │
+         │  不触发以上任何条件    │
+         └───────────────────────┘
+
+解决方案: Page.navigate → Page.reload → 等待 8s
+</pre>
+            </div>
+
+            <div class="flow">
+                <div class="flow-step">Page.navigate</div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step warning">sleep(3000)</div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step active">Page.reload</div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step warning">sleep(8000)</div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step active">DOM 检查</div>
+            </div>
+
+            <h3>2.2 Notion /chat 页面 DOM 结构</h3>
+
+            <div class="insight-grid">
+                <div class="insight-card">
+                    <h4>📝 输入框</h4>
+                    <p><code>div[role="textbox"][contenteditable="true"]</code></p>
+                    <p style="margin-top: 0.5rem; color: var(--text-dim);">Notion /chat 使用 contenteditable div，非
+                        textarea</p>
+                </div>
+                <div class="insight-card">
+                    <h4>🔘 提交按钮</h4>
+                    <p><code>button[type="submit"]</code></p>
+                    <p style="margin-top: 0.5rem; color: var(--orange);">⚠️ 无 aria-label！只能通过 type 属性选择</p>
+                </div>
+                <div class="insight-card">
+                    <h4>🔌 MCP 按钮</h4>
+                    <p><code>[aria-label="MCP Settings - Active"]</code></p>
+                    <p style="margin-top: 0.5rem; color: var(--green);">✅ 有 aria-label，可用于验证扩展激活</p>
+                </div>
+                <div class="insight-card">
+                    <h4>⏹️ 停止按钮</h4>
+                    <p><code>[aria-label="停止"]</code> 或 <code>[aria-label="Stop"]</code></p>
+                    <p style="margin-top: 0.5rem; color: var(--text-dim);">用于检测 Notion AI 是否正在生成</p>
+                </div>
+            </div>
+
+            <div class="rule-box">
+                <div class="rule-title">路由废弃提醒</div>
+                <code>/agent/</code> 路由已废弃！当前有效路由：<code>/chat</code> 和 <code>/ai</code>。所有 URL 和路由检查必须更新。
+            </div>
+
+            <h3>2.3 CDP WebSocket 通信模式</h3>
+
+            <div class="diagram">
+                <div class="diagram-title">cdpSend() — 可复用的 CDP 消息封装</div>
+                <pre>
+┌──────────────────┐          WebSocket          ┌──────────────────┐
+│   调用方 (Node)   │◄──────────────────────────►│   Chrome CDP     │
+│                  │                              │                  │
+│  cdpSend(ws,     │  1. 发送 {id, method, params} │                  │
+│    'Runtime.     │  ──────────────────────────→  │                  │
+│    evaluate',    │                              │  2. 执行方法     │
+│    {expression}) │                              │                  │
+│                  │  3. 返回 {id, result}        │                  │
+│                  │  ←──────────────────────────  │                  │
+│                  │                              │                  │
+│  超时: 15s       │  4. 超时 → reject            │                  │
+└──────────────────┘                              └──────────────────┘
+
+关键: 每条消息有唯一 id, Promise 封装请求-响应模式
+</pre>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>3. 错误处理模式</h2>
+
+            <h3>3.1 分层失败检测</h3>
+
+            <div class="pipeline">
+                <div class="pipeline-stage">
+                    <div class="pipeline-connector">
+                        <div class="pipeline-dot"></div>
+                        <div class="pipeline-line"></div>
+                    </div>
+                    <div class="pipeline-content">
+                        <h5>Level 1: 连接失败</h5>
+                        <p>Chrome 未运行、端口未开放 → 明确错误信息</p>
+                    </div>
+                </div>
+                <div class="pipeline-stage">
+                    <div class="pipeline-connector">
+                        <div class="pipeline-dot"></div>
+                        <div class="pipeline-line"></div>
+                    </div>
+                    <div class="pipeline-content">
+                        <h5>Level 2: 扩展未找到</h5>
+                        <p>扩展未安装或名称不匹配 → 检查扩展列表</p>
+                    </div>
+                </div>
+                <div class="pipeline-stage">
+                    <div class="pipeline-connector">
+                        <div class="pipeline-dot"></div>
+                        <div class="pipeline-line"></div>
+                    </div>
+                    <div class="pipeline-content">
+                        <h5>Level 3: 页面未就绪</h5>
+                        <p>需要导航到 Notion AI 页面 → ensureAgentPage()</p>
+                    </div>
+                </div>
+                <div class="pipeline-stage">
+                    <div class="pipeline-connector">
+                        <div class="pipeline-dot"></div>
+                        <div class="pipeline-line"></div>
+                    </div>
+                    <div class="pipeline-content">
+                        <h5>Level 4: DOM 元素缺失</h5>
+                        <p>SPA 未完全渲染 → 等待 reload + sleep</p>
+                    </div>
+                </div>
+                <div class="pipeline-stage">
+                    <div class="pipeline-connector">
+                        <div class="pipeline-dot fail"></div>
+                    </div>
+                    <div class="pipeline-content">
+                        <h5>Level 5: 功能拦截失败</h5>
+                        <p>扩展未激活或 MCP proxy 未运行 → 检查 console</p>
+                    </div>
+                </div>
+            </div>
+
+            <h3>3.2 超时与重试策略</h3>
+
+            <div class="diagram">
+                <div class="diagram-title">Timeout Layers</div>
+                <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│ CDP 消息超时: 15s     ←── cdpSend() 内置                        │
+│                                                                  │
+│ SPA 渲染等待: 8s      ←── Page.reload 后固定等待                  │
+│                                                                  │
+│ Phase 2 响应等待: 60s  ←── 每 3s 检查一次                        │
+│   ├── generating 状态检测 (stop button)                          │
+│   ├── input empty 检测                                           │
+│   └── console 信号监控                                           │
+└─────────────────────────────────────────────────────────────────┘
+</pre>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>4. 可复用组件</h2>
+
+            <div class="insight-grid">
+                <div class="insight-card">
+                    <h4 class="icon">🔧 <code>lib/cdp-preflight.cjs</code></h4>
+                    <ul class="checklist">
+                        <li><span class="check-icon">→</span> <code>resolveExtensionId()</code> — 运行时扩展发现</li>
+                        <li><span class="check-icon">→</span> <code>ensureAgentPage()</code> — 页面上下文确保</li>
+                        <li><span class="check-icon">→</span> <code>preflight()</code> — 完整预检（一步到位）</li>
+                    </ul>
+                </div>
+                <div class="insight-card">
+                    <h4 class="icon">🔍 <code>debug-notion-chat-dom.cjs</code></h4>
+                    <p>一次性 DOM 探针，发现 Notion /chat 页面的按钮和输入框选择器。</p>
+                    <p style="margin-top: 0.5rem;"><span class="badge reuse">可复用</span> Notion DOM 更新时重新运行</p>
+                </div>
+                <div class="insight-card">
+                    <h4 class="icon">🧪 <code>l5b2-obs-mcp-write-back.cjs</code></h4>
+                    <p>两阶段预观察框架，验证 Notion AI → MCP → committee-bridge → GitHub API 端到端路径。</p>
+                    <p style="margin-top: 0.5rem;"><span class="badge reuse">可复用</span> Phase 1 DOM 检测 + Phase 2 console
+                        监控模式</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>5. 常见陷阱与解决方案</h2>
+
+            <div class="insight-grid">
+                <div class="insight-card">
+                    <h4 style="color: var(--red);">⚠️ 导航后 DOM 检查过早</h4>
+                    <p><strong>现象</strong>: 导航后立即检查 DOM，返回空结果</p>
+                    <p><strong>原因</strong>: SPA 需要时间渲染，Content script 注入需要 reload</p>
+                    <p><strong>方案</strong>: 导航 + reload 后等待 8 秒</p>
+                </div>
+                <div class="insight-card">
+                    <h4 style="color: var(--red);">⚠️ Submit 按钮选择器错误</h4>
+                    <p><strong>现象</strong>: <code>[aria-label="Send"]</code> 找不到按钮</p>
+                    <p><strong>原因</strong>: Notion /chat 的 submit 按钮无 aria-label</p>
+                    <p><strong>方案</strong>: 使用 <code>button[type="submit"]</code></p>
+                </div>
+                <div class="insight-card">
+                    <h4 style="color: var(--red);">⚠️ 隔离世界状态访问</h4>
+                    <p><strong>现象</strong>: <code>window.mcpClient</code> 返回 undefined</p>
+                    <p><strong>原因</strong>: Content scripts 运行在隔离世界</p>
+                    <p><strong>方案</strong>: 通过 DOM 注入信号间接检测</p>
+                </div>
+                <div class="insight-card">
+                    <h4 style="color: var(--red);">⚠️ Agent 路由废弃</h4>
+                    <p><strong>现象</strong>: 导航到 <code>/agent/</code> 后找不到 AI 输入框</p>
+                    <p><strong>原因</strong>: Notion 已废弃 <code>/agent/</code> 路由</p>
+                    <p><strong>方案</strong>: 使用 <code>/chat</code> 作为默认路由</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>6. 未来改进方向</h2>
+
+            <div class="diagram">
+                <div class="diagram-title">Roadmap</div>
+                <pre>
+  现在                    短期                      中期
+   │                      │                         │
+   ▼                      ▼                         ▼
+┌──────────┐      ┌──────────────┐        ┌──────────────┐
+│ Phase 2  │      │ 自动化配置    │        │ 多 Provider   │
+│ 需手动   │ ───→ │ 切换          │ ───→   │ 支持          │
+│ 设置开关 │      │ env override  │        │ ChatGPT/      │
+└──────────┘      └──────────────┘        │ Perplexity    │
+                                          └──────────────┘
+
+┌──────────┐      ┌──────────────┐        ┌──────────────┐
+│ 响应检测 │      │ 更精确的      │        │ E2E 回归     │
+│ input空+ │ ───→ │ 完成信号      │ ───→   │ 测试自动化   │
+│ stop消失 │      │ MutationObs  │        │ CI-compatible│
+└──────────┘      └──────────────┘        └──────────────┘
+</pre>
+            </div>
+        </section>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <section>
+            <h2>7. 本轮核心贡献总结</h2>
+
+            <div class="verdict">
+                <h4>📝 Opus 4.7 本轮工作成果</h4>
+                <ul class="checklist">
+                    <li><span class="check-icon">✓</span> <strong>发现 SPA 导航不触发 content script 注入</strong> — 必须 reload +
+                        等待</li>
+                    <li><span class="check-icon">✓</span> <strong>发现 Notion /chat 页面 submit 按钮无 aria-label</strong> — 使用
+                        <code>button[type="submit"]</code></li>
+                    <li><span class="check-icon">✓</span> <strong>建立两阶段预观察模式</strong> — 分离基础设施检查和功能验证</li>
+                    <li><span class="check-icon">✓</span> <strong>封装 CDP 通信模式</strong> — <code>cdpSend()</code> 可复用到所有
+                        CDP 脚本</li>
+                    <li><span class="check-icon">✓</span> <strong>建立运行时扩展发现机制</strong> — 避免硬编码扩展 ID</li>
+                    <li><span class="check-icon">✓</span> <strong>发现 /agent/ 路由已废弃</strong> — 全面更新为 /chat</li>
+                </ul>
+            </div>
+        </section>
+
+        <footer>
+            <p>Author: Opus 4.7 | Generated from DESIGN-NOTES.md | 2026-05-13</p>
+        </footer>
+
+    </div>
+</body>
+
+</html>
