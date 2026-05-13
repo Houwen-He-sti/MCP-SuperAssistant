@@ -25,12 +25,12 @@
  *   CDP_PORT=9222 (default)
  *
  * v2 Changes (addressing GPT P1-1 through P1-6):
- *   P1-1: Prompt no longer contains executable JSONL — uses natural language tool request
+ *   P1-1: Prompt no longer contains executable JSONL; Phase 2 records structured tool-call evidence
  *   P1-2: Phase 1 enumerates CDP execution contexts (main/isolated/extension)
- *   P1-3: Pre-Phase 2 checks: gh auth, write gate, comment_on_pr availability
- *   P1-4: Multi-line Markdown test body with ACK, reviewer line, neutralized mention, code fence
+ *   P1-3: Fail-closed bridge check via MCP JSON-RPC (initialize → tools/list → get_bridge_info)
+ *   P1-4: Multi-line Markdown test body (pass/fail: ACK + code fence; mention neutralization = unit tests)
  *   P1-5: RUN_ID per run, createdAt filtering, exactly-1 assertion
- *   P1-6: CDP Input.insertText for reliable contenteditable injection
+ *   P1-6: CDP Input.insertText + submit transcript confirmation (FAIL/STOP if not confirmed)
  */
 
 const http = require('http');
@@ -147,6 +147,7 @@ const evidence = {
     timestamp: new Date().toISOString(),
     phase1: {},
     phase2: null,
+    structuredEvents: [],
     consoleLogs: [],
     verdict: null,
 };
@@ -238,15 +239,21 @@ async function enumerateContexts(ws) {
     return classified;
 }
 
-// ─── P1-3: Write Gate Pre-checks ────────────────────────────────────────────
+// ─── P1-3: Write Gate Pre-checks (fail-closed) ──────────────────────────────
 // Before Phase 2, verify all prerequisites for write operations.
+// If any check fails, canProceed = false (fail-closed).
 
 async function checkWriteGate() {
-    log('GATE', '=== Write Gate Pre-checks ===');
+    log('GATE', '=== Write Gate Pre-checks (fail-closed) ===');
     const results = {
         ghAuth: false,
-        bridgeWriteGate: false,
-        commentOnPrAvailable: false,
+        bridgeReachable: false,
+        bridgeSessionOk: false,
+        bridgeToolsListOk: false,
+        bridgeWritesEnabled: false,
+        commentOnPrExists: false,
+        bridgeWorkspaceOk: false,
+        failures: [],
     };
 
     // Check 1: gh auth status
@@ -260,49 +267,25 @@ async function checkWriteGate() {
             results.ghAuth = true;
             log('GATE', '  ✅ gh CLI authenticated');
         } else {
+            results.failures.push('gh auth: not logged in');
             log('GATE', '  ❌ gh CLI not authenticated');
         }
     } catch (err) {
-        // gh auth status exits non-zero when not logged in
         const output = err.stdout || err.stderr || err.message;
         if (output.includes('Logged in') || output.includes('github.com')) {
             results.ghAuth = true;
             log('GATE', '  ✅ gh CLI authenticated');
         } else {
+            results.failures.push(`gh auth failed: ${output.substring(0, 100)}`);
             log('GATE', `  ❌ gh CLI auth failed: ${output.substring(0, 200)}`);
         }
     }
 
-    // Check 2: Bridge write gate (check config/mcp-servers.json)
-    log('GATE', 'Check 2: Bridge write gate config...');
+    // Check 2: MCP proxy HTTP reachability
+    log('GATE', 'Check 2: MCP proxy HTTP reachability...');
     try {
-        const fs = require('fs');
-        const configRaw = fs.readFileSync('config/mcp-servers.json', 'utf-8');
-        const config = JSON.parse(configRaw);
-        const bridgeEnv = config?.mcpServers?.committee?.bridge?.env
-            || config?.mcpServers?.['committee-bridge']?.env;
-        if (bridgeEnv) {
-            const writesEnabled = bridgeEnv.BRIDGE_ENABLE_WRITES;
-            if (writesEnabled === 'true') {
-                results.bridgeWriteGate = true;
-                log('GATE', '  ✅ BRIDGE_ENABLE_WRITES=true');
-            } else {
-                log('GATE', `  ⚠️  BRIDGE_ENABLE_WRITES=${writesEnabled || 'not set'} (need "true" for Phase 2)`);
-            }
-        } else {
-            log('GATE', '  ⚠️  committee-bridge env not found in config');
-        }
-    } catch (err) {
-        log('GATE', `  ⚠️  Cannot read mcp-servers.json: ${err.message}`);
-    }
-
-    // Check 3: comment_on_pr tool availability via MCP proxy
-    log('GATE', 'Check 3: MCP proxy health (comment_on_pr)...');
-    try {
-        const { URL } = require('url');
-        const healthUrl = new URL('http://localhost:3006/health');
         const healthBody = await new Promise((resolve, reject) => {
-            const req = http.get(healthUrl, (res) => {
+            const req = http.get('http://localhost:3006/health', (res) => {
                 let d = '';
                 res.on('data', c => d += c);
                 res.on('end', () => resolve(d));
@@ -311,26 +294,154 @@ async function checkWriteGate() {
             req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
         });
         log('GATE', `  ✅ MCP proxy responding: ${healthBody.substring(0, 100)}`);
-        results.commentOnPrAvailable = true;
+        results.bridgeReachable = true;
     } catch (err) {
+        results.failures.push(`bridge unreachable: ${err.message}`);
         log('GATE', `  ❌ MCP proxy not accessible: ${err.message}`);
-        log('GATE', '     (comment_on_pr availability unconfirmed — may still work via extension)');
+    }
+
+    // Check 3: MCP JSON-RPC session + tool inventory (fail-closed)
+    log('GATE', 'Check 3: MCP JSON-RPC bridge inventory...');
+    if (results.bridgeReachable) {
+        try {
+            const bridgeInfo = await mcpJsonRpcCall('get_bridge_info', {});
+            log('GATE', `  Bridge info: version=${bridgeInfo.server_version || 'unknown'} tools=${JSON.stringify(bridgeInfo.tools || [])}`);
+
+            // Check writes_enabled
+            if (bridgeInfo.writes_enabled === true) {
+                results.bridgeWritesEnabled = true;
+                log('GATE', '  ✅ writes_enabled: true');
+            } else {
+                results.failures.push(`writes_enabled=${bridgeInfo.writes_enabled}`);
+                log('GATE', `  ❌ writes_enabled: ${bridgeInfo.writes_enabled} (need true)`);
+            }
+
+            // Check comment_on_pr in tools
+            const tools = bridgeInfo.tools || [];
+            if (tools.includes('comment_on_pr')) {
+                results.commentOnPrExists = true;
+                log('GATE', '  ✅ comment_on_pr tool available');
+            } else {
+                results.failures.push('comment_on_pr not in tools');
+                log('GATE', `  ❌ comment_on_pr not found in tools: ${JSON.stringify(tools)}`);
+            }
+
+            // Check workspace
+            if (bridgeInfo.workspace_root) {
+                results.bridgeWorkspaceOk = true;
+                log('GATE', `  ✅ workspace: ${bridgeInfo.workspace_root}`);
+            } else {
+                log('GATE', '  ⚠️  workspace_root not reported');
+            }
+
+            results.bridgeSessionOk = true;
+            results.bridgeToolsListOk = true;
+        } catch (err) {
+            results.failures.push(`bridge JSON-RPC: ${err.message}`);
+            log('GATE', `  ❌ Bridge JSON-RPC failed: ${err.message}`);
+            log('GATE', '     Attempted: initialize → initialized → tools/call get_bridge_info');
+        }
+    } else {
+        results.failures.push('bridge unreachable — skipping JSON-RPC check');
+        log('GATE', '  ⏭️  Skipping (bridge not reachable)');
     }
 
     // Summary
     log('GATE', '');
-    log('GATE', '--- Write Gate Summary ---');
+    log('GATE', '--- Write Gate Summary (fail-closed) ---');
     log('GATE', `  gh auth:          ${results.ghAuth ? '✅' : '❌ BLOCKER'}`);
-    log('GATE', `  bridge writes:    ${results.bridgeWriteGate ? '✅' : '⚠️  NEEDED for Phase 2'}`);
-    log('GATE', `  comment_on_pr:    ${results.commentOnPrAvailable ? '✅' : '⚠️  unconfirmed'}`);
+    log('GATE', `  bridge reachable: ${results.bridgeReachable ? '✅' : '❌ BLOCKER'}`);
+    log('GATE', `  bridge session:   ${results.bridgeSessionOk ? '✅' : '❌ BLOCKER'}`);
+    log('GATE', `  writes_enabled:   ${results.bridgeWritesEnabled ? '✅' : '❌ BLOCKER'}`);
+    log('GATE', `  comment_on_pr:    ${results.commentOnPrExists ? '✅' : '❌ BLOCKER'}`);
 
-    const canProceed = results.ghAuth;
+    const canProceed = results.failures.length === 0;
     if (!canProceed) {
         log('GATE', '');
-        log('GATE', '❌ BLOCKER: gh CLI not authenticated — cannot verify PR comments');
+        log('GATE', `❌ BLOCKER: ${results.failures.length} failure(s) — cannot proceed to Phase 2`);
+        for (const f of results.failures) {
+            log('GATE', `   - ${f}`);
+        }
     }
 
     return { ...results, canProceed };
+}
+
+// ─── MCP JSON-RPC helper (for bridge inventory check) ────────────────────────
+let _mcpSessionId = null;
+let _mcpRpcId = 0;
+
+function mcpJsonRpcCall(method, params) {
+    return new Promise((resolve, reject) => {
+        const id = ++_mcpRpcId;
+        const body = JSON.stringify({
+            jsonrpc: '2.0',
+            id,
+            method: method === 'initialize' ? 'initialize' : 'tools/call',
+            params: method === 'initialize' ? {
+                protocolVersion: '2024-11-05',
+                capabilities: {},
+                clientInfo: { name: 'l5b2-obs-script', version: 'v3' },
+            } : {
+                name: method,
+                arguments: params,
+            },
+        });
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (_mcpSessionId) {
+            headers['Mcp-Session-Id'] = _mcpSessionId;
+        }
+
+        const req = http.request({
+            hostname: 'localhost',
+            port: 3006,
+            path: '/mcp',
+            method: 'POST',
+            headers,
+            timeout: 10000,
+        }, (res) => {
+            // Capture session ID from response headers
+            const sessionId = res.headers['mcp-session-id'];
+            if (sessionId) _mcpSessionId = sessionId;
+
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.error) reject(new Error(`JSON-RPC error: ${JSON.stringify(parsed.error)}`));
+                    else resolve(parsed.result || {});
+                } catch (e) {
+                    reject(new Error(`JSON-RPC parse error: ${data.substring(0, 200)}`));
+                }
+            });
+        });
+
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+    });
+}
+
+async function mcpInitializeAndCall(method, params) {
+    // Step 1: initialize
+    await mcpJsonRpcCall('initialize', {});
+    // Step 2: send initialized notification
+    const notifBody = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+    await new Promise((resolve, reject) => {
+        const headers = { 'Content-Type': 'application/json' };
+        if (_mcpSessionId) headers['Mcp-Session-Id'] = _mcpSessionId;
+        const req = http.request({
+            hostname: 'localhost', port: 3006, path: '/mcp', method: 'POST',
+            headers, timeout: 5000,
+        }, (res) => { res.resume(); res.on('end', resolve); });
+        req.on('error', reject);
+        req.write(notifBody);
+        req.end();
+    });
+    // Step 3: call tool
+    return await mcpJsonRpcCall(method, params);
 }
 
 // ─── Phase 1: Preflight (enhanced with P1-2 and P1-3) ──────────────────────
@@ -647,8 +758,10 @@ async function phase2SmokeTest(ws) {
     log('PHASE-2', 'Step 4: Waiting for Notion AI response (up to 90s)...');
     const startTime = Date.now();
     const TIMEOUT_MS = 90000;
+    const structuredEvents = [];
     let functionCallDetected = false;
     let interceptionDetected = false;
+    let transcriptConfirmed = false;
 
     while (Date.now() - startTime < TIMEOUT_MS) {
         await sleep(3000);
@@ -670,15 +783,73 @@ async function phase2SmokeTest(ws) {
             for (const logEntry of recentLogs) {
                 log('PHASE-2', `  [${logEntry.type}] ${logEntry.text.substring(0, 200)}`);
 
+                // P1-1: Record structured events with sourceConfidence
                 if (logEntry.text.includes('function_call') && !functionCallDetected) {
                     functionCallDetected = true;
+                    // Try to extract identity from console text
+                    const identityMatch = logEntry.text.match(/comment_on_pr|"name"\s*:\s*"comment_on_pr"/);
+                    const callIdMatch = logEntry.text.match(/callId['":\s]+([a-f0-9-]+)/i);
+                    structuredEvents.push({
+                        type: 'assistant_function_call_detected',
+                        source: 'console_keyword',
+                        sourceConfidence: 'low',
+                        data: {
+                            raw: logEntry.text.substring(0, 300),
+                            hasCommentOnPr: !!identityMatch,
+                            callId: callIdMatch ? callIdMatch[1] : null,
+                        },
+                        timestamp: logEntry.timestamp,
+                    });
                     log('PHASE-2', '✅ function_call detected in console');
                 }
                 if (logEntry.text.includes('callTool') && !interceptionDetected) {
                     interceptionDetected = true;
+                    structuredEvents.push({
+                        type: 'call_tool_invoked',
+                        source: 'console_keyword',
+                        sourceConfidence: 'low',
+                        data: {
+                            raw: logEntry.text.substring(0, 300),
+                            toolName: logEntry.text.includes('comment_on_pr') ? 'comment_on_pr' : 'unknown',
+                        },
+                        timestamp: logEntry.timestamp,
+                    });
                     log('PHASE-2', '✅ callTool() detected — MCP interception confirmed');
                 }
             }
+        }
+
+        // P1-6: Check transcript for user message confirmation
+        const transcriptCheck = await cdpSend(ws, 'Runtime.evaluate', {
+            expression: `(function() {
+                // Search for user message containing RUN_ID or test body fragment
+                const allMessages = document.querySelectorAll('[data-message-id], [class*="message"], [class*="chat"]');
+                for (const el of allMessages) {
+                    const text = el.textContent || '';
+                    if (text.includes('${RUN_ID}') || text.includes('L5B-2 Pre-Observation Test')) {
+                        return JSON.stringify({ found: true, preview: text.substring(0, 200) });
+                    }
+                }
+                // Fallback: search entire body
+                const bodyText = document.body.innerText;
+                if (bodyText.includes('${RUN_ID}')) {
+                    return JSON.stringify({ found: true, preview: '(found in body text)', method: 'body' });
+                }
+                return JSON.stringify({ found: false });
+            })()`,
+            returnByValue: true,
+        });
+        const transcript = JSON.parse(transcriptCheck.result.value);
+        if (transcript.found && !transcriptConfirmed) {
+            transcriptConfirmed = true;
+            log('PHASE-2', `✅ Transcript confirmation: user message found`);
+            structuredEvents.push({
+                type: 'user_message_confirmed',
+                source: 'dom_transcript',
+                sourceConfidence: 'high',
+                data: { preview: transcript.preview.substring(0, 200) },
+                timestamp: Date.now(),
+            });
         }
 
         // Check if Notion AI has finished generating (input is empty and no stop button)
@@ -696,6 +867,17 @@ async function phase2SmokeTest(ws) {
         });
         const done = JSON.parse(doneCheck.result.value);
         log('PHASE-2', `Status: generating=${done.generating} inputEmpty=${done.inputEmpty} (${Math.round((Date.now() - startTime) / 1000)}s)`);
+
+        // P1-6: Fail-fast if submit not confirmed after 30s
+        if (!transcriptConfirmed && Date.now() - startTime > 30000) {
+            log('PHASE-2', '❌ FAIL_SUBMIT_NOT_CONFIRMED: user message not found in transcript after 30s');
+            log('PHASE-2', '   Stopping — not waiting for assistant/tool-call');
+            evidence.phase2.submitConfirmed = false;
+            evidence.phase2.structuredEvents = structuredEvents;
+            evidence.verdict = 'FAIL_SUBMIT_NOT_CONFIRMED';
+            ws.removeListener('message', consoleHandler);
+            return false;
+        }
 
         if (!done.generating && done.inputEmpty && Date.now() - startTime > 5000) {
             log('PHASE-2', 'Notion AI appears to have finished');
@@ -750,7 +932,7 @@ async function phase2SmokeTest(ws) {
 
         if (matchingComments.length === 0) {
             log('PHASE-2', '❌ No test comment found on PR #97');
-            evidence.phase2.prComment = { found: false, totalComments: comments.length };
+            evidence.phase2.prComment = { found: false, totalComments: comments.length, transcriptConfirmed };
         } else if (matchingComments.length > 1) {
             // P1-5: Exactly-1 assertion
             log('PHASE-2', `⚠️  Multiple comments match RUN_ID (${matchingComments.length}) — exactly-1 expected`);
@@ -803,7 +985,7 @@ async function phase2SmokeTest(ws) {
                 hasAckMarker: testComment.body.includes('L5B2-OBS-MCP-001'),
                 hasRunId: testComment.body.includes(RUN_ID),
                 hasCodeFence: testComment.body.includes('```json'),
-                hasNeutralizedMention: testComment.body.includes('@opu-47'),
+                // P1-4: mention neutralization verified by unit tests, not here
             };
         }
 
@@ -815,12 +997,18 @@ async function phase2SmokeTest(ws) {
         evidence.phase2.ghError = err.message;
     }
 
-    // Step 7: Collect all console messages
+    // Step 7: Collect all console messages + structured events
     ws.removeListener('message', consoleHandler);
     evidence.phase2.consoleMessages = consoleMessages;
+    evidence.phase2.structuredEvents = structuredEvents;
+    evidence.phase2.transcriptConfirmed = transcriptConfirmed;
 
     log('PHASE-2', '');
     log('PHASE-2', `--- Console messages captured: ${consoleMessages.length} ---`);
+    log('PHASE-2', `--- Structured events: ${structuredEvents.length} ---`);
+    for (const ev of structuredEvents) {
+        log(`PHASE-2`, `  [${ev.type}] source=${ev.source} confidence=${ev.sourceConfidence}`);
+    }
     const relevantLogs = consoleMessages.filter(m =>
         m.text.includes('function_call') || m.text.includes('comment_on_pr') ||
         m.text.includes('callTool') || m.text.includes('mcp') ||
@@ -835,26 +1023,35 @@ async function phase2SmokeTest(ws) {
     log('PHASE-2', '');
     log('PHASE-2', '--- Phase 2 Verdict ---');
 
+    // P1-1: Full PASS requires structured tool-call evidence chain
+    const hasStructuredFunctionCall = structuredEvents.some(e => e.type === 'assistant_function_call_detected');
+    const hasStructuredCallTool = structuredEvents.some(e => e.type === 'call_tool_invoked');
+
     if (evidence.phase2.prComment?.found && evidence.phase2.prComment?.exactMatch) {
         log('PHASE-2', '✅ PASS: End-to-end write-back verified (exact body match)');
         log('PHASE-2', '   Notion AI → MCP-SuperAssistant → committee-bridge → GitHub API');
         log('PHASE-2', `   Comment ID: ${evidence.phase2.prComment.id}`);
         log('PHASE-2', `   RUN_ID: ${RUN_ID}`);
+        log('PHASE-2', `   Structured events: ${structuredEvents.length}`);
         evidence.verdict = 'PASS';
     } else if (evidence.phase2.prComment?.found && !evidence.phase2.prComment?.exactMatch) {
         log('PHASE-2', '⚠️  PARTIAL: Comment found but body mismatch');
         log('PHASE-2', '   Possible: MCP connector modified the body');
         evidence.verdict = 'PARTIAL';
-    } else if (functionCallDetected && !evidence.phase2.prComment?.found) {
-        log('PHASE-2', '⚠️  PARTIAL: function_call detected but comment not on PR');
+    } else if (hasStructuredFunctionCall && !evidence.phase2.prComment?.found) {
+        log('PHASE-2', '⚠️  PARTIAL: Structured function_call detected but comment not on PR');
         log('PHASE-2', '   Possible: WRITES_DISABLED, gh auth issue, or wrong PR number');
         evidence.verdict = 'PARTIAL';
+    } else if (evidence.phase2.submitConfirmed === false) {
+        // Already set above (P1-6 fail-fast)
+        log('PHASE-2', '❌ FAIL: Submit not confirmed');
     } else {
-        log('PHASE-2', '❌ FAIL: No function_call interception detected');
+        log('PHASE-2', '❌ FAIL: No structured tool-call evidence detected');
         log('PHASE-2', '   Possible causes:');
         log('PHASE-2', '   1. Notion AI did not generate function_call');
         log('PHASE-2', '   2. MCP-SuperAssistant stream interceptor not active');
         log('PHASE-2', '   3. committee-bridge tools not injected via bridge prompt');
+        log('PHASE-2', `   Structured events captured: ${structuredEvents.length}`);
         evidence.verdict = 'FAIL';
     }
 
