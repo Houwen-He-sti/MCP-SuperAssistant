@@ -400,6 +400,52 @@ async function runEnsureAgentPageWiringTests() {
     }
     assert(threwMissingWorkspace,
         'ensureAgentPage fails closed with WorkspaceMismatchError and title diagnostic when DOM workspace is missing');
+
+    const expectedTitleTargets = [{
+        ...fakeTargets[0],
+        title: 'sjzj030的工作空间',
+    }];
+    const misleadingTitleMessages = [];
+    let ignoredMisleadingTitle = false;
+    try {
+        await ensureAgentPageUnderTest('https://www.notion.so/chat', {
+            getTargets: async () => expectedTitleTargets,
+            WebSocket: createFakeWebSocket({
+                workspaceName: null,
+                confidence: 'no_root',
+                matchedText: null,
+            }, misleadingTitleMessages),
+            sleep: async () => {},
+        });
+    } catch (e) {
+        ignoredMisleadingTitle = e instanceof WiringWorkspaceMismatchError &&
+            e.detected === null &&
+            e.titleObserved === 'sjzj030的工作空间';
+    }
+    assert(ignoredMisleadingTitle,
+        'ensureAgentPage still fails closed when tab title contains expected workspace but DOM workspace is missing');
+
+    const { preflight: preflightUnderTest } = require('./lib/cdp-preflight.cjs');
+    const preflightResult = await preflightUnderTest({
+        resolveExtensionId: async () => ({
+            extensionId: 'fake-extension-id',
+            name: 'MCP SuperAssistant',
+            wsUrl: 'ws://fake-extension',
+        }),
+        ensureAgentPage: async () => ({
+            tab: fakeTargets[0],
+            navigated: false,
+            url: fakeTargets[0].url,
+            workspace: 'sjzj030的工作空间',
+            workspaceInfo: {
+                workspaceName: 'sjzj030的工作空间',
+                confidence: 'text_match',
+                matchedText: 'sjzj030的工作空间',
+            },
+        }),
+    });
+    assert(preflightResult.workspaceInfo?.workspaceName === 'sjzj030的工作空间',
+        'preflight returns workspaceInfo from ensureAgentPage result');
 }
 
 // ─── Summary ───────────────────────────────────────────────────────────────

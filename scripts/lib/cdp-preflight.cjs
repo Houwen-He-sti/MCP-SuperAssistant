@@ -379,13 +379,15 @@ async function ensureAgentPage(agentUrl = AGENT_URL, deps = {}) {
 async function preflight(opts = {}) {
     const extName = opts.extensionName || 'MCP SuperAssistant';
     const agentUrl = opts.agentUrl || AGENT_URL;
+    const resolveExtensionIdFn = opts.resolveExtensionId || resolveExtensionId;
+    const ensureAgentPageFn = opts.ensureAgentPage || ensureAgentPage;
 
     console.log('🔍 Preflight: resolving extension...');
-    const ext = await resolveExtensionId(extName);
+    const ext = await resolveExtensionIdFn(extName);
     console.log(`✅ Extension: ${ext.name} (${ext.extensionId})`);
 
     console.log('🔍 Preflight: ensuring agent page...');
-    const page = await ensureAgentPage(agentUrl);
+    const page = await ensureAgentPageFn(agentUrl);
     console.log(`✅ Page: ${page.url.slice(0, 80)}${page.navigated ? ' (navigated)' : ''}`);
 
     return {
@@ -394,6 +396,8 @@ async function preflight(opts = {}) {
         extensionWsUrl: ext.wsUrl,
         tab: page.tab,
         navigated: page.navigated,
+        workspace: page.workspace,
+        workspaceInfo: page.workspaceInfo,
     };
 }
 
