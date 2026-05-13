@@ -194,15 +194,35 @@ while (Date.now() - startTime < TIMEOUT_MS) {
 ### 4.1 [`lib/cdp-preflight.cjs`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs)
 
 **职责**：
-- 扩展发现 ([`resolveExtensionId()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:47))
-- 页面上下文确保 ([`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:110))
-- 完整预检 ([`preflight()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:167))
+- 扩展发现 ([`resolveExtensionId()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:89))
+- 页面上下文确保 + 工作空间验证 ([`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:155))
+- 完整预检 ([`preflight()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:234))
+- 工作空间配置读取 ([`readWorkspaceConfig()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:30) → [`REQUIRED_WORKSPACE`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:65))
+
+**工作空间配置优先级**：
+```
+NOTION_WORKSPACE 环境变量 > config/workspace.toml [notion].required_workspace > 硬编码 fallback
+```
+
+`config/workspace.toml` 中的 `[notion]` section 定义了所需工作空间：
+```toml
+[notion]
+required_workspace = "sjzj030的工作空间"
+```
+
+如果检测到 Notion 标题与所需工作空间不匹配，[`ensureAgentPage()`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs:171) 会抛出异常并提示用户手动切换。
 
 **使用方式**：
 ```javascript
-const { preflight, sleep, getTargets } = require('./lib/cdp-preflight.cjs');
+const { preflight, sleep, getTargets, REQUIRED_WORKSPACE } = require('./lib/cdp-preflight.cjs');
 
 const { tab, extensionId, extensionName } = await preflight();
+console.log(`Required workspace: ${REQUIRED_WORKSPACE}`);
+```
+
+**测试**：
+```bash
+node scripts/test-cdp-preflight-workspace.cjs  # 工作空间配置读取 + 优先级链测试
 ```
 
 ### 4.2 [`debug-notion-chat-dom.cjs`](MCP-SuperAssistant/scripts/debug-notion-chat-dom.cjs)

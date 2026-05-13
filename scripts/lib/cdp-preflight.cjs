@@ -165,8 +165,7 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
     // 当前检测逻辑：如果标题包含所需工作空间名称的子串，则认为匹配
     const requiredWorkspaceLower = REQUIRED_WORKSPACE.toLowerCase();
     const currentTitle = (notionTab.title || '').toLowerCase();
-    const isCorrectWorkspace = currentTitle.includes(requiredWorkspaceLower) ||
-        currentTitle.includes('sjzj030');  // 兼容旧版标题
+    const isCorrectWorkspace = currentTitle.includes(requiredWorkspaceLower);
 
     if (!isCorrectWorkspace) {
         // 检测到错误的工作空间，抛出明确的错误信息
