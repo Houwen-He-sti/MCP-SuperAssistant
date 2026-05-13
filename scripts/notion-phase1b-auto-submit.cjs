@@ -37,10 +37,10 @@ ${ACK_MARKER}
 
 回复中可以简短说明 echo 结果。`;
 
-// --- Notion tab URL matcher (P0-3: supports /agent/, /ai/, /chat/) ---
+// --- Notion tab URL matcher: only /chat (GPT review P1 fix) ---
 function isNotionAiTarget(url) {
-    // Match any Notion page (simplified for current environment)
-    return /https:\/\/(www\.)?notion\.so\//.test(url);
+    // Only match Notion AI chat pages to avoid hijacking regular doc tabs
+    return /https:\/\/(www\.)?notion\.so\/chat/.test(url);
 }
 
 function escapeRegExp(s) {
