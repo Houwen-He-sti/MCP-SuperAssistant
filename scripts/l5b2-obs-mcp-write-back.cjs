@@ -519,7 +519,7 @@ async function phase1Preflight(ws, tab) {
     log('PHASE-1', `MCP proxy: ${proxy.status} ${proxy.body || proxy.message || ''}`);
     evidence.phase1.mcpProxy = proxy;
 
-    // Check 4: Notion AI composer/input presence
+    // Check 4: Notion AI composer/input presence (empty state)
     const composerCheck = await cdpSend(ws, 'Runtime.evaluate', {
         expression: `(function() {
             const input = document.querySelector('div[role="textbox"][contenteditable="true"]')
@@ -546,15 +546,50 @@ async function phase1Preflight(ws, tab) {
                 inputContentLen: input ? input.textContent.length : 0,
                 hasSubmitButton: !!submitBtn,
                 submitButtonLabel: submitBtn ? (submitBtn.getAttribute('aria-label') || submitBtn.textContent.substring(0, 30)) : null,
-                // Also check for Enter-key-to-submit pattern (many chat UIs)
                 inputRole: input ? input.getAttribute('role') : null,
             });
         })()`,
         returnByValue: true,
     });
     const composer = JSON.parse(composerCheck.result.value);
-    log('PHASE-1', `Composer: hasInput=${composer.hasInput} hasSubmitButton=${composer.hasSubmitButton}`);
+    log('PHASE-1', `Composer (empty): hasInput=${composer.hasInput} hasSubmitButton=${composer.hasSubmitButton}`);
     evidence.phase1.composer = composer;
+
+    // Check 4b: Notion AI composer/input presence (with text — submit button may appear only when input has content)
+    const composerWithText = await cdpSend(ws, 'Runtime.evaluate', {
+        expression: `(function() {
+            const input = document.querySelector('div[role="textbox"][contenteditable="true"]')
+                || document.querySelector('[class*="notion-ai"] [contenteditable="true"]');
+            if (input) {
+                input.textContent = 'test';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            const submitSelectors = [
+                '[aria-label="\u53d1\u9001"]',
+                '[aria-label="Send"]',
+                'button[type="submit"]',
+                '[data-testid="chat-send-button"]',
+                '[class*="send-button"]',
+                '[class*="submit"]',
+                'button[aria-label*="send" i]',
+                'button[aria-label*="\u53d1\u9001"]',
+            ];
+            let submitBtn = null;
+            for (const sel of submitSelectors) {
+                submitBtn = document.querySelector(sel);
+                if (submitBtn) break;
+            }
+            return JSON.stringify({
+                hasSubmitButton: !!submitBtn,
+                submitButtonLabel: submitBtn ? (submitBtn.getAttribute('aria-label') || submitBtn.textContent.substring(0, 30)) : null,
+                submitButtonVisible: submitBtn ? (submitBtn.offsetParent !== null) : false,
+            });
+        })()`,
+        returnByValue: true,
+    });
+    const composerTextState = JSON.parse(composerWithText.result.value);
+    log('PHASE-1', `Composer (with text): hasSubmitButton=${composerTextState.hasSubmitButton} visible=${composerTextState.submitButtonVisible}`);
+    evidence.phase1.composerWithText = composerTextState;
 
     // Check 5: URL and page context
     evidence.phase1.pageUrl = tab.url;
@@ -562,10 +597,53 @@ async function phase1Preflight(ws, tab) {
 
     // Verdict
     const extActivated = dom.mcpPopover || dom.dataMcpSuperassistant || dom.mcpElements > 0;
-    const canSubmit = composer.hasInput && composer.hasSubmitButton;
+    const hasInput = composer.hasInput;
+    const hasSubmitButtonEmpty = composer.hasSubmitButton;
+    const hasSubmitButtonWithText = composerTextState.hasSubmitButton;
+    const submitButtonVisible = composerTextState.submitButtonVisible;
+    const canSubmit = hasInput && (hasSubmitButtonEmpty || hasSubmitButtonWithText);
+
+    // Determine preflight level
+    let preflightLevel = 'PREFLIGHT_OK';
+    const blockers = [];
+    const warnings = [];
+
+    if (!extActivated) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_NO_EXTENSION';
+        blockers.push('Extension DOM injection not detected');
+    } else if (!hasInput) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_NO_INPUT';
+        blockers.push('Composer input not found');
+    } else if (!canSubmit) {
+        preflightLevel = 'PREFLIGHT_BLOCKED_SUBMIT_SELECTOR';
+        blockers.push('Submit button not detected (empty or with text)');
+    } else if (!submitButtonVisible) {
+        preflightLevel = 'PREFLIGHT_PARTIAL_DOM_ONLY';
+        warnings.push('Submit button detected but not visible — may need CSS inspection');
+    }
+
+    // Bridge check result
+    if (evidence.phase1.mcpProxy && evidence.phase1.mcpProxy.status === 'error') {
+        if (preflightLevel === 'PREFLIGHT_OK') {
+            preflightLevel = 'PREFLIGHT_PARTIAL_DOM_ONLY';
+        }
+        warnings.push('Bridge MCP not reachable (localhost:3006) — Phase 2 blocked');
+    }
+
+    evidence.preflightLevel = preflightLevel;
+    evidence.blockers = blockers;
+    evidence.warnings = warnings;
 
     log('PHASE-1', '');
     log('PHASE-1', '--- Phase 1 Verdict ---');
+    log('PHASE-1', `Preflight level: ${preflightLevel}`);
+    if (blockers.length > 0) {
+        log('PHASE-1', `Blockers: ${blockers.join('; ')}`);
+    }
+    if (warnings.length > 0) {
+        log('PHASE-1', `Warnings: ${warnings.join('; ')}`);
+    }
+    log('PHASE-1', '');
     if (extActivated) {
         log('PHASE-1', '✅ Extension: MCP-SuperAssistant DOM injection detected');
     } else {
@@ -587,7 +665,7 @@ async function phase1Preflight(ws, tab) {
         log('PHASE-1', '❌ MCP Client: no signals — extension likely not loaded');
     }
     if (canSubmit) {
-        log('PHASE-1', '✅ Composer: input and submit button found');
+        log('PHASE-1', `✅ Composer: input found, submit button ${hasSubmitButtonEmpty ? '(empty state)' : '(with text)'} visible=${submitButtonVisible}`);
     } else {
         log('PHASE-1', '❌ Composer: input or submit button missing — navigate to Notion AI chat page');
     }
@@ -597,7 +675,7 @@ async function phase1Preflight(ws, tab) {
         log('PHASE-1', '⚠️  Page context: NOT on /chat or /ai — may need navigation');
     }
 
-    return { extActivated, canSubmit, contexts };
+    return { extActivated, canSubmit, contexts, preflightLevel, blockers, warnings };
 }
 
 // ─── Phase 2: Full Smoke Test (P1-6: CDP Input.insertText) ──────────────────
@@ -1091,17 +1169,18 @@ async function main() {
 
     try {
         // Phase 1: Preflight
-        const { extActivated, canSubmit, contexts } = await phase1Preflight(ws, tab);
+        const { extActivated, canSubmit, contexts, preflightLevel, blockers, warnings } = await phase1Preflight(ws, tab);
 
         if (!FULL_MODE) {
             log('PHASE-1', '');
             log('PHASE-1', 'Phase 1 complete. Run with --full for Phase 2 (requires BRIDGE_ENABLE_WRITES=true).');
-            evidence.verdict = extActivated ? 'PREFLIGHT_OK' : 'PREFLIGHT_EXTENSION_NOT_ACTIVE';
+            // Use the computed preflightLevel from phase1Preflight
+            evidence.verdict = preflightLevel;
         } else {
             // Phase 2: Full smoke test
-            if (!canSubmit) {
-                console.error('❌ Cannot proceed to Phase 2: Notion AI composer not found');
-                console.error('   Navigate to a Notion AI chat page first');
+            if (blockers.length > 0) {
+                console.error(`❌ Cannot proceed to Phase 2: ${blockers.join('; ')}`);
+                console.error('   Fix blockers before running Phase 2');
                 process.exit(1);
             }
             if (!extActivated) {
