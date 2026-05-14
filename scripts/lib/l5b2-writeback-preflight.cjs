@@ -246,22 +246,46 @@ function classifyPhase1Verdict(facts = {}) {
 }
 
 function classifyPhase2Verdict(facts = {}) {
+    // FAIL_FAST: submit not confirmed (P1-6)
     if (facts.submitConfirmed === false) {
         return 'FAIL_SUBMIT_NOT_CONFIRMED';
     }
-    if (facts.commentFound === true && facts.exactMatch === true) {
-        if (facts.hasAssistantFunctionCall === true && facts.hasCallToolInvocation === true) {
-            return 'PASS';
-        }
-        return 'PARTIAL_EXACT_COMMENT_WITHOUT_TOOL_EVIDENCE';
+
+    // FAIL: exactly-1 assertion failed (P1-5)
+    if (facts.commentCountExceeded === true) {
+        return 'FAIL_DUPLICATE_OR_STALE_MATCH';
     }
+
+    // FAIL: no structured tool-call evidence at all
+    if (facts.commentFound !== true && facts.hasAssistantFunctionCall !== true && facts.hasCallToolInvocation !== true) {
+        return 'FAIL_NO_STRUCTURED_TOOL_CALL';
+    }
+
+    // PARTIAL: body mismatch — possible write-back body modification
     if (facts.commentFound === true && facts.exactMatch !== true) {
         return 'PARTIAL_BODY_MISMATCH';
     }
+
+    // PARTIAL: tool call detected but comment not on PR
     if (facts.hasAssistantFunctionCall === true || facts.hasCallToolInvocation === true) {
-        return 'PARTIAL_TOOL_CALL_WITHOUT_COMMENT';
+        if (facts.commentFound !== true) {
+            return 'PARTIAL_TOOL_CALL_WITHOUT_COMMENT';
+        }
     }
-    return 'FAIL_NO_STRUCTURED_TOOL_CALL';
+
+    // PARTIAL: exact comment found but tool evidence incomplete
+    if (facts.commentFound === true && facts.exactMatch === true) {
+        if (facts.hasAssistantFunctionCall !== true || facts.hasCallToolInvocation !== true) {
+            return 'PARTIAL_EXACT_COMMENT_WITHOUT_TOOL_EVIDENCE';
+        }
+        // PASS: all conditions met — but only happy-path 6-step
+        // Step 7 (exactly-once beyond comment count) not verified
+        // Step 8 (failure-path) not executed
+        // Step 9 (result injection) not verified
+        return 'PASS_HAPPY_PATH_ONLY';
+    }
+
+    return 'PARTIAL_INCOMPLETE';
 }
 
 function normalizeExecutionContext(ctx = {}) {

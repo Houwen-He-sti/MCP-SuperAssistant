@@ -1127,21 +1127,48 @@ async function phase2SmokeTest(ws) {
     const hasStructuredFunctionCall = structuredEvents.some(e => e.type === 'assistant_function_call_detected');
     const hasStructuredCallTool = structuredEvents.some(e => e.type === 'call_tool_invoked');
 
+    const commentCountExceeded = evidence.phase2.prComment?.assertionFailed === true;
+
     const phase2Verdict = classifyPhase2Verdict({
         submitConfirmed: evidence.phase2.transcriptConfirmed,
         commentFound: evidence.phase2.prComment?.found === true,
         exactMatch: evidence.phase2.prComment?.exactMatch === true,
         hasAssistantFunctionCall: hasStructuredFunctionCall,
         hasCallToolInvocation: hasStructuredCallTool,
+        commentCountExceeded,
     });
 
-    if (phase2Verdict === 'PASS') {
-        log('PHASE-2', '✅ PASS: End-to-end write-back verified (exact body match)');
+    // Coverage markers: explicitly record which steps are NOT covered in this run
+    const coverageMarkers = {
+        step7_exactly_once_beyond_comment_count: false,
+        step8_failure_path: false,
+        step9_result_injection: false,
+    };
+    evidence.coverageMarkers = coverageMarkers;
+
+    if (!coverageMarkers.step7_exactly_once_beyond_comment_count) {
+        log('PHASE-2', 'ℹ️  Step 7 (exactly-once beyond comment count): NOT VERIFIED in this run');
+    }
+    if (!coverageMarkers.step8_failure_path) {
+        log('PHASE-2', 'ℹ️  Step 8 (failure-path: WRITES_DISABLED / invalid PR): NOT EXECUTED in this run');
+    }
+    if (!coverageMarkers.step9_result_injection) {
+        log('PHASE-2', 'ℹ️  Step 9 (function_result injection into Notion AI): NOT VERIFIED in this run');
+    }
+
+    if (phase2Verdict === 'PASS_HAPPY_PATH_ONLY') {
+        log('PHASE-2', '✅ PASS_HAPPY_PATH_ONLY: Happy-path write-back verified (exact body match)');
         log('PHASE-2', '   Notion AI → MCP-SuperAssistant → committee-bridge → GitHub API');
         log('PHASE-2', `   Comment ID: ${evidence.phase2.prComment.id}`);
         log('PHASE-2', `   RUN_ID: ${RUN_ID}`);
         log('PHASE-2', `   Structured events: ${structuredEvents.length}`);
-        evidence.verdict = 'PASS';
+        log('PHASE-2', '   ⚠️  This is NOT full 10-step smoke acceptance.');
+        log('PHASE-2', '   Step 7/8/9 were not verified. See coverageMarkers in evidence JSON.');
+        evidence.verdict = 'PASS_HAPPY_PATH_ONLY';
+    } else if (phase2Verdict === 'FAIL_DUPLICATE_OR_STALE_MATCH') {
+        log('PHASE-2', '❌ FAIL: Multiple comments match RUN_ID — exactly-1 expected');
+        log('PHASE-2', '   Indicates re-run or duplicate submission');
+        evidence.verdict = phase2Verdict;
     } else if (phase2Verdict === 'PARTIAL_EXACT_COMMENT_WITHOUT_TOOL_EVIDENCE') {
         log('PHASE-2', '⚠️  PARTIAL: Exact comment found but structured tool-call evidence is incomplete');
         log('PHASE-2', '   This cannot be accepted as full Notion MCP write-back evidence');
@@ -1155,8 +1182,7 @@ async function phase2SmokeTest(ws) {
         log('PHASE-2', '   Possible: WRITES_DISABLED, gh auth issue, or wrong PR number');
         evidence.verdict = phase2Verdict;
     } else if (phase2Verdict === 'FAIL_SUBMIT_NOT_CONFIRMED') {
-        // Already set above (P1-6 fail-fast)
-        log('PHASE-2', '❌ FAIL: Submit not confirmed');
+        log('PHASE-2', '❌ FAIL: Submit not confirmed (P1-6)');
         evidence.verdict = phase2Verdict;
     } else {
         log('PHASE-2', '❌ FAIL: No structured tool-call evidence detected');
@@ -1168,7 +1194,8 @@ async function phase2SmokeTest(ws) {
         evidence.verdict = phase2Verdict;
     }
 
-    return evidence.verdict === 'PASS';
+    // Never return true for PASS — this script only does happy-path smoke
+    return false;
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
