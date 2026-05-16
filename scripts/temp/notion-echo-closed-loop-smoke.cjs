@@ -7,6 +7,7 @@ const WebSocket = require('ws');
 const {
     ACK_PATTERN,
     INSTRUCTION_FILE_ANSWER_TASK,
+    LIST_COMMAND_TASK,
     REVIEW_FILE_CONTEXT_MAX_BYTES,
     REVIEW_FILE_CONTEXT_PATH,
     REVIEW_PR_FILE_CONTEXT_MAX_BYTES,
@@ -14,6 +15,8 @@ const {
     SAFE_FINAL_PREFERENCES,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
+    buildListCommandPrompt,
+    buildListCommandResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -25,6 +28,7 @@ const {
     isFreshNotionChatUrl,
     validateEchoClosedLoopEvidence,
     validateInstructionFileAnswerEvidence,
+    validateListCommandEvidence,
     validateMultiRoundEchoCountEvidence,
     validateReviewModuleContextEvidence,
     validateReviewModuleFileContextEvidence,
@@ -35,23 +39,25 @@ const CDP_PORT = Number(process.env.CDP_PORT || 9222);
 const STORE_KEY = 'mcp-super-assistant-ui-store';
 const SMOKE_KIND = process.env.NOTION_SMOKE_KIND || 'echo';
 const FILE_CONTEXT_SMOKE_KINDS = ['review_file_context', 'review_pr_file_context', 'instruction_file_answer'];
+const IS_LIST_COMMAND_SMOKE = SMOKE_KIND === 'list_command';
 const IS_MULTI_ROUND_SMOKE = SMOKE_KIND === 'multi_round_count';
 const IS_INSTRUCTION_FILE_ANSWER_SMOKE = SMOKE_KIND === 'instruction_file_answer';
+const ALLOW_RESULT_SUBMIT_FALLBACK = FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_LIST_COMMAND_SMOKE;
 const MULTI_ROUND_TARGET_COUNT = Math.max(1, Number(process.env.NOTION_MULTI_ROUND_TARGET_COUNT || 3));
-const RUN_PREFIX = SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
-const EXPECTED_TOOL = SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
+const RUN_PREFIX = IS_LIST_COMMAND_SMOKE ? 'LIST_COMMAND' : SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
+const EXPECTED_TOOL = IS_LIST_COMMAND_SMOKE ? 'list_command' : SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
 const RUN_STAMP = Date.now();
 const RUN_ID = `${RUN_PREFIX}_${RUN_STAMP}`;
 const NONCE = `${RUN_ID}_NONCE`;
 const EXPECTED_CALL_IDS = IS_MULTI_ROUND_SMOKE
-  ? Array.from({ length: MULTI_ROUND_TARGET_COUNT }, (_, index) => `call_echo_count_${index + 1}_${RUN_STAMP}`)
-  : [`call_${EXPECTED_TOOL}_${RUN_STAMP}`];
+    ? Array.from({ length: MULTI_ROUND_TARGET_COUNT }, (_, index) => `call_echo_count_${index + 1}_${RUN_STAMP}`)
+    : [`call_${EXPECTED_TOOL}_${RUN_STAMP}`];
 const CALL_ID = EXPECTED_CALL_IDS[0];
 const EXPECTED_ACK = `ACK_${RUN_ID}`;
 const EXPECTED_FILE_PATH = IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.allowedPaths[0] : SMOKE_KIND === 'review_pr_file_context' ? REVIEW_PR_FILE_CONTEXT_PATH : REVIEW_FILE_CONTEXT_PATH;
 const EXPECTED_MAX_BYTES = IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.maxBytes : SMOKE_KIND === 'review_pr_file_context' ? REVIEW_PR_FILE_CONTEXT_MAX_BYTES : REVIEW_FILE_CONTEXT_MAX_BYTES;
 const LIMITS = {
-  maxDurationMs: Number(process.env.ECHO_SMOKE_TIMEOUT_MS || (IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 60000 : 180000)),
+    maxDurationMs: Number(process.env.ECHO_SMOKE_TIMEOUT_MS || ((IS_INSTRUCTION_FILE_ANSWER_SMOKE || IS_LIST_COMMAND_SMOKE) ? 60000 : 180000)),
     pollMs: 2500,
 };
 const DEFAULT_AUTO_SUBMIT_DELAY_MS = IS_MULTI_ROUND_SMOKE ? 3000 : 1500;
@@ -59,11 +65,11 @@ const AUTO_SUBMIT_DELAY_MS = Number(process.env.ECHO_SMOKE_AUTO_SUBMIT_DELAY_MS 
 const MANUAL_SUBMIT_FALLBACK_DELAY_MS = Number(process.env.ECHO_SMOKE_MANUAL_SUBMIT_FALLBACK_DELAY_MS || 5000);
 const POST_SUBMIT_FALLBACK_DELAY_MS = Number(process.env.ECHO_SMOKE_POST_SUBMIT_FALLBACK_DELAY_MS || 10000);
 const STREAM_BRIDGE_ENABLED = process.env.ECHO_SMOKE_STREAM_BRIDGE_ENABLED
-  ? process.env.ECHO_SMOKE_STREAM_BRIDGE_ENABLED === 'true'
-  : true;
+    ? process.env.ECHO_SMOKE_STREAM_BRIDGE_ENABLED === 'true'
+    : true;
 const DIRECT_MONITORING_ENABLED = process.env.ECHO_SMOKE_DIRECT_MONITORING_ENABLED
-  ? process.env.ECHO_SMOKE_DIRECT_MONITORING_ENABLED === 'true'
-  : !(FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_MULTI_ROUND_SMOKE);
+    ? process.env.ECHO_SMOKE_DIRECT_MONITORING_ENABLED === 'true'
+  : !(FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_MULTI_ROUND_SMOKE || IS_LIST_COMMAND_SMOKE);
 
 function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -148,10 +154,10 @@ function parseMaybeJson(value) {
 }
 
 function parseToolNames(value) {
-  const parsed = parseMaybeJson(value);
-  if (Array.isArray(parsed)) return parsed.filter(Boolean);
-  const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
-  return tools.map((tool) => tool && (tool.name || tool.value && tool.value.name)).filter(Boolean);
+    const parsed = parseMaybeJson(value);
+    if (Array.isArray(parsed)) return parsed.filter(Boolean);
+    const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
+    return tools.map((tool) => tool && (tool.name || tool.value && tool.value.name)).filter(Boolean);
 }
 
 function quote(value) {
@@ -159,7 +165,7 @@ function quote(value) {
 }
 
 function findNotionTab(targets) {
-  const tabs = targets.filter((target) => target.type === 'page' && isNotionAiRouteUrl(target.url));
+    const tabs = targets.filter((target) => target.type === 'page' && isNotionAiRouteUrl(target.url));
     return tabs.find((target) => /notion-tab-0/.test(target.title || '')) || tabs[0] || null;
 }
 
@@ -217,9 +223,21 @@ function setPreferencesExpression(preferences) {
 }
 
 function installObserversExpression() {
+    const listCommandPayload = buildListCommandResult();
+    const listCommandToolMetadata = {
+        name: 'list_command',
+        description: 'Return read-only local workspace file operation command metadata. Does not execute file commands.',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    };
+    const listCommandToolResponse = {
+        content: [{ type: 'text', text: JSON.stringify(listCommandPayload, null, 2) }],
+        isError: false,
+    };
     return `(function() {
   var autoSubmitDelayMs = ${AUTO_SUBMIT_DELAY_MS};
   var expectedCallIds = ${JSON.stringify(EXPECTED_CALL_IDS)};
+  var scratchListCommandToolMetadata = ${IS_LIST_COMMAND_SMOKE ? JSON.stringify(listCommandToolMetadata) : 'null'};
+  var scratchListCommandToolResponse = ${IS_LIST_COMMAND_SMOKE ? JSON.stringify(listCommandToolResponse) : 'null'};
   function findExpectedCallId(text) {
     for (var i = 0; i < expectedCallIds.length; i++) {
       if (String(text || '').includes(expectedCallIds[i])) return expectedCallIds[i];
@@ -313,9 +331,11 @@ function installObserversExpression() {
   if (window.__echoSmokeOriginals) {
     try {
       if (window.__echoSmokeOriginals.callTool && window.mcpClient) window.mcpClient.callTool = window.__echoSmokeOriginals.callTool;
+      if (window.__echoSmokeOriginals.getAvailableTools && window.mcpClient) window.mcpClient.getAvailableTools = window.__echoSmokeOriginals.getAvailableTools;
       var oldAdapter = resolveAdapter();
       if (oldAdapter && window.__echoSmokeOriginals.insertText) oldAdapter.insertText = window.__echoSmokeOriginals.insertText;
       if (oldAdapter && window.__echoSmokeOriginals.submitForm) oldAdapter.submitForm = window.__echoSmokeOriginals.submitForm;
+      if (window.__echoSmokeToolLoopHandler) window.removeEventListener('mcp-superassistant:tool-loop-event', window.__echoSmokeToolLoopHandler);
     } catch (e) {}
   }
 
@@ -335,6 +355,15 @@ function installObserversExpression() {
   var mc = window.mcpClient;
   if (mc && typeof mc.callTool === 'function') {
     window.__echoSmokeOriginals.callTool = mc.callTool;
+    if (scratchListCommandToolMetadata && typeof mc.getAvailableTools === 'function') {
+      window.__echoSmokeOriginals.getAvailableTools = mc.getAvailableTools;
+      mc.getAvailableTools = async function() {
+        var tools = await window.__echoSmokeOriginals.getAvailableTools.apply(this, arguments);
+        var list = Array.isArray(tools) ? tools.slice() : [];
+        if (!list.some(function(tool) { return tool && tool.name === 'list_command'; })) list.push(scratchListCommandToolMetadata);
+        return list;
+      };
+    }
     mc.callTool = async function(name, params) {
       var cacheKey = cacheKeyForTool(name, params);
       if (window.__echoSmokeSuppressDuplicateRenderer && name === ${quote(EXPECTED_TOOL)} && window.__echoSmokeCallResultCache[cacheKey]) {
@@ -342,6 +371,13 @@ function installObserversExpression() {
         return window.__echoSmokeCallResultCache[cacheKey];
       }
       window.__echoSmokeEvents.push({ type: 'callTool', name: name, params: params, ts: Date.now() });
+      if (scratchListCommandToolResponse && name === 'list_command') {
+        var scratchResult = JSON.parse(JSON.stringify(scratchListCommandToolResponse));
+        window.__echoSmokeCallResultCache[cacheKey] = scratchResult;
+        window.__echoSmokeLastResultByName[name] = scratchResult;
+        window.__echoSmokeEvents.push({ type: 'callToolResult', name: name, resultPreview: JSON.stringify(scratchResult).slice(0, 1000), result: scratchResult, ts: Date.now() });
+        return scratchResult;
+      }
       try {
         var result = await window.__echoSmokeOriginals.callTool.call(this, name, params);
         window.__echoSmokeCallResultCache[cacheKey] = result;
@@ -458,9 +494,10 @@ const restoreObserversExpression = `(function() {
     if (!adapter && typeof win.getCurrentAdapter === 'function') adapter = win.getCurrentAdapter();
     return adapter;
   }
-  var restored = { callTool: false, insertText: false, submitForm: false, listener: false };
+  var restored = { callTool: false, getAvailableTools: false, insertText: false, submitForm: false, listener: false };
   if (window.__echoSmokeOriginals) {
     if (window.__echoSmokeOriginals.callTool && window.mcpClient) { window.mcpClient.callTool = window.__echoSmokeOriginals.callTool; restored.callTool = true; }
+    if (window.__echoSmokeOriginals.getAvailableTools && window.mcpClient) { window.mcpClient.getAvailableTools = window.__echoSmokeOriginals.getAvailableTools; restored.getAvailableTools = true; }
     var adapter = resolveAdapter();
     if (adapter && window.__echoSmokeOriginals.insertText) { adapter.insertText = window.__echoSmokeOriginals.insertText; restored.insertText = true; }
     if (adapter && window.__echoSmokeOriginals.submitForm) { adapter.submitForm = window.__echoSmokeOriginals.submitForm; restored.submitForm = true; }
@@ -529,7 +566,7 @@ function adapterInsertTextExpression(text) {
 }
 
 function adapterSubmitFormExpression(options = {}) {
-  const suppressLog = options.suppressLog !== false;
+    const suppressLog = options.suppressLog !== false;
     return `(async function() {
     function resolveAdapter() {
       var win = window;
@@ -659,92 +696,96 @@ async function writeEvidence(evidence) {
 }
 
 function ensureInstructionFileAnswerFixture() {
-  if (!IS_INSTRUCTION_FILE_ANSWER_SMOKE) return;
-  const fixturePath = path.resolve(__dirname, '..', '..', '..', EXPECTED_FILE_PATH);
-  const content = [
-    INSTRUCTION_FILE_ANSWER_TASK.marker,
-    'The maintenance condition named for this task is: capacitor drift.',
-    'This file is a local scratch fixture for the generic instruction smoke.',
-    '',
-  ].join('\n');
-  fs.writeFileSync(fixturePath, content, 'utf8');
+    if (!IS_INSTRUCTION_FILE_ANSWER_SMOKE) return;
+    const fixturePath = path.resolve(__dirname, '..', '..', '..', EXPECTED_FILE_PATH);
+    const content = [
+        INSTRUCTION_FILE_ANSWER_TASK.marker,
+        'The maintenance condition named for this task is: capacitor drift.',
+        'This file is a local scratch fixture for the generic instruction smoke.',
+        '',
+    ].join('\n');
+    fs.writeFileSync(fixturePath, content, 'utf8');
 }
 
 function extractControlStatesFromStreamEvents(streamEvents, events) {
-  const text = extractFinalResponseTextFromStreamEvents(streamEvents || []);
-  const callIds = (events || [])
-    .filter((event) => event.type === 'toolLoopEvent' && event.detail?.type === 'tool_call_detected' && event.detail?.callId)
-    .map((event) => event.detail.callId);
-  return extractJsonBlocks(text)
-    .map((block) => {
-      try { return JSON.parse(block); } catch { return null; }
-    })
-    .filter((payload) => payload && typeof payload.status === 'string')
-    .map((payload) => ({
-      status: payload.status,
-      callIds: payload.status === 'continue' ? callIds : [],
-    }));
+    const text = extractFinalResponseTextFromStreamEvents(streamEvents || []);
+    const callIds = (events || [])
+        .filter((event) => event.type === 'toolLoopEvent' && event.detail?.type === 'tool_call_detected' && event.detail?.callId)
+        .map((event) => event.detail.callId);
+    return extractJsonBlocks(text)
+        .map((block) => {
+            try { return JSON.parse(block); } catch { return null; }
+        })
+        .filter((payload) => payload && typeof payload.status === 'string')
+        .map((payload) => ({
+            status: payload.status,
+            callIds: payload.status === 'continue' ? callIds : [],
+        }));
 }
 
 function normalizeExecutionCalls(events, toolLoopEvents) {
     const toolCallEvents = events.filter((event) => event.type === 'callTool');
-  const succeeded = toolLoopEvents.filter((event) => ['tool_execution_succeeded', 'tool_result_inserted', 'tool_result_submitted', 'bridge_handoff_ack'].includes(event.detail?.type) && event.detail?.callId);
-  const usedSucceeded = new Set();
+    const succeeded = toolLoopEvents.filter((event) => ['tool_execution_succeeded', 'tool_result_inserted', 'tool_result_submitted', 'bridge_handoff_ack'].includes(event.detail?.type) && event.detail?.callId);
+    const usedSucceeded = new Set();
     return toolCallEvents.map((event) => {
-    const matchingIndex = succeeded.findIndex((loopEvent, index) => {
-      return !usedSucceeded.has(index)
-        && loopEvent.detail?.toolName === event.name
-        && Number(loopEvent.ts || 0) >= Number(event.ts || 0);
-    });
-    const matchingLoop = matchingIndex >= 0 ? succeeded[matchingIndex] : null;
-    if (matchingIndex >= 0) usedSucceeded.add(matchingIndex);
+        const matchingIndex = succeeded.findIndex((loopEvent, index) => {
+            return !usedSucceeded.has(index)
+                && loopEvent.detail?.toolName === event.name
+                && Number(loopEvent.ts || 0) >= Number(event.ts || 0);
+        });
+        const matchingLoop = matchingIndex >= 0 ? succeeded[matchingIndex] : null;
+        if (matchingIndex >= 0) usedSucceeded.add(matchingIndex);
         const result = events.find((candidate) => candidate.type === 'callToolResult' && candidate.name === event.name && candidate.ts >= event.ts);
         return {
             name: event.name,
             callId: matchingLoop?.detail?.callId || null,
             args: event.params,
             resultText: result ? JSON.stringify(result.result || result.resultPreview || '') : '',
-      result: result?.result,
+            result: result?.result,
         };
     });
 }
 
 async function main() {
-  const prompt = SMOKE_KIND === 'review_pr_file_context'
-    ? buildReviewModulePrFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-    : SMOKE_KIND === 'review_file_context'
-    ? buildReviewModuleFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-    : SMOKE_KIND === 'review_context'
-    ? buildReviewModuleContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
-    ? buildInstructionFileAnswerPrompt({ nonce: NONCE, callId: CALL_ID })
-    : IS_MULTI_ROUND_SMOKE
-    ? buildMultiRoundEchoCountPrompt({ nonce: NONCE, callIds: EXPECTED_CALL_IDS, targetCount: MULTI_ROUND_TARGET_COUNT })
-    : buildEchoClosedLoopPrompt({ nonce: NONCE, callId: CALL_ID });
-  const validateEvidence = SMOKE_KIND === 'review_pr_file_context'
-    ? validateReviewModulePrFileContextEvidence
-    : SMOKE_KIND === 'review_file_context'
-    ? validateReviewModuleFileContextEvidence
-    : SMOKE_KIND === 'review_context'
-    ? validateReviewModuleContextEvidence
-    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
-    ? validateInstructionFileAnswerEvidence
-    : IS_MULTI_ROUND_SMOKE
-    ? validateMultiRoundEchoCountEvidence
-    : validateEchoClosedLoopEvidence;
+    const prompt = IS_LIST_COMMAND_SMOKE
+        ? buildListCommandPrompt({ nonce: NONCE, callId: CALL_ID })
+        : SMOKE_KIND === 'review_pr_file_context'
+            ? buildReviewModulePrFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+            : SMOKE_KIND === 'review_file_context'
+                ? buildReviewModuleFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+                : SMOKE_KIND === 'review_context'
+                    ? buildReviewModuleContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+                    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
+                        ? buildInstructionFileAnswerPrompt({ nonce: NONCE, callId: CALL_ID })
+                        : IS_MULTI_ROUND_SMOKE
+                            ? buildMultiRoundEchoCountPrompt({ nonce: NONCE, callIds: EXPECTED_CALL_IDS, targetCount: MULTI_ROUND_TARGET_COUNT })
+                            : buildEchoClosedLoopPrompt({ nonce: NONCE, callId: CALL_ID });
+    const validateEvidence = IS_LIST_COMMAND_SMOKE
+        ? validateListCommandEvidence
+        : SMOKE_KIND === 'review_pr_file_context'
+            ? validateReviewModulePrFileContextEvidence
+            : SMOKE_KIND === 'review_file_context'
+                ? validateReviewModuleFileContextEvidence
+                : SMOKE_KIND === 'review_context'
+                    ? validateReviewModuleContextEvidence
+                    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
+                        ? validateInstructionFileAnswerEvidence
+                        : IS_MULTI_ROUND_SMOKE
+                            ? validateMultiRoundEchoCountEvidence
+                            : validateEchoClosedLoopEvidence;
     const evidence = {
-    kind: SMOKE_KIND,
-    taskKind: IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
+        kind: SMOKE_KIND,
+        taskKind: IS_LIST_COMMAND_SMOKE ? LIST_COMMAND_TASK.kind : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
         runId: RUN_ID,
         nonce: NONCE,
         callId: CALL_ID,
-      expectedCallIds: EXPECTED_CALL_IDS,
-      targetCount: IS_MULTI_ROUND_SMOKE ? MULTI_ROUND_TARGET_COUNT : undefined,
-    expectedTool: EXPECTED_TOOL,
-    expectedAck: EXPECTED_ACK,
+        expectedCallIds: EXPECTED_CALL_IDS,
+        targetCount: IS_MULTI_ROUND_SMOKE ? MULTI_ROUND_TARGET_COUNT : undefined,
+        expectedTool: EXPECTED_TOOL,
+        expectedAck: EXPECTED_ACK,
         timestamp: new Date().toISOString(),
         autoSubmitDelayMs: AUTO_SUBMIT_DELAY_MS,
-    freshChatBefore: false,
+        freshChatBefore: false,
         target: null,
         context: null,
         preferencesBefore: null,
@@ -803,35 +844,46 @@ async function main() {
         evidence.preferencesBefore = JSON.parse(await cdp.evalMain(preferencesExpression()) || 'null');
         console.log(`preferencesBefore: ${JSON.stringify(evidence.preferencesBefore)}`);
 
+        if (IS_LIST_COMMAND_SMOKE) {
+          evidence.diagnostics.prePromptScratchInstall = await cdp.evalIso(isoContextId, installObserversExpression(), { timeoutMs: 10000 });
+        }
+
         evidence.exposedToolNames = parseToolNames(await cdp.evalIso(isoContextId, getToolsExpression(), { awaitPromise: true, timeoutMs: 30000 }));
-        if (!evidence.exposedToolNames.includes(EXPECTED_TOOL)) {
-          evidence.diagnostics.forceReconnect = parseMaybeJson(await cdp.evalIso(isoContextId, forceReconnectExpression(), { awaitPromise: true, timeoutMs: 30000 }));
-          await wait(1500);
-          evidence.exposedToolNames = parseToolNames(await cdp.evalIso(isoContextId, getToolsExpression(), { awaitPromise: true, timeoutMs: 30000 }));
+        if (!IS_LIST_COMMAND_SMOKE && !evidence.exposedToolNames.includes(EXPECTED_TOOL)) {
+            evidence.diagnostics.forceReconnect = parseMaybeJson(await cdp.evalIso(isoContextId, forceReconnectExpression(), { awaitPromise: true, timeoutMs: 30000 }));
+            await wait(1500);
+            evidence.exposedToolNames = parseToolNames(await cdp.evalIso(isoContextId, getToolsExpression(), { awaitPromise: true, timeoutMs: 30000 }));
         }
         console.log(`tools: ${evidence.exposedToolNames.join(', ')}`);
 
         ensureInstructionFileAnswerFixture();
 
-        const preflightToolArgs = EXPECTED_TOOL === 'echo'
-            ? `{ message: ${quote(NONCE)} }`
-            : EXPECTED_TOOL === 'read_workspace_file'
-            ? `{ path: ${quote(EXPECTED_FILE_PATH)}, max_bytes: ${EXPECTED_MAX_BYTES} }`
-                : '{}';
-        const preflightTool = await cdp.evalIso(isoContextId, `(async function() {
+        if (IS_LIST_COMMAND_SMOKE) {
+            evidence.diagnostics.directToolPreflight = {
+                scratchShim: true,
+                result: buildListCommandResult(),
+            };
+        } else {
+            const preflightToolArgs = EXPECTED_TOOL === 'echo'
+                ? `{ message: ${quote(NONCE)} }`
+                : EXPECTED_TOOL === 'read_workspace_file'
+                    ? `{ path: ${quote(EXPECTED_FILE_PATH)}, max_bytes: ${EXPECTED_MAX_BYTES} }`
+                    : '{}';
+            const preflightTool = await cdp.evalIso(isoContextId, `(async function() {
       const result = await window.mcpClient.callTool(${quote(EXPECTED_TOOL)}, ${preflightToolArgs});
       return JSON.stringify(result);
     })()`, { awaitPromise: true, timeoutMs: 30000 });
-        if (EXPECTED_TOOL === 'echo' && !String(preflightTool).includes(NONCE)) throw new Error('Direct echo preflight did not return current nonce');
-        if (EXPECTED_TOOL === 'read_workspace_file' && !String(preflightTool).includes(EXPECTED_FILE_PATH)) throw new Error('Direct read_workspace_file preflight did not return requested path');
-        if (IS_INSTRUCTION_FILE_ANSWER_SMOKE && !String(preflightTool).includes(INSTRUCTION_FILE_ANSWER_TASK.marker)) throw new Error('Direct read_workspace_file preflight did not return instruction fixture marker');
-        if (!String(preflightTool || '').trim()) throw new Error(`Direct ${EXPECTED_TOOL} preflight returned empty result`);
-        evidence.diagnostics.directToolPreflight = parseMaybeJson(preflightTool);
+            if (EXPECTED_TOOL === 'echo' && !String(preflightTool).includes(NONCE)) throw new Error('Direct echo preflight did not return current nonce');
+            if (EXPECTED_TOOL === 'read_workspace_file' && !String(preflightTool).includes(EXPECTED_FILE_PATH)) throw new Error('Direct read_workspace_file preflight did not return requested path');
+            if (IS_INSTRUCTION_FILE_ANSWER_SMOKE && !String(preflightTool).includes(INSTRUCTION_FILE_ANSWER_TASK.marker)) throw new Error('Direct read_workspace_file preflight did not return instruction fixture marker');
+            if (!String(preflightTool || '').trim()) throw new Error(`Direct ${EXPECTED_TOOL} preflight returned empty result`);
+            evidence.diagnostics.directToolPreflight = parseMaybeJson(preflightTool);
+        }
 
         await cdp.evalMain(setPreferencesExpression({ autoSubmit: true, autoInsert: true, autoExecute: false }));
         const configure = parseMaybeJson(await cdp.evalIso(isoContextId, bridgeConfigExpression({
-          enabled: STREAM_BRIDGE_ENABLED,
-          cutoffEnabled: STREAM_BRIDGE_ENABLED,
+            enabled: STREAM_BRIDGE_ENABLED,
+            cutoffEnabled: STREAM_BRIDGE_ENABLED,
             autoInsert: true,
             autoSubmit: true,
             enableDirectMonitoring: DIRECT_MONITORING_ENABLED,
@@ -899,6 +951,18 @@ async function main() {
 
         const observerInstall = await cdp.evalIso(isoContextId, installObserversExpression(), { timeoutMs: 10000 });
         evidence.diagnostics.observerInstall = observerInstall;
+        if (IS_LIST_COMMAND_SMOKE) {
+            evidence.diagnostics.postObserverBridgeConfigure = parseMaybeJson(await cdp.evalIso(isoContextId, bridgeConfigExpression({
+                enabled: STREAM_BRIDGE_ENABLED,
+                cutoffEnabled: STREAM_BRIDGE_ENABLED,
+                autoInsert: true,
+                autoSubmit: true,
+                enableDirectMonitoring: DIRECT_MONITORING_ENABLED,
+                toolAllowlist: [EXPECTED_TOOL],
+                maxToolCalls: EXPECTED_CALL_IDS.length,
+                autoSubmitDelayMs: AUTO_SUBMIT_DELAY_MS,
+            }), { timeoutMs: 10000 }));
+        }
 
         const submit = parseMaybeJson(await cdp.evalIso(isoContextId, adapterSubmitFormExpression(), { awaitPromise: true, timeoutMs: 30000 }));
         if (!submit || submit.ok !== true) throw new Error(`Initial prompt submit failed: ${JSON.stringify(submit)}`);
@@ -926,14 +990,14 @@ async function main() {
             evidence.insertedResults = events
                 .filter((event) => event.type === 'insertText')
                 .map((event) => ({
-                  name: EXPECTED_TOOL,
-                  callId: EXPECTED_CALL_IDS.find((id) => String(event.text || '').includes(id)) || null,
-                  text: event.text,
+                    name: EXPECTED_TOOL,
+                    callId: EXPECTED_CALL_IDS.find((id) => String(event.text || '').includes(id)) || null,
+                    text: event.text,
                 }));
             const insertEvent = events.find((event) => event.type === 'insertText' && EXPECTED_CALL_IDS.some((id) => String(event.text || '').includes(id)));
             if (insertEvent && !firstInsertTs) firstInsertTs = insertEvent.ts;
 
-              if (FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND)
+            if (ALLOW_RESULT_SUBMIT_FALLBACK
                 && !manualLegacySubmitAttempted
                 && evidence.executedToolCalls.length === 1
                 && evidence.insertedResults.length === 1
@@ -956,24 +1020,24 @@ async function main() {
                 evidence.diagnostics.manualSendButtonSubmit = clickResult;
                 await cdp.evalIso(isoContextId, `window.__echoSmokeEvents.push({ type: "submitButtonClickResult", result: ${quote(clickResult)}, ts: Date.now() }); true`, { timeoutMs: 10000 });
                 await cdp.evalIso(isoContextId, `window.__echoSmokeEvents.push({ type: "submitFormResult", result: ${clickResult && clickResult.ok ? 'true' : 'false'}, method: "send-button", source: "runner-cdp", ts: Date.now() }); true`, { timeoutMs: 10000 });
-              }
+            }
 
             const submitEvent = events.find((event) => event.type === 'submitForm');
             if (submitEvent && !autoSubmitTs) autoSubmitTs = submitEvent.ts;
             const submitResultEvent = events.find((event) => event.type === 'submitFormResult');
             const postSubmitStreamStarted = !!(submitResultEvent && streamEvents.some((event) => event.type === 'stream_start' && event.ts > submitResultEvent.ts));
-            if (FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND)
-              && !manualPostSubmitFallbackAttempted
-              && submitResultEvent
-              && !postSubmitStreamStarted
-              && Date.now() - submitResultEvent.ts >= POST_SUBMIT_FALLBACK_DELAY_MS) {
-              const composerState = JSON.parse(await cdp.evalMain(composerStateExpression()) || 'null');
-              evidence.diagnostics.postSubmitFallbackBefore = composerState;
-              if (composerState && composerState.hasCallId && composerState.hasFunctionResult) {
-                manualPostSubmitFallbackAttempted = true;
-                await cdp.evalIso(isoContextId, 'window.__echoSmokeEvents.push({ type: "manualPostSubmitFallback", ts: Date.now() }); true', { timeoutMs: 10000 });
-                evidence.diagnostics.postSubmitFallbackSubmit = await cdp.evalMain(submitInitialPromptExpression(), { timeoutMs: 15000 });
-              }
+            if (ALLOW_RESULT_SUBMIT_FALLBACK
+                && !manualPostSubmitFallbackAttempted
+                && submitResultEvent
+                && !postSubmitStreamStarted
+                && Date.now() - submitResultEvent.ts >= POST_SUBMIT_FALLBACK_DELAY_MS) {
+                const composerState = JSON.parse(await cdp.evalMain(composerStateExpression()) || 'null');
+                evidence.diagnostics.postSubmitFallbackBefore = composerState;
+                if (composerState && composerState.hasCallId && composerState.hasFunctionResult) {
+                    manualPostSubmitFallbackAttempted = true;
+                    await cdp.evalIso(isoContextId, 'window.__echoSmokeEvents.push({ type: "manualPostSubmitFallback", ts: Date.now() }); true', { timeoutMs: 10000 });
+                    evidence.diagnostics.postSubmitFallbackSubmit = await cdp.evalMain(submitInitialPromptExpression(), { timeoutMs: 15000 });
+                }
             }
             const postSubmitText = extractFinalResponseTextFromStreamEvents(streamEvents, { afterTs: autoSubmitTs });
             evidence.finalResponseText = postSubmitText;
@@ -985,8 +1049,8 @@ async function main() {
             const maxExpectedResultSubmits = IS_MULTI_ROUND_SMOKE ? MULTI_ROUND_TARGET_COUNT : 1;
             if (evidence.autoSubmitCount > maxExpectedResultSubmits) break;
             if (runtimeCompleteBeforeFinalRestore) {
-              evidence.diagnostics.runtimeCompleteBeforeFinalRestore = true;
-              break;
+                evidence.diagnostics.runtimeCompleteBeforeFinalRestore = true;
+                break;
             }
             if (evidence.validation.ok) break;
         }

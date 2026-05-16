@@ -210,7 +210,7 @@ describe('createFunctionCallScanner — Notion patch format (cross-patch)', () =
         assert.equal(result.identity!.callId, 'q1');
     });
 
-    test('non-patch line during accumulation triggers best-effort extraction', () => {
+    test('non-patch line during accumulation keeps waiting for end marker', () => {
         const scanner = createFunctionCallScanner();
 
         // Start accumulating with a patch that has function_call_start with full name
@@ -225,11 +225,10 @@ describe('createFunctionCallScanner — Notion patch format (cross-patch)', () =
         const r1 = scanner.processLine(startPatch);
         assert.equal(r1.accumulating, true);
 
-        // Non-patch line interrupts — should extract what we have
+        // Non-patch line interrupts — should not execute partial data
         const r2 = scanner.processLine('{"type":"some_other_line","name":"irrelevant"}');
-        assert.equal(r2.detected, true, 'should detect with partial data');
-        assert.ok(r2.identity !== null);
-        assert.equal(r2.identity!.name, 'my_tool');
+        assert.equal(r2.detected, false, 'should not detect without function_call_end');
+        assert.equal(r2.accumulating, true, 'should keep waiting for content patches');
     });
 
     test('scanner resets after detection', () => {
@@ -443,6 +442,153 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.deepEqual(JSON.parse(r.identity!.arguments!), { path: 'README.md' });
     });
 
+    test('heartbeat between split start and parameters does not trigger partial identity', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitStart = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '```jsonl\n{"type":"function_call_start","name',
+            }],
+        });
+        const splitNameAndDescription = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '":"read_workspace_file","call_id":"call_read_1"}\n{"type":"description","text":"read target"}',
+            }],
+        });
+        const heartbeat = JSON.stringify({ type: 'heartbeat' });
+        const paramsAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '\n{"type":"parameter","key":"path","value":"ai-web-agent-mcp/tests/test_tool_card_allowlist.py"}\n{"type":"parameter","key":"max_bytes","value":"1200"}\n{"type":"function_call_end","call_id":"call_read_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitStart);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(splitNameAndDescription);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(heartbeat);
+        assert.equal(r3.detected, false, 'heartbeat must not execute a partial call');
+        assert.equal(r3.accumulating, true, 'heartbeat should keep waiting for function_call_end');
+
+        const r4 = scanner.processLine(paramsAndEnd);
+        assert.equal(r4.detected, true);
+        assert.equal(r4.accumulating, false);
+        assert.equal(r4.identity!.name, 'read_workspace_file');
+        assert.equal(r4.identity!.callId, 'call_read_1');
+        assert.deepEqual(JSON.parse(r4.identity!.arguments!), {
+            path: 'ai-web-agent-mcp/tests/test_tool_card_allowlist.py',
+            max_bytes: '1200',
+        });
+    });
+
+    test('starts accumulating when function_call_start token is split after function_ fragment', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitFunctionPrefix = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: ' changed file before review\"}\n```\n\n```jsonl\n{"type":"function_',
+            }],
+        });
+        const splitCallStart = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'call_start","name":"read_workspace_file","call_id":"call_read_2"}\n{"type":"description","text":"read target"}',
+            }],
+        });
+        const paramsAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '\n{"type":"parameter","key":"path","value":"ai-web-agent-mcp/tests/test_tool_card_allowlist.py"}\n{"type":"parameter","key":"max_bytes","value":1200}\n{"type":"function_call_end","call_id":"call_read_2"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitFunctionPrefix);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(splitCallStart);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(paramsAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'read_workspace_file');
+        assert.equal(r3.identity!.callId, 'call_read_2');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            path: 'ai-web-agent-mcp/tests/test_tool_card_allowlist.py',
+            max_bytes: '1200',
+        });
+    });
+
+    test('starts accumulating when JSONL type value is split before function_call_start', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitAfterTypeQuote = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/-',
+                v: {
+                    id: 'turn-1',
+                    type: 'agent-inference',
+                    value: [{ content: '```json\n{"status":"continue"}\n```\n\n```jsonl\n{"type":"' }],
+                },
+            }],
+        });
+        const startAndDescription = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'function_call_start","name":"list_command","call_id":"call_list_1"}\n{"type":"description","text":"discover commands"',
+            }],
+        });
+        const closeDescriptionAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '}\n{"type":"function_call_end","call_id":"call_list_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitAfterTypeQuote);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(startAndDescription);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(closeDescriptionAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'list_command');
+        assert.equal(r3.identity!.callId, 'call_list_1');
+        assert.equal(r3.identity!.arguments, null);
+    });
+
     test('o:a complete in single patch (start + end)', () => {
         const complete = JSON.stringify({
             type: 'patch',
@@ -488,12 +634,10 @@ describe('createFunctionCallScanner — buffer cap', () => {
         });
         const r2 = scanner.processLine(bigPatch);
 
-        // Should abort accumulation — best-effort identity extraction from what we have
+        // Should abort accumulation without executing partial arguments
         assert.equal(r2.accumulating, false, 'should stop accumulating');
-        // identity may or may not be extracted (partial data), but accumulation must stop
-        assert.equal(r2.detected, true, 'should detect with partial data');
-        assert.ok(r2.identity !== null, 'should extract partial identity');
-        assert.equal(r2.identity!.name, 'big_tool');
+        assert.equal(r2.detected, false, 'should not detect with incomplete oversized data');
+        assert.equal(r2.identity, null);
     });
 
     test('MAX_PATCH_BUFFER_SIZE is 128KB', () => {

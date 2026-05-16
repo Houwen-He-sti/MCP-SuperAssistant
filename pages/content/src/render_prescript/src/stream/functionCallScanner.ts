@@ -212,6 +212,32 @@ export function createFunctionCallScanner() {
         }
     }
 
+    function shouldStartPatchAccumulation(patchText: string): boolean {
+        const trimmed = patchText.trimEnd();
+        return patchText.includes('function_call_start')
+            || (patchText.includes('```jsonl') && /"type"\s*:\s*"function_/.test(patchText))
+            || (patchText.includes('```jsonl') && /"type"\s*:\s*"$/.test(trimmed));
+    }
+
+    function startPatchAccumulation(patchText: string, rawLine: string): ScanResult {
+        patchContentBuffer = patchText;
+        firstDetectionLine = rawLine;
+        if (patchContentBuffer.length > MAX_PATCH_BUFFER_SIZE) {
+            reset();
+            return { detected: false, identity: null, rawLine: '', accumulating: false };
+        }
+        if (patchText.includes('function_call_end')) {
+            const patchIdentity = extractIdentityFromJsonlBlock(patchContentBuffer);
+            reset();
+            if (patchIdentity === null) {
+                return { detected: false, identity: null, rawLine: '', accumulating: false };
+            }
+            return { detected: true, identity: patchIdentity, rawLine, accumulating: false };
+        }
+        isAccumulating = true;
+        return { detected: false, identity: null, rawLine: '', accumulating: true };
+    }
+
     function processLine(trimmedLine: string): ScanResult {
         // If accumulating patch content for a cross-patch function_call
         if (isAccumulating) {
@@ -220,18 +246,16 @@ export function createFunctionCallScanner() {
                 patchContentBuffer += patchText;
                 // Safety cap: abort if buffer grows too large
                 if (patchContentBuffer.length > MAX_PATCH_BUFFER_SIZE) {
-                    const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
-                    const rawLine = firstDetectionLine;
                     reset();
-                    if (identity !== null) {
-                        return { detected: true, identity, rawLine, accumulating: false };
-                    }
                     return { detected: false, identity: null, rawLine: '', accumulating: false };
                 }
                 if (patchContentBuffer.includes('function_call_end')) {
                     const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
                     const rawLine = firstDetectionLine;
                     reset();
+                    if (identity === null) {
+                        return { detected: false, identity: null, rawLine: '', accumulating: false };
+                    }
                     return { detected: true, identity, rawLine, accumulating: false };
                 }
                 // Still accumulating — need more patches
@@ -242,14 +266,14 @@ export function createFunctionCallScanner() {
             if (isNotionPatchLine(trimmedLine)) {
                 return { detected: false, identity: null, rawLine: '', accumulating: true };
             }
-            // Non-patch line while accumulating — abort accumulation, try best-effort
-            const identity = extractIdentityFromJsonlBlock(patchContentBuffer);
-            const rawLine = firstDetectionLine;
-            reset();
-            if (identity !== null) {
-                return { detected: true, identity, rawLine, accumulating: false };
-            }
-            // Fall through to normal detection on current line
+            // Heartbeats and other telemetry can interleave with Notion patch content.
+            // Keep waiting for function_call_end instead of executing partial arguments.
+            return { detected: false, identity: null, rawLine: '', accumulating: true };
+        }
+
+        const patchText = extractPatchTextContent(trimmedLine);
+        if (patchText !== null && shouldStartPatchAccumulation(patchText)) {
+            return startPatchAccumulation(patchText, trimmedLine);
         }
 
         if (!detectFunctionCall(trimmedLine)) {
@@ -263,19 +287,8 @@ export function createFunctionCallScanner() {
         }
 
         // Try Notion patch format
-        const patchText = extractPatchTextContent(trimmedLine);
         if (patchText !== null && patchText.includes('function_call_start')) {
-            patchContentBuffer = patchText;
-            firstDetectionLine = trimmedLine;
-            if (patchText.includes('function_call_end')) {
-                // Complete in one line
-                const patchIdentity = extractIdentityFromJsonlBlock(patchContentBuffer);
-                reset();
-                return { detected: true, identity: patchIdentity, rawLine: trimmedLine, accumulating: false };
-            }
-            // Need to accumulate more patches
-            isAccumulating = true;
-            return { detected: false, identity: null, rawLine: '', accumulating: true };
+            return startPatchAccumulation(patchText, trimmedLine);
         }
 
         // If this is a Notion patch line (type: "patch"), keyword matches are from

@@ -63,6 +63,13 @@ const INSTRUCTION_FILE_ANSWER_TASK = Object.freeze({
     marker: INSTRUCTION_FILE_ANSWER_MARKER,
     expectedAnswer: INSTRUCTION_FILE_ANSWER_EXPECTED_ANSWER,
 });
+const LIST_COMMAND_WORKSPACE_ROOT = 'C:\\Users\\houwen\\Documents\\VS Code Dir';
+const LIST_COMMAND_TASK = Object.freeze({
+    kind: 'list_command',
+    allowedTools: Object.freeze(['list_command']),
+    commandNames: Object.freeze(['Get-ChildItem', 'Get-Content', 'Select-String']),
+    workspaceRoot: LIST_COMMAND_WORKSPACE_ROOT,
+});
 
 const NOTION_AI_ROUTE_RE = /notion\.so\/(?:chat|ai)(?:[/?#]|$)/;
 
@@ -207,6 +214,59 @@ function buildInstructionFileAnswerPrompt({ nonce, callId, task = INSTRUCTION_FI
     ].join('\n');
 }
 
+function buildListCommandResult(task = LIST_COMMAND_TASK) {
+    return {
+        status: 'ok',
+        workspace_root: task.workspaceRoot,
+        path_policy: 'workspace_relative only; forbid .., absolute_path, drive_path, home_path, unc_path, url, outside_workspace',
+        safety: 'read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false',
+        commands: {
+            tree: 'Get-ChildItem',
+            read_file: 'Get-Content',
+            search_text: 'Select-String',
+        },
+    };
+}
+
+function buildListCommandPrompt({ nonce, callId, task = LIST_COMMAND_TASK, trunk = loadSharedBridgeTrunk() }) {
+    if (!nonce || !callId) throw new Error('nonce and callId are required');
+    return [
+        trunk.trim(),
+        '',
+        '---',
+        '',
+        '# 当前任务：List Command Discovery Smoke',
+        '',
+        'You need to help the user understand local workspace file-system capabilities.',
+        'Rules:',
+        '1. You cannot assume you know which local commands are available.',
+        '2. First output one `continue` JSON block, then call `list_command` exactly once.',
+        '3. After the command list is returned, do not execute any other command.',
+        '4. Based only on the returned command list, identify which command gets a file tree, which reads a file, which searches text, and what path/safety limits apply.',
+        '5. Do not call Get-ChildItem, Get-Content, Select-String, write tools, exec tools, Git tools, or network tools in this smoke.',
+        '',
+        `Current nonce: ${nonce}`,
+        `Current call_id: ${callId}`,
+        `Workspace root to verify from tool result: ${task.workspaceRoot}`,
+        '',
+        'Expected first response:',
+        '```json',
+        `{"status":"continue","nonce":"${nonce}","reason":"need current local command discovery"}`,
+        '```',
+        '```jsonl',
+        `{"type":"function_call_start","name":"list_command","call_id":"${callId}"}`,
+        '{"type":"description","text":"查询当前本地 Bridge 支持的文件系统命令"}',
+        `{"type":"function_call_end","call_id":"${callId}"}`,
+        '```',
+        '',
+        'Final JSON schema after the tool result is inserted:',
+        '```json',
+        '{"status":"done","nonce":"CURRENT_NONCE","tree_command":"...","read_file_command":"...","search_text_command":"...","workspace_root":"...","path_policy_summary":"...","safety_summary":"..."}',
+        '```',
+        'The final response must be exactly one fenced JSON block and no prose outside it.',
+    ].join('\n');
+}
+
 function buildReviewModuleContextPrompt({ ack, nonce, callId, trunk = loadSharedBridgeTrunk() }) {
     if (!ack || !nonce || !callId) throw new Error('ack, nonce and callId are required');
     const template = fs.readFileSync(REVIEW_MODULE_TEMPLATE_PATH, 'utf8');
@@ -310,6 +370,16 @@ function containsNonce(value, nonce) {
     if (!nonce) return false;
     if (value == null) return false;
     return JSON.stringify(value).includes(nonce);
+}
+
+function containsLiteral(value, literal) {
+    if (!literal) return false;
+    if (value == null) return false;
+    const raw = String(value);
+    const encoded = JSON.stringify(value);
+    const escapedOnce = String(literal).replaceAll('\\', '\\\\');
+    const escapedTwice = escapedOnce.replaceAll('\\', '\\\\');
+    return [raw, encoded].some((candidate) => candidate.includes(literal) || candidate.includes(escapedOnce) || candidate.includes(escapedTwice));
 }
 
 function isWriteCapableTool(name) {
@@ -612,6 +682,73 @@ function validateInstructionFileAnswerEvidence(evidence, task = INSTRUCTION_FILE
     return { ok: uniqueFailures.length === 0, failures: uniqueFailures };
 }
 
+function validateListCommandEvidence(evidence, task = LIST_COMMAND_TASK) {
+    const failures = [];
+    const data = evidence || {};
+    const nonce = data.nonce;
+    const callId = data.callId;
+    const calls = Array.isArray(data.executedToolCalls) ? data.executedToolCalls : [];
+    const results = Array.isArray(data.insertedResults) ? data.insertedResults : [];
+    const finalJson = extractLastJsonBlock(data.finalResponseText || '');
+    const commandNames = new Set(task.commandNames || []);
+
+    if (data.freshChatBefore !== true) failures.push('fresh_chat_missing');
+    if (!data.preferencesBefore) failures.push('preferences_before_missing');
+    if (data.finallyRestoreAttempted !== true) failures.push('finally_restore_not_attempted');
+    failures.push(...validatePreferenceRestore(data.preferencesAfter).failures);
+
+    const exposedTools = Array.isArray(data.exposedToolNames) ? data.exposedToolNames : [];
+    if (exposedTools.some(isWriteCapableTool)) failures.push('write_capable_tool_exposed');
+
+    if (calls.length !== 1) failures.push('executed_count_not_one');
+    const call = calls[0];
+    if (!call || call.name !== 'list_command') failures.push('unexpected_tool_executed');
+    if (calls.some((item) => commandNames.has(String(item?.name || '')))) failures.push('file_command_executed');
+    if (calls.some((item) => isWriteCapableTool(item?.name))) failures.push('write_capable_tool_executed');
+    if (call?.callId && call.callId !== callId) failures.push('current_call_id_missing');
+
+    const inserted = results.find((result) => result?.callId === callId || containsNonce(result?.text, callId));
+    if (!inserted) failures.push('inserted_result_call_id_mismatch');
+    validateSendButtonHandoffs(data, failures, 1);
+
+    const resultText = call?.resultText || call?.result || inserted?.text || '';
+    commandNames.forEach((name) => {
+        if (!containsNonce(resultText, name)) failures.push('list_command_missing_command');
+    });
+    if (!containsLiteral(resultText, task.workspaceRoot)) failures.push('list_command_missing_workspace_root');
+    if (!containsNonce(resultText, 'workspace_relative')) failures.push('list_command_missing_path_policy');
+    if (!containsNonce(resultText, 'read_only')) failures.push('list_command_missing_read_only');
+    if (!containsNonce(resultText, 'exec_enabled')) failures.push('list_command_missing_exec_boundary');
+
+    if (!finalJson) {
+        failures.push('final_json_missing');
+    } else {
+        try {
+            const payload = JSON.parse(finalJson);
+            if (payload.status !== 'done') failures.push('final_status_not_done');
+            if (payload.nonce !== nonce) failures.push('final_nonce_mismatch');
+            if (payload.tree_command !== 'Get-ChildItem') failures.push('final_tree_command_mismatch');
+            if (payload.read_file_command !== 'Get-Content') failures.push('final_read_file_command_mismatch');
+            if (payload.search_text_command !== 'Select-String') failures.push('final_search_text_command_mismatch');
+            if (!String(payload.workspace_root || '').includes(task.workspaceRoot)) failures.push('final_workspace_root_missing');
+            const pathPolicy = String(payload.path_policy_summary || '').toLowerCase();
+            if (!(pathPolicy.includes('workspace-relative') || (pathPolicy.includes('workspace') && pathPolicy.includes('relative')) || pathPolicy.includes('工作区相对'))) failures.push('final_path_policy_missing');
+            const safety = String(payload.safety_summary || '').toLowerCase();
+            const mentionsReadOnly = safety.includes('read-only') || safety.includes('read only') || safety.includes('read_only') || safety.includes('只读');
+            const mentionsWriteBoundary = safety.includes('write') || safety.includes('写');
+            const mentionsExecBoundary = safety.includes('exec') || safety.includes('execution') || safety.includes('execute') || safety.includes('执行');
+            if (!mentionsReadOnly || !mentionsWriteBoundary || !mentionsExecBoundary) failures.push('final_safety_summary_missing');
+        } catch {
+            failures.push('final_json_invalid');
+        }
+    }
+
+    if (data.oracleSource !== 'turn-scoped') failures.push('oracle_not_turn_scoped');
+
+    const uniqueFailures = [...new Set(failures)];
+    return { ok: uniqueFailures.length === 0, failures: uniqueFailures };
+}
+
 function validateReviewModuleContextEvidence(evidence) {
     const failures = [];
     const data = evidence || {};
@@ -788,10 +925,13 @@ module.exports = {
     REVIEW_PR_FILE_CONTEXT_PATH,
     REVIEW_PR_FILE_CONTEXT_MAX_BYTES,
     INSTRUCTION_FILE_ANSWER_TASK,
+    LIST_COMMAND_TASK,
     SAFE_FINAL_PREFERENCES,
     WRITE_CAPABLE_TOOL_NAMES,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
+    buildListCommandPrompt,
+    buildListCommandResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -801,6 +941,7 @@ module.exports = {
     validateReviewModuleContextEvidence,
     validateGenericBridgeEvidence,
     validateInstructionFileAnswerEvidence,
+    validateListCommandEvidence,
     validateMultiRoundEchoCountEvidence,
     validateEchoClosedLoopEvidence,
     validateEchoToolExecutions,

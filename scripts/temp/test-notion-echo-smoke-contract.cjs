@@ -9,8 +9,11 @@ const {
     REVIEW_PR_FILE_CONTEXT_PATH,
     SAFE_FINAL_PREFERENCES,
     INSTRUCTION_FILE_ANSWER_TASK,
+    LIST_COMMAND_TASK,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
+    buildListCommandPrompt,
+    buildListCommandResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -25,6 +28,7 @@ const {
     validateEchoToolExecutions,
     validateGenericBridgeEvidence,
     validateInstructionFileAnswerEvidence,
+    validateListCommandEvidence,
     validateMultiRoundEchoCountEvidence,
     validatePreferenceRestore,
     validateReviewModuleContextEvidence,
@@ -40,6 +44,7 @@ const multiRoundCallIds = [
     'call_echo_count_3_1778865000000',
 ];
 const instructionCallId = 'call_read_workspace_file_1778865000000';
+const listCommandCallId = 'call_list_command_1778865000000';
 
 function makePassingInstructionFileAnswerEvidence(overrides = {}) {
     return {
@@ -80,6 +85,38 @@ function makePassingInstructionFileAnswerEvidence(overrides = {}) {
             { type: 'submitFormResult', method: 'send-button', result: true },
         ],
         finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","answer":"capacitor drift","evidence_path":"' + INSTRUCTION_FILE_ANSWER_TASK.allowedPaths[0] + '","summary":"instruction smoke"}\n```',
+        oracleSource: 'turn-scoped',
+        ...overrides,
+    };
+}
+
+function makePassingListCommandEvidence(overrides = {}) {
+    const listCommandResult = buildListCommandResult();
+    const resultText = JSON.stringify({
+        content: [{ type: 'text', text: JSON.stringify(listCommandResult, null, 2) }],
+        isError: false,
+    });
+    return {
+        nonce,
+        callId: listCommandCallId,
+        freshChatBefore: true,
+        preferencesBefore: { autoInsert: true, autoSubmit: true, autoExecute: false },
+        preferencesAfter: { ...SAFE_FINAL_PREFERENCES },
+        finallyRestoreAttempted: true,
+        autoSubmitCount: 1,
+        exposedToolNames: ['echo', 'get_bridge_info', 'get_task_status', 'read_workspace_file'],
+        executedToolCalls: [
+            { name: 'list_command', callId: listCommandCallId, args: {}, resultText },
+        ],
+        insertedResults: [
+            { name: 'list_command', callId: listCommandCallId, text: `<function_result call_id="${listCommandCallId}" name="list_command" status="success">${resultText}</function_result>` },
+        ],
+        events: [
+            { type: 'submitForm', method: 'send-button', hasFunctionResult: true },
+            { type: 'submitButtonClickResult', result: { ok: true, method: 'send-button-click' } },
+            { type: 'submitFormResult', method: 'send-button', result: true },
+        ],
+        finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","tree_command":"Get-ChildItem","read_file_command":"Get-Content","search_text_command":"Select-String","workspace_root":"' + LIST_COMMAND_TASK.workspaceRoot.replaceAll('\\', '\\\\') + '","path_policy_summary":"Use workspace-relative paths only; no .., drive paths, home paths, UNC paths, URLs, or outside-workspace paths.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
         oracleSource: 'turn-scoped',
         ...overrides,
     };
@@ -294,6 +331,29 @@ assert.ok(!instructionPrompt.includes('LGTM'), 'instruction prompt does not incl
 assert.ok(!instructionPrompt.includes('REQUEST_CHANGES'), 'instruction prompt does not include review-specific states');
 assert.ok(!instructionPrompt.includes('GitHub write-back'), 'instruction prompt does not mention GitHub write-back');
 
+const listCommandPrompt = buildListCommandPrompt({ nonce, callId: listCommandCallId });
+assert.ok(listCommandPrompt.includes('List Command Discovery Smoke'), 'list_command prompt names the smoke kind');
+assert.ok(listCommandPrompt.includes('list_command'), 'list_command prompt requires discovery call');
+assert.ok(listCommandPrompt.includes('"status":"continue"'), 'list_command prompt uses continue control block before tool call');
+assert.ok(listCommandPrompt.includes(listCommandCallId), 'list_command prompt includes current call_id');
+assert.ok(listCommandPrompt.includes(nonce), 'list_command prompt includes nonce');
+assert.ok(listCommandPrompt.includes('Get-ChildItem'), 'list_command prompt final schema asks for tree command');
+assert.ok(listCommandPrompt.includes('Get-Content'), 'list_command prompt final schema asks for read command');
+assert.ok(listCommandPrompt.includes('Select-String'), 'list_command prompt final schema asks for search command');
+assert.ok(listCommandPrompt.includes('do not execute any other command'), 'list_command prompt forbids execution beyond discovery');
+assert.ok(!listCommandPrompt.includes('Code Review'), 'list_command prompt does not reuse review module title');
+assert.ok(!listCommandPrompt.includes('LGTM'), 'list_command prompt does not include review recommendations');
+assert.ok(!listCommandPrompt.includes('REQUEST_CHANGES'), 'list_command prompt does not include review-specific states');
+
+const listCommandResult = buildListCommandResult();
+assert.equal(listCommandResult.status, 'ok', 'list_command result has ok status');
+assert.equal(listCommandResult.workspace_root, LIST_COMMAND_TASK.workspaceRoot, 'list_command result exposes fixed workspace root');
+assert.deepEqual(listCommandResult.commands, { tree: 'Get-ChildItem', read_file: 'Get-Content', search_text: 'Select-String' }, 'list_command result exposes only first-slice read-only commands');
+assert.ok(listCommandResult.safety.includes('read_only=true'), 'list_command result is read-only');
+assert.ok(listCommandResult.safety.includes('exec_enabled=false'), 'list_command result forbids exec');
+assert.ok(!JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(listCommandResult, null, 2) }], isError: false }).includes('structuredContent'), 'list_command runner payload does not duplicate structuredContent');
+assert.ok(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(listCommandResult, null, 2) }], isError: false }).length < 900, 'list_command runner payload stays compact for Notion continuation');
+
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/chat'), true, 'accepts Notion /chat route');
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/ai?targetConfig=1'), true, 'accepts Notion /ai route');
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/page/abc'), false, 'rejects non-AI Notion route');
@@ -502,6 +562,43 @@ instructionFail = validateInstructionFileAnswerEvidence(makePassingInstructionFi
 }), INSTRUCTION_FILE_ANSWER_TASK);
 assert.equal(instructionFail.ok, false, 'task validator rejects hallucinated evidence path');
 assert.ok(instructionFail.failures.includes('final_evidence_path_mismatch'));
+
+const listCommandPass = validateListCommandEvidence(makePassingListCommandEvidence(), LIST_COMMAND_TASK);
+assert.equal(listCommandPass.ok, true, listCommandPass.failures.join(', '));
+
+let listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
+    executedToolCalls: [
+        { name: 'list_command', callId: listCommandCallId, args: {}, resultText: JSON.stringify(buildListCommandResult()) },
+        { name: 'Get-ChildItem', callId: `${listCommandCallId}_tree`, args: { Path: '.' }, resultText: '[]' },
+    ],
+}), LIST_COMMAND_TASK);
+assert.equal(listCommandFail.ok, false, 'list_command smoke rejects executing file commands');
+assert.ok(listCommandFail.failures.includes('executed_count_not_one'));
+assert.ok(listCommandFail.failures.includes('file_command_executed'));
+
+listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
+    executedToolCalls: [{ name: 'get_bridge_info', callId: listCommandCallId, args: {}, resultText: '{}' }],
+}), LIST_COMMAND_TASK);
+assert.equal(listCommandFail.ok, false, 'list_command smoke rejects reusing get_bridge_info as the called tool');
+assert.ok(listCommandFail.failures.includes('unexpected_tool_executed'));
+
+listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
+    finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","tree_command":"ls","read_file_command":"Get-Content","search_text_command":"Select-String","workspace_root":"' + LIST_COMMAND_TASK.workspaceRoot.replaceAll('\\', '\\\\') + '","path_policy_summary":"Use workspace-relative paths only.","safety_summary":"Read-only only; no write, no exec, no network."}\n```',
+}), LIST_COMMAND_TASK);
+assert.equal(listCommandFail.ok, false, 'list_command smoke rejects wrong tree command');
+assert.ok(listCommandFail.failures.includes('final_tree_command_mismatch'));
+
+listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
+    finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","tree_command":"Get-ChildItem","read_file_command":"Get-Content","search_text_command":"Select-String","workspace_root":"' + LIST_COMMAND_TASK.workspaceRoot.replaceAll('\\', '\\\\') + '","path_policy_summary":"Use absolute paths.","safety_summary":"Read-only only; no write, no exec, no network."}\n```',
+}), LIST_COMMAND_TASK);
+assert.equal(listCommandFail.ok, false, 'list_command smoke rejects missing workspace-relative path policy');
+assert.ok(listCommandFail.failures.includes('final_path_policy_missing'));
+
+listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
+    finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","tree_command":"Get-ChildItem","read_file_command":"Get-Content","search_text_command":"Select-String","workspace_root":"' + LIST_COMMAND_TASK.workspaceRoot.replaceAll('\\', '\\\\') + '","path_policy_summary":"Use workspace-relative paths only.","safety_summary":"Read files."}\n```',
+}), LIST_COMMAND_TASK);
+assert.equal(listCommandFail.ok, false, 'list_command smoke rejects incomplete safety summary');
+assert.ok(listCommandFail.failures.includes('final_safety_summary_missing'));
 
 let multiRoundFail = validateMultiRoundEchoCountEvidence(makePassingMultiRoundEvidence({ autoSubmitCount: 2 }));
 assert.equal(multiRoundFail.ok, false, 'multi-round smoke requires one result submit per tool round');

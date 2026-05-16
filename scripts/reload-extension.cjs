@@ -15,8 +15,16 @@ function getTargets() {
 (async () => {
   const targets = await getTargets();
 
+  const extensionIdCandidates = [
+    process.env.MCP_SUPERASSISTANT_EXTENSION_ID,
+    'hkjclekhnaffnhldgpmjnohihjmblbpj',
+    'mcjlamohcooanphmebaiigheeeoplihb',
+  ].filter(Boolean);
+
   // Find MCP-SA service worker
-  const sw = targets.find(t => t.url.includes('hkjclekhnaffnhldgpmjnohihjmblbpj'));
+  const sw = targets.find(t => t.type === 'service_worker' && extensionIdCandidates.some(id => t.url.includes(id)))
+    || targets.find(t => extensionIdCandidates.some(id => t.url.includes(id)))
+    || targets.find(t => t.type === 'service_worker' && /service-worker-loader\.js$/.test(t.url));
   if (!sw) {
     console.log('No SW found. Extension targets:');
     targets.filter(t => t.url.includes('chrome-extension://')).forEach(t => console.log('  ', t.type, t.url.substring(0, 80)));
