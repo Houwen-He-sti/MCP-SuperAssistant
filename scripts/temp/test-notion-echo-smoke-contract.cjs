@@ -11,6 +11,7 @@ const {
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
     WORKSPACE_TREE_TASK,
+    WORKSPACE_TREE_POLICY_TASK,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
     buildListCommandPrompt,
@@ -127,12 +128,13 @@ function makePassingListCommandEvidence(overrides = {}) {
     };
 }
 
-function makePassingWorkspaceTreeEvidence(overrides = {}) {
-    const workspaceTreeResult = buildWorkspaceTreeResult();
+function makePassingWorkspaceTreeEvidence(overrides = {}, task = WORKSPACE_TREE_TASK) {
+    const workspaceTreeResult = buildWorkspaceTreeResult(task);
     const resultText = JSON.stringify({
         content: [{ type: 'text', text: JSON.stringify(workspaceTreeResult, null, 2) }],
         isError: false,
     });
+    const finalEntries = task.expectedEntries.map((entry) => `"${entry}"`).join(',');
     return {
         nonce,
         callId: workspaceTreeCallId,
@@ -141,19 +143,19 @@ function makePassingWorkspaceTreeEvidence(overrides = {}) {
         preferencesAfter: { ...SAFE_FINAL_PREFERENCES },
         finallyRestoreAttempted: true,
         autoSubmitCount: 1,
-        exposedToolNames: ['echo', 'get_bridge_info', 'get_task_status', 'read_workspace_file', WORKSPACE_TREE_TASK.toolName],
+        exposedToolNames: ['echo', 'get_bridge_info', 'get_task_status', 'read_workspace_file', task.toolName],
         executedToolCalls: [
-            { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, args: { Path: WORKSPACE_TREE_TASK.path, Depth: WORKSPACE_TREE_TASK.depth }, resultText },
+            { name: task.toolName, callId: workspaceTreeCallId, args: { Path: task.path, Depth: task.depth }, resultText },
         ],
         insertedResults: [
-            { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, text: `<function_result call_id="${workspaceTreeCallId}" name="${WORKSPACE_TREE_TASK.toolName}" status="success">${resultText}</function_result>` },
+            { name: task.toolName, callId: workspaceTreeCallId, text: `<function_result call_id="${workspaceTreeCallId}" name="${task.toolName}" status="success">${resultText}</function_result>` },
         ],
         events: [
             { type: 'submitForm', method: 'send-button', hasFunctionResult: true },
             { type: 'submitButtonClickResult', result: { ok: true, method: 'send-button-click' } },
             { type: 'submitFormResult', method: 'send-button', result: true },
         ],
-        finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","command_executed":"Get-ChildItem","path":"' + WORKSPACE_TREE_TASK.path + '","entry_count":3,"entries":["alpha.txt","nested","nested/beta.md"],"path_policy_summary":"Use workspace-relative paths only.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
+        finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","command_executed":"Get-ChildItem","path":"' + task.path + '","entry_count":' + task.expectedEntries.length + ',"entries":[' + finalEntries + '],"path_policy_summary":"Use workspace-relative paths only.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
         oracleSource: 'turn-scoped',
         ...overrides,
     };
@@ -400,6 +402,11 @@ assert.ok(workspaceTreePrompt.includes('"Depth","value":2'), 'workspace_tree pro
 assert.ok(workspaceTreePrompt.includes('no prose outside'), 'workspace_tree prompt requires machine final JSON');
 assert.ok(!workspaceTreePrompt.includes('REQUEST_CHANGES'), 'workspace_tree prompt does not include review-specific states');
 
+const workspaceTreePolicyPrompt = buildWorkspaceTreePrompt({ nonce, callId: workspaceTreeCallId, task: WORKSPACE_TREE_POLICY_TASK });
+assert.ok(workspaceTreePolicyPrompt.includes(WORKSPACE_TREE_POLICY_TASK.path), 'workspace_tree_policy prompt names requested path');
+assert.ok(workspaceTreePolicyPrompt.includes(WORKSPACE_TREE_TASK.path), 'workspace_tree_policy prompt exposes bounded allowed path set');
+assert.ok(workspaceTreePolicyPrompt.includes('Use the requested path only'), 'workspace_tree_policy prompt requires target selection');
+
 const workspaceTreeResult = buildWorkspaceTreeResult();
 assert.equal(workspaceTreeResult.status, 'ok', 'workspace_tree result has ok status');
 assert.equal(workspaceTreeResult.command, 'Get-ChildItem', 'workspace_tree result reports command');
@@ -408,6 +415,11 @@ assert.ok(workspaceTreeResult.entries.some((entry) => entry.path === 'alpha.txt'
 assert.ok(workspaceTreeResult.entries.some((entry) => entry.path === 'nested/beta.md' && entry.type === 'file'), 'workspace_tree result includes nested file entry');
 assert.ok(workspaceTreeResult.safety.includes('read_only=true'), 'workspace_tree result is read-only');
 assert.ok(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(workspaceTreeResult, null, 2) }], isError: false }).length < 1400, 'workspace_tree runner payload stays compact for Notion continuation');
+
+const workspaceTreePolicyResult = buildWorkspaceTreeResult(WORKSPACE_TREE_POLICY_TASK);
+assert.equal(workspaceTreePolicyResult.path, WORKSPACE_TREE_POLICY_TASK.path, 'workspace_tree_policy result reports requested path');
+assert.ok(workspaceTreePolicyResult.entries.some((entry) => entry.path === 'gamma.txt' && entry.type === 'file'), 'workspace_tree_policy result includes alternate fixture file entry');
+assert.ok(workspaceTreePolicyResult.entries.some((entry) => entry.path === 'nested/delta.md' && entry.type === 'file'), 'workspace_tree_policy result includes alternate nested file entry');
 
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/chat'), true, 'accepts Notion /chat route');
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/ai?targetConfig=1'), true, 'accepts Notion /ai route');
@@ -657,6 +669,17 @@ assert.ok(listCommandFail.failures.includes('final_safety_summary_missing'));
 
 const workspaceTreePass = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence(), WORKSPACE_TREE_TASK);
 assert.equal(workspaceTreePass.ok, true, workspaceTreePass.failures.join(', '));
+
+const workspaceTreePolicyPass = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({}, WORKSPACE_TREE_POLICY_TASK), WORKSPACE_TREE_POLICY_TASK);
+assert.equal(workspaceTreePolicyPass.ok, true, workspaceTreePolicyPass.failures.join(', '));
+
+let workspaceTreePolicyFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    executedToolCalls: [
+        { name: WORKSPACE_TREE_POLICY_TASK.toolName, callId: workspaceTreeCallId, args: { Path: WORKSPACE_TREE_TASK.path, Depth: WORKSPACE_TREE_POLICY_TASK.depth }, resultText: JSON.stringify(buildWorkspaceTreeResult(WORKSPACE_TREE_TASK)) },
+    ],
+}), WORKSPACE_TREE_POLICY_TASK);
+assert.equal(workspaceTreePolicyFail.ok, false, 'workspace_tree_policy smoke rejects the wrong allowed path when it is not the requested target');
+assert.ok(workspaceTreePolicyFail.failures.includes('tree_path_mismatch'), 'workspace_tree_policy wrong target path failure is explicit');
 
 let workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
     executedToolCalls: [

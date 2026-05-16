@@ -9,6 +9,7 @@ const {
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
     WORKSPACE_TREE_TASK,
+    WORKSPACE_TREE_POLICY_TASK,
     REVIEW_FILE_CONTEXT_MAX_BYTES,
     REVIEW_FILE_CONTEXT_PATH,
     REVIEW_PR_FILE_CONTEXT_MAX_BYTES,
@@ -44,14 +45,15 @@ const STORE_KEY = 'mcp-super-assistant-ui-store';
 const SMOKE_KIND = process.env.NOTION_SMOKE_KIND || 'echo';
 const FILE_CONTEXT_SMOKE_KINDS = ['review_file_context', 'review_pr_file_context', 'instruction_file_answer'];
 const IS_LIST_COMMAND_SMOKE = SMOKE_KIND === 'list_command';
-const IS_WORKSPACE_TREE_SMOKE = SMOKE_KIND === 'workspace_tree';
+const IS_WORKSPACE_TREE_SMOKE = SMOKE_KIND === 'workspace_tree' || SMOKE_KIND === 'workspace_tree_policy';
+const CURRENT_WORKSPACE_TREE_TASK = SMOKE_KIND === 'workspace_tree_policy' ? WORKSPACE_TREE_POLICY_TASK : WORKSPACE_TREE_TASK;
 const IS_SCRATCH_TOOL_SMOKE = IS_LIST_COMMAND_SMOKE || IS_WORKSPACE_TREE_SMOKE;
 const IS_MULTI_ROUND_SMOKE = SMOKE_KIND === 'multi_round_count';
 const IS_INSTRUCTION_FILE_ANSWER_SMOKE = SMOKE_KIND === 'instruction_file_answer';
 const ALLOW_RESULT_SUBMIT_FALLBACK = FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_SCRATCH_TOOL_SMOKE;
 const MULTI_ROUND_TARGET_COUNT = Math.max(1, Number(process.env.NOTION_MULTI_ROUND_TARGET_COUNT || 3));
-const RUN_PREFIX = IS_WORKSPACE_TREE_SMOKE ? 'WORKSPACE_TREE' : IS_LIST_COMMAND_SMOKE ? 'LIST_COMMAND' : SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
-const EXPECTED_TOOL = IS_WORKSPACE_TREE_SMOKE ? WORKSPACE_TREE_TASK.toolName : IS_LIST_COMMAND_SMOKE ? 'list_command' : SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
+const RUN_PREFIX = SMOKE_KIND === 'workspace_tree_policy' ? 'WORKSPACE_TREE_POLICY' : IS_WORKSPACE_TREE_SMOKE ? 'WORKSPACE_TREE' : IS_LIST_COMMAND_SMOKE ? 'LIST_COMMAND' : SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
+const EXPECTED_TOOL = IS_WORKSPACE_TREE_SMOKE ? CURRENT_WORKSPACE_TREE_TASK.toolName : IS_LIST_COMMAND_SMOKE ? 'list_command' : SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
 const RUN_STAMP = Date.now();
 const RUN_ID = `${RUN_PREFIX}_${RUN_STAMP}`;
 const NONCE = `${RUN_ID}_NONCE`;
@@ -230,14 +232,14 @@ function setPreferencesExpression(preferences) {
 
 function installObserversExpression() {
     const listCommandPayload = buildListCommandResult();
-    const workspaceTreePayload = IS_WORKSPACE_TREE_SMOKE ? buildWorkspaceTreeResult() : null;
+    const workspaceTreePayload = IS_WORKSPACE_TREE_SMOKE ? buildWorkspaceTreeResult(CURRENT_WORKSPACE_TREE_TASK) : null;
     const listCommandToolMetadata = {
         name: 'list_command',
         description: 'Return read-only local workspace file operation command metadata. Does not execute file commands.',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     };
     const workspaceTreeToolMetadata = {
-        name: WORKSPACE_TREE_TASK.toolName,
+        name: CURRENT_WORKSPACE_TREE_TASK.toolName,
         description: 'Return a bounded read-only workspace tree using the safe Get-ChildItem equivalent.',
         inputSchema: {
             type: 'object',
@@ -265,14 +267,14 @@ function installObserversExpression() {
     }
     if (IS_WORKSPACE_TREE_SMOKE) {
         scratchToolMetadata.push(workspaceTreeToolMetadata);
-        scratchToolResponses[WORKSPACE_TREE_TASK.toolName] = workspaceTreeToolResponse;
+        scratchToolResponses[CURRENT_WORKSPACE_TREE_TASK.toolName] = workspaceTreeToolResponse;
     }
     return `(function() {
   var autoSubmitDelayMs = ${AUTO_SUBMIT_DELAY_MS};
   var expectedCallIds = ${JSON.stringify(EXPECTED_CALL_IDS)};
   var scratchToolMetadata = ${JSON.stringify(scratchToolMetadata)};
   var scratchToolResponses = ${JSON.stringify(scratchToolResponses)};
-  var workspaceTreeTask = ${IS_WORKSPACE_TREE_SMOKE ? JSON.stringify(WORKSPACE_TREE_TASK) : 'null'};
+  var workspaceTreeTask = ${IS_WORKSPACE_TREE_SMOKE ? JSON.stringify(CURRENT_WORKSPACE_TREE_TASK) : 'null'};
   function findExpectedCallId(text) {
     for (var i = 0; i < expectedCallIds.length; i++) {
       if (String(text || '').includes(expectedCallIds[i])) return expectedCallIds[i];
@@ -413,7 +415,8 @@ function installObserversExpression() {
           var requestedPath = String(params && (params.Path || params.path) || '');
           var depthRaw = params && (Object.prototype.hasOwnProperty.call(params, 'Depth') ? params.Depth : params.depth);
           var requestedDepth = Number(depthRaw);
-          if (requestedPath !== workspaceTreeTask.path || !Number.isFinite(requestedDepth) || requestedDepth > workspaceTreeTask.depth || requestedDepth < 0) {
+          var allowedPaths = Array.isArray(workspaceTreeTask.allowedPaths) ? workspaceTreeTask.allowedPaths : [workspaceTreeTask.path];
+          if (allowedPaths.indexOf(requestedPath) === -1 || requestedPath !== workspaceTreeTask.path || !Number.isFinite(requestedDepth) || requestedDepth > workspaceTreeTask.depth || requestedDepth < 0) {
             var policyError = { content: [{ type: 'text', text: JSON.stringify({ status: 'error', error: 'path_or_depth_out_of_policy' }) }], isError: true };
             window.__echoSmokeEvents.push({ type: 'callToolResult', name: name, resultPreview: JSON.stringify(policyError).slice(0, 1000), result: policyError, ts: Date.now() });
             return policyError;
@@ -652,6 +655,40 @@ function composerStateExpression() {
   })())`;
 }
 
+function postSubmitNoStreamDiagnosticsExpression() {
+    return `JSON.stringify((function() {
+    const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+    const text = input ? String(input.textContent || '') : '';
+    const resources = performance.getEntriesByType('resource')
+      .filter(function(entry) { return String(entry.name || '').includes('/api/v3/runInferenceTranscript'); })
+      .slice(-5)
+      .map(function(entry) {
+        return {
+          name: entry.name,
+          startTime: entry.startTime,
+          duration: entry.duration,
+          initiatorType: entry.initiatorType
+        };
+      });
+    return {
+      href: location.href,
+      visibilityState: document.visibilityState,
+      hasTextbox: !!input,
+      inputLen: text.length,
+      preview: text.slice(0, 300),
+      activeElementTag: document.activeElement ? document.activeElement.tagName : null,
+      activeElementRole: document.activeElement ? document.activeElement.getAttribute('role') : null,
+      interceptorInstalled: !!window.__MCP_SA_NOTION_STREAM_INTERCEPTOR_INSTALLED_V1__,
+      fetchName: window.fetch && window.fetch.name,
+      fetchLen: window.fetch ? window.fetch.toString().length : 0,
+      timeOrigin: performance.timeOrigin,
+      now: performance.now(),
+      runInferenceResourceCount: resources.length,
+      recentRunInferenceResources: resources
+    };
+  })())`;
+}
+
 function submitInitialPromptExpression() {
     return `(function() {
     const textbox = document.querySelector('div[role="textbox"][contenteditable="true"]');
@@ -795,7 +832,7 @@ function normalizeExecutionCalls(events, toolLoopEvents) {
 
 async function main() {
     const prompt = IS_WORKSPACE_TREE_SMOKE
-        ? buildWorkspaceTreePrompt({ nonce: NONCE, callId: CALL_ID })
+        ? buildWorkspaceTreePrompt({ nonce: NONCE, callId: CALL_ID, task: CURRENT_WORKSPACE_TREE_TASK })
         : IS_LIST_COMMAND_SMOKE
             ? buildListCommandPrompt({ nonce: NONCE, callId: CALL_ID })
             : SMOKE_KIND === 'review_pr_file_context'
@@ -810,7 +847,7 @@ async function main() {
                                 ? buildMultiRoundEchoCountPrompt({ nonce: NONCE, callIds: EXPECTED_CALL_IDS, targetCount: MULTI_ROUND_TARGET_COUNT })
                                 : buildEchoClosedLoopPrompt({ nonce: NONCE, callId: CALL_ID });
     const validateEvidence = IS_WORKSPACE_TREE_SMOKE
-        ? validateWorkspaceTreeEvidence
+        ? (data) => validateWorkspaceTreeEvidence(data, CURRENT_WORKSPACE_TREE_TASK)
         : IS_LIST_COMMAND_SMOKE
             ? validateListCommandEvidence
             : SMOKE_KIND === 'review_pr_file_context'
@@ -826,7 +863,7 @@ async function main() {
                                 : validateEchoClosedLoopEvidence;
     const evidence = {
         kind: SMOKE_KIND,
-        taskKind: IS_WORKSPACE_TREE_SMOKE ? WORKSPACE_TREE_TASK.kind : IS_LIST_COMMAND_SMOKE ? LIST_COMMAND_TASK.kind : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
+        taskKind: IS_WORKSPACE_TREE_SMOKE ? CURRENT_WORKSPACE_TREE_TASK.kind : IS_LIST_COMMAND_SMOKE ? LIST_COMMAND_TASK.kind : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
         runId: RUN_ID,
         nonce: NONCE,
         callId: CALL_ID,
@@ -880,6 +917,19 @@ async function main() {
 
         cdp = new Cdp(tab.webSocketDebuggerUrl);
         await cdp.open();
+        try {
+            await cdp.send('Page.bringToFront', {}, 10000);
+            await wait(500);
+            evidence.diagnostics.pageBringToFront = {
+                ok: true,
+                visibilityState: await cdp.evalMain('document.visibilityState', { timeoutMs: 10000 }),
+            };
+        } catch (bringToFrontError) {
+            evidence.diagnostics.pageBringToFront = {
+                ok: false,
+                error: String(bringToFrontError && bringToFrontError.message || bringToFrontError),
+            };
+        }
         const iso = await findIsoContext(cdp);
         isoContextId = iso.id;
         evidence.context = iso;
@@ -917,7 +967,7 @@ async function main() {
         } else if (IS_WORKSPACE_TREE_SMOKE) {
             evidence.diagnostics.directToolPreflight = {
                 scratchShim: true,
-                result: buildWorkspaceTreeResult(),
+                result: buildWorkspaceTreeResult(CURRENT_WORKSPACE_TREE_TASK),
             };
         } else {
             const preflightToolArgs = EXPECTED_TOOL === 'echo'
@@ -1082,11 +1132,15 @@ async function main() {
             if (submitEvent && !autoSubmitTs) autoSubmitTs = submitEvent.ts;
             const submitResultEvent = events.find((event) => event.type === 'submitFormResult');
             const postSubmitStreamStarted = !!(submitResultEvent && streamEvents.some((event) => event.type === 'stream_start' && event.ts > submitResultEvent.ts));
+            const postSubmitNoStreamStale = submitResultEvent
+                && !postSubmitStreamStarted
+                && Date.now() - submitResultEvent.ts >= POST_SUBMIT_FALLBACK_DELAY_MS;
+            if (postSubmitNoStreamStale && !evidence.diagnostics.postSubmitNoStream) {
+                evidence.diagnostics.postSubmitNoStream = parseMaybeJson(await cdp.evalMain(postSubmitNoStreamDiagnosticsExpression(), { timeoutMs: 10000 }));
+            }
             if (ALLOW_RESULT_SUBMIT_FALLBACK
                 && !manualPostSubmitFallbackAttempted
-                && submitResultEvent
-                && !postSubmitStreamStarted
-                && Date.now() - submitResultEvent.ts >= POST_SUBMIT_FALLBACK_DELAY_MS) {
+                && postSubmitNoStreamStale) {
                 const composerState = JSON.parse(await cdp.evalMain(composerStateExpression()) || 'null');
                 evidence.diagnostics.postSubmitFallbackBefore = composerState;
                 if (composerState && composerState.hasCallId && composerState.hasFunctionResult) {

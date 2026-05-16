@@ -12,7 +12,17 @@ function getTargets() {
   });
 }
 
-(async () => {
+function findExtensionTarget(targets, extensionIdCandidates) {
+  for (const id of extensionIdCandidates.filter(Boolean)) {
+    const serviceWorker = targets.find(t => t.type === 'service_worker' && t.url.includes(id));
+    if (serviceWorker) return serviceWorker;
+    const anyTarget = targets.find(t => t.url.includes(id));
+    if (anyTarget) return anyTarget;
+  }
+  return targets.find(t => t.type === 'service_worker' && /service-worker-loader\.js$/.test(t.url));
+}
+
+async function main() {
   const targets = await getTargets();
 
   const extensionIdCandidates = [
@@ -21,10 +31,8 @@ function getTargets() {
     'mcjlamohcooanphmebaiigheeeoplihb',
   ].filter(Boolean);
 
-  // Find MCP-SA service worker
-  const sw = targets.find(t => t.type === 'service_worker' && extensionIdCandidates.some(id => t.url.includes(id)))
-    || targets.find(t => extensionIdCandidates.some(id => t.url.includes(id)))
-    || targets.find(t => t.type === 'service_worker' && /service-worker-loader\.js$/.test(t.url));
+  // Find MCP-SA service worker, respecting explicit ID priority.
+  const sw = findExtensionTarget(targets, extensionIdCandidates);
   if (!sw) {
     console.log('No SW found. Extension targets:');
     targets.filter(t => t.url.includes('chrome-extension://')).forEach(t => console.log('  ', t.type, t.url.substring(0, 80)));
@@ -90,4 +98,10 @@ function getTargets() {
 
   ws2.close();
   process.exit();
-})().catch(e => { console.error(e); process.exit(1); });
+}
+
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
+
+module.exports = { findExtensionTarget };

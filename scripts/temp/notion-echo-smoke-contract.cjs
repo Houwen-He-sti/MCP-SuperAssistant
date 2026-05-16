@@ -71,6 +71,23 @@ const LIST_COMMAND_TASK = Object.freeze({
     workspaceRoot: LIST_COMMAND_WORKSPACE_ROOT,
 });
 const WORKSPACE_TREE_FIXTURE_PATH = 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture';
+const WORKSPACE_TREE_ALT_FIXTURE_PATH = 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture-alt';
+const WORKSPACE_TREE_FIXTURE_SPECS = Object.freeze({
+    [WORKSPACE_TREE_FIXTURE_PATH]: Object.freeze({
+        dirs: Object.freeze(['nested']),
+        files: Object.freeze([
+            Object.freeze({ path: 'alpha.txt', content: 'TREE_SMOKE_ALPHA\n' }),
+            Object.freeze({ path: 'nested/beta.md', content: 'TREE_SMOKE_BETA\n' }),
+        ]),
+    }),
+    [WORKSPACE_TREE_ALT_FIXTURE_PATH]: Object.freeze({
+        dirs: Object.freeze(['nested']),
+        files: Object.freeze([
+            Object.freeze({ path: 'gamma.txt', content: 'TREE_SMOKE_GAMMA\n' }),
+            Object.freeze({ path: 'nested/delta.md', content: 'TREE_SMOKE_DELTA\n' }),
+        ]),
+    }),
+});
 const WORKSPACE_TREE_TASK = Object.freeze({
     kind: 'workspace_tree',
     allowedTools: Object.freeze(['get_child_item']),
@@ -78,9 +95,17 @@ const WORKSPACE_TREE_TASK = Object.freeze({
     command: 'Get-ChildItem',
     workspaceRoot: LIST_COMMAND_WORKSPACE_ROOT,
     path: WORKSPACE_TREE_FIXTURE_PATH,
+    allowedPaths: Object.freeze([WORKSPACE_TREE_FIXTURE_PATH]),
     depth: 2,
     maxResults: 20,
     expectedEntries: Object.freeze(['alpha.txt', 'nested', 'nested/beta.md']),
+});
+const WORKSPACE_TREE_POLICY_TASK = Object.freeze({
+    ...WORKSPACE_TREE_TASK,
+    kind: 'workspace_tree_policy',
+    path: WORKSPACE_TREE_ALT_FIXTURE_PATH,
+    allowedPaths: Object.freeze([WORKSPACE_TREE_FIXTURE_PATH, WORKSPACE_TREE_ALT_FIXTURE_PATH]),
+    expectedEntries: Object.freeze(['gamma.txt', 'nested', 'nested/delta.md']),
 });
 
 const NOTION_AI_ROUTE_RE = /notion\.so\/(?:chat|ai)(?:[/?#]|$)/;
@@ -301,9 +326,14 @@ function resolveWorkspaceRelativePath(relativePath, workspaceRoot = LIST_COMMAND
 
 function ensureWorkspaceTreeFixture(task = WORKSPACE_TREE_TASK) {
     const fixtureRoot = resolveWorkspaceRelativePath(task.path, task.workspaceRoot);
-    fs.mkdirSync(path.join(fixtureRoot, 'nested'), { recursive: true });
-    fs.writeFileSync(path.join(fixtureRoot, 'alpha.txt'), 'TREE_SMOKE_ALPHA\n', 'utf8');
-    fs.writeFileSync(path.join(fixtureRoot, 'nested', 'beta.md'), 'TREE_SMOKE_BETA\n', 'utf8');
+    const fixtureSpec = WORKSPACE_TREE_FIXTURE_SPECS[task.path];
+    if (!fixtureSpec) throw new Error(`No workspace tree fixture spec for ${task.path}`);
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    fixtureSpec.dirs.forEach((dirName) => fs.mkdirSync(path.join(fixtureRoot, dirName), { recursive: true }));
+    fixtureSpec.files.forEach((file) => {
+        fs.mkdirSync(path.dirname(path.join(fixtureRoot, file.path)), { recursive: true });
+        fs.writeFileSync(path.join(fixtureRoot, file.path), file.content, 'utf8');
+    });
     return fixtureRoot;
 }
 
@@ -353,9 +383,11 @@ function buildWorkspaceTreePrompt({ nonce, callId, task = WORKSPACE_TREE_TASK, t
         'Rules:',
         `1. Output one \`continue\` JSON block, then call \`${task.toolName}\` exactly once.`,
         `2. The tool is the safe bridge equivalent of \`${task.command}\`, not arbitrary command execution.`,
-        `3. Use only path \`${task.path}\` and depth ${task.depth}.`,
-        '4. Do not call write tools, exec tools, Git tools, network tools, or any other file command.',
-        '5. After the tree result is returned, produce exactly one final fenced JSON block.',
+        `3. User request: list the workspace tree for \`${task.path}\`.`,
+        `4. Allowed paths for this smoke are: ${task.allowedPaths.map((allowedPath) => `\`${allowedPath}\``).join(', ')}. Use the requested path only.`,
+        `5. Use depth ${task.depth} and max_results ${task.maxResults}.`,
+        '6. Do not call write tools, exec tools, Git tools, network tools, or any other file command.',
+        '7. After the tree result is returned, produce exactly one final fenced JSON block.',
         '',
         `Current nonce: ${nonce}`,
         `Current call_id: ${callId}`,
@@ -1113,6 +1145,7 @@ module.exports = {
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
     WORKSPACE_TREE_TASK,
+    WORKSPACE_TREE_POLICY_TASK,
     SAFE_FINAL_PREFERENCES,
     WRITE_CAPABLE_TOOL_NAMES,
     buildEchoClosedLoopPrompt,
