@@ -8,6 +8,7 @@ const {
     ACK_PATTERN,
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
+    WORKSPACE_TREE_TASK,
     REVIEW_FILE_CONTEXT_MAX_BYTES,
     REVIEW_FILE_CONTEXT_PATH,
     REVIEW_PR_FILE_CONTEXT_MAX_BYTES,
@@ -17,6 +18,8 @@ const {
     buildInstructionFileAnswerPrompt,
     buildListCommandPrompt,
     buildListCommandResult,
+    buildWorkspaceTreePrompt,
+    buildWorkspaceTreeResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -29,6 +32,7 @@ const {
     validateEchoClosedLoopEvidence,
     validateInstructionFileAnswerEvidence,
     validateListCommandEvidence,
+    validateWorkspaceTreeEvidence,
     validateMultiRoundEchoCountEvidence,
     validateReviewModuleContextEvidence,
     validateReviewModuleFileContextEvidence,
@@ -40,12 +44,14 @@ const STORE_KEY = 'mcp-super-assistant-ui-store';
 const SMOKE_KIND = process.env.NOTION_SMOKE_KIND || 'echo';
 const FILE_CONTEXT_SMOKE_KINDS = ['review_file_context', 'review_pr_file_context', 'instruction_file_answer'];
 const IS_LIST_COMMAND_SMOKE = SMOKE_KIND === 'list_command';
+const IS_WORKSPACE_TREE_SMOKE = SMOKE_KIND === 'workspace_tree';
+const IS_SCRATCH_TOOL_SMOKE = IS_LIST_COMMAND_SMOKE || IS_WORKSPACE_TREE_SMOKE;
 const IS_MULTI_ROUND_SMOKE = SMOKE_KIND === 'multi_round_count';
 const IS_INSTRUCTION_FILE_ANSWER_SMOKE = SMOKE_KIND === 'instruction_file_answer';
-const ALLOW_RESULT_SUBMIT_FALLBACK = FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_LIST_COMMAND_SMOKE;
+const ALLOW_RESULT_SUBMIT_FALLBACK = FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_SCRATCH_TOOL_SMOKE;
 const MULTI_ROUND_TARGET_COUNT = Math.max(1, Number(process.env.NOTION_MULTI_ROUND_TARGET_COUNT || 3));
-const RUN_PREFIX = IS_LIST_COMMAND_SMOKE ? 'LIST_COMMAND' : SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
-const EXPECTED_TOOL = IS_LIST_COMMAND_SMOKE ? 'list_command' : SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
+const RUN_PREFIX = IS_WORKSPACE_TREE_SMOKE ? 'WORKSPACE_TREE' : IS_LIST_COMMAND_SMOKE ? 'LIST_COMMAND' : SMOKE_KIND === 'review_context' ? 'RM_CONTEXT' : SMOKE_KIND === 'review_file_context' ? 'RM_FILE_CONTEXT' : SMOKE_KIND === 'review_pr_file_context' ? 'RM_PR_FILE_CONTEXT' : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? 'INSTRUCTION_FILE_ANSWER' : IS_MULTI_ROUND_SMOKE ? 'MULTI_ROUND_COUNT' : 'ECHO_SMOKE';
+const EXPECTED_TOOL = IS_WORKSPACE_TREE_SMOKE ? WORKSPACE_TREE_TASK.toolName : IS_LIST_COMMAND_SMOKE ? 'list_command' : SMOKE_KIND === 'review_context' ? 'get_bridge_info' : FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) ? 'read_workspace_file' : 'echo';
 const RUN_STAMP = Date.now();
 const RUN_ID = `${RUN_PREFIX}_${RUN_STAMP}`;
 const NONCE = `${RUN_ID}_NONCE`;
@@ -57,7 +63,7 @@ const EXPECTED_ACK = `ACK_${RUN_ID}`;
 const EXPECTED_FILE_PATH = IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.allowedPaths[0] : SMOKE_KIND === 'review_pr_file_context' ? REVIEW_PR_FILE_CONTEXT_PATH : REVIEW_FILE_CONTEXT_PATH;
 const EXPECTED_MAX_BYTES = IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.maxBytes : SMOKE_KIND === 'review_pr_file_context' ? REVIEW_PR_FILE_CONTEXT_MAX_BYTES : REVIEW_FILE_CONTEXT_MAX_BYTES;
 const LIMITS = {
-    maxDurationMs: Number(process.env.ECHO_SMOKE_TIMEOUT_MS || ((IS_INSTRUCTION_FILE_ANSWER_SMOKE || IS_LIST_COMMAND_SMOKE) ? 60000 : 180000)),
+    maxDurationMs: Number(process.env.ECHO_SMOKE_TIMEOUT_MS || ((IS_INSTRUCTION_FILE_ANSWER_SMOKE || IS_SCRATCH_TOOL_SMOKE) ? 60000 : 180000)),
     pollMs: 2500,
 };
 const DEFAULT_AUTO_SUBMIT_DELAY_MS = IS_MULTI_ROUND_SMOKE ? 3000 : 1500;
@@ -69,7 +75,7 @@ const STREAM_BRIDGE_ENABLED = process.env.ECHO_SMOKE_STREAM_BRIDGE_ENABLED
     : true;
 const DIRECT_MONITORING_ENABLED = process.env.ECHO_SMOKE_DIRECT_MONITORING_ENABLED
     ? process.env.ECHO_SMOKE_DIRECT_MONITORING_ENABLED === 'true'
-  : !(FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_MULTI_ROUND_SMOKE || IS_LIST_COMMAND_SMOKE);
+    : !(FILE_CONTEXT_SMOKE_KINDS.includes(SMOKE_KIND) || IS_MULTI_ROUND_SMOKE || IS_SCRATCH_TOOL_SMOKE);
 
 function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -224,20 +230,49 @@ function setPreferencesExpression(preferences) {
 
 function installObserversExpression() {
     const listCommandPayload = buildListCommandResult();
+    const workspaceTreePayload = IS_WORKSPACE_TREE_SMOKE ? buildWorkspaceTreeResult() : null;
     const listCommandToolMetadata = {
         name: 'list_command',
         description: 'Return read-only local workspace file operation command metadata. Does not execute file commands.',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     };
+    const workspaceTreeToolMetadata = {
+        name: WORKSPACE_TREE_TASK.toolName,
+        description: 'Return a bounded read-only workspace tree using the safe Get-ChildItem equivalent.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                Path: { type: 'string' },
+                Depth: { type: 'number' },
+            },
+            required: ['Path', 'Depth'],
+            additionalProperties: false,
+        },
+    };
     const listCommandToolResponse = {
         content: [{ type: 'text', text: JSON.stringify(listCommandPayload, null, 2) }],
         isError: false,
     };
+    const workspaceTreeToolResponse = workspaceTreePayload ? {
+        content: [{ type: 'text', text: JSON.stringify(workspaceTreePayload, null, 2) }],
+        isError: false,
+    } : null;
+    const scratchToolMetadata = [];
+    const scratchToolResponses = {};
+    if (IS_LIST_COMMAND_SMOKE) {
+        scratchToolMetadata.push(listCommandToolMetadata);
+        scratchToolResponses.list_command = listCommandToolResponse;
+    }
+    if (IS_WORKSPACE_TREE_SMOKE) {
+        scratchToolMetadata.push(workspaceTreeToolMetadata);
+        scratchToolResponses[WORKSPACE_TREE_TASK.toolName] = workspaceTreeToolResponse;
+    }
     return `(function() {
   var autoSubmitDelayMs = ${AUTO_SUBMIT_DELAY_MS};
   var expectedCallIds = ${JSON.stringify(EXPECTED_CALL_IDS)};
-  var scratchListCommandToolMetadata = ${IS_LIST_COMMAND_SMOKE ? JSON.stringify(listCommandToolMetadata) : 'null'};
-  var scratchListCommandToolResponse = ${IS_LIST_COMMAND_SMOKE ? JSON.stringify(listCommandToolResponse) : 'null'};
+  var scratchToolMetadata = ${JSON.stringify(scratchToolMetadata)};
+  var scratchToolResponses = ${JSON.stringify(scratchToolResponses)};
+  var workspaceTreeTask = ${IS_WORKSPACE_TREE_SMOKE ? JSON.stringify(WORKSPACE_TREE_TASK) : 'null'};
   function findExpectedCallId(text) {
     for (var i = 0; i < expectedCallIds.length; i++) {
       if (String(text || '').includes(expectedCallIds[i])) return expectedCallIds[i];
@@ -355,12 +390,14 @@ function installObserversExpression() {
   var mc = window.mcpClient;
   if (mc && typeof mc.callTool === 'function') {
     window.__echoSmokeOriginals.callTool = mc.callTool;
-    if (scratchListCommandToolMetadata && typeof mc.getAvailableTools === 'function') {
+    if (scratchToolMetadata.length && typeof mc.getAvailableTools === 'function') {
       window.__echoSmokeOriginals.getAvailableTools = mc.getAvailableTools;
       mc.getAvailableTools = async function() {
         var tools = await window.__echoSmokeOriginals.getAvailableTools.apply(this, arguments);
         var list = Array.isArray(tools) ? tools.slice() : [];
-        if (!list.some(function(tool) { return tool && tool.name === 'list_command'; })) list.push(scratchListCommandToolMetadata);
+        scratchToolMetadata.forEach(function(metadata) {
+          if (!list.some(function(tool) { return tool && tool.name === metadata.name; })) list.push(metadata);
+        });
         return list;
       };
     }
@@ -371,8 +408,18 @@ function installObserversExpression() {
         return window.__echoSmokeCallResultCache[cacheKey];
       }
       window.__echoSmokeEvents.push({ type: 'callTool', name: name, params: params, ts: Date.now() });
-      if (scratchListCommandToolResponse && name === 'list_command') {
-        var scratchResult = JSON.parse(JSON.stringify(scratchListCommandToolResponse));
+      if (scratchToolResponses && scratchToolResponses[name]) {
+        if (workspaceTreeTask && name === workspaceTreeTask.toolName) {
+          var requestedPath = String(params && (params.Path || params.path) || '');
+          var depthRaw = params && (Object.prototype.hasOwnProperty.call(params, 'Depth') ? params.Depth : params.depth);
+          var requestedDepth = Number(depthRaw);
+          if (requestedPath !== workspaceTreeTask.path || !Number.isFinite(requestedDepth) || requestedDepth > workspaceTreeTask.depth || requestedDepth < 0) {
+            var policyError = { content: [{ type: 'text', text: JSON.stringify({ status: 'error', error: 'path_or_depth_out_of_policy' }) }], isError: true };
+            window.__echoSmokeEvents.push({ type: 'callToolResult', name: name, resultPreview: JSON.stringify(policyError).slice(0, 1000), result: policyError, ts: Date.now() });
+            return policyError;
+          }
+        }
+        var scratchResult = JSON.parse(JSON.stringify(scratchToolResponses[name]));
         window.__echoSmokeCallResultCache[cacheKey] = scratchResult;
         window.__echoSmokeLastResultByName[name] = scratchResult;
         window.__echoSmokeEvents.push({ type: 'callToolResult', name: name, resultPreview: JSON.stringify(scratchResult).slice(0, 1000), result: scratchResult, ts: Date.now() });
@@ -747,35 +794,39 @@ function normalizeExecutionCalls(events, toolLoopEvents) {
 }
 
 async function main() {
-    const prompt = IS_LIST_COMMAND_SMOKE
-        ? buildListCommandPrompt({ nonce: NONCE, callId: CALL_ID })
-        : SMOKE_KIND === 'review_pr_file_context'
-            ? buildReviewModulePrFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-            : SMOKE_KIND === 'review_file_context'
-                ? buildReviewModuleFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-                : SMOKE_KIND === 'review_context'
-                    ? buildReviewModuleContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
-                    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
-                        ? buildInstructionFileAnswerPrompt({ nonce: NONCE, callId: CALL_ID })
-                        : IS_MULTI_ROUND_SMOKE
-                            ? buildMultiRoundEchoCountPrompt({ nonce: NONCE, callIds: EXPECTED_CALL_IDS, targetCount: MULTI_ROUND_TARGET_COUNT })
-                            : buildEchoClosedLoopPrompt({ nonce: NONCE, callId: CALL_ID });
-    const validateEvidence = IS_LIST_COMMAND_SMOKE
-        ? validateListCommandEvidence
-        : SMOKE_KIND === 'review_pr_file_context'
-            ? validateReviewModulePrFileContextEvidence
-            : SMOKE_KIND === 'review_file_context'
-                ? validateReviewModuleFileContextEvidence
-                : SMOKE_KIND === 'review_context'
-                    ? validateReviewModuleContextEvidence
-                    : IS_INSTRUCTION_FILE_ANSWER_SMOKE
-                        ? validateInstructionFileAnswerEvidence
-                        : IS_MULTI_ROUND_SMOKE
-                            ? validateMultiRoundEchoCountEvidence
-                            : validateEchoClosedLoopEvidence;
+    const prompt = IS_WORKSPACE_TREE_SMOKE
+        ? buildWorkspaceTreePrompt({ nonce: NONCE, callId: CALL_ID })
+        : IS_LIST_COMMAND_SMOKE
+            ? buildListCommandPrompt({ nonce: NONCE, callId: CALL_ID })
+            : SMOKE_KIND === 'review_pr_file_context'
+                ? buildReviewModulePrFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+                : SMOKE_KIND === 'review_file_context'
+                    ? buildReviewModuleFileContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+                    : SMOKE_KIND === 'review_context'
+                        ? buildReviewModuleContextPrompt({ ack: EXPECTED_ACK, nonce: NONCE, callId: CALL_ID })
+                        : IS_INSTRUCTION_FILE_ANSWER_SMOKE
+                            ? buildInstructionFileAnswerPrompt({ nonce: NONCE, callId: CALL_ID })
+                            : IS_MULTI_ROUND_SMOKE
+                                ? buildMultiRoundEchoCountPrompt({ nonce: NONCE, callIds: EXPECTED_CALL_IDS, targetCount: MULTI_ROUND_TARGET_COUNT })
+                                : buildEchoClosedLoopPrompt({ nonce: NONCE, callId: CALL_ID });
+    const validateEvidence = IS_WORKSPACE_TREE_SMOKE
+        ? validateWorkspaceTreeEvidence
+        : IS_LIST_COMMAND_SMOKE
+            ? validateListCommandEvidence
+            : SMOKE_KIND === 'review_pr_file_context'
+                ? validateReviewModulePrFileContextEvidence
+                : SMOKE_KIND === 'review_file_context'
+                    ? validateReviewModuleFileContextEvidence
+                    : SMOKE_KIND === 'review_context'
+                        ? validateReviewModuleContextEvidence
+                        : IS_INSTRUCTION_FILE_ANSWER_SMOKE
+                            ? validateInstructionFileAnswerEvidence
+                            : IS_MULTI_ROUND_SMOKE
+                                ? validateMultiRoundEchoCountEvidence
+                                : validateEchoClosedLoopEvidence;
     const evidence = {
         kind: SMOKE_KIND,
-        taskKind: IS_LIST_COMMAND_SMOKE ? LIST_COMMAND_TASK.kind : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
+        taskKind: IS_WORKSPACE_TREE_SMOKE ? WORKSPACE_TREE_TASK.kind : IS_LIST_COMMAND_SMOKE ? LIST_COMMAND_TASK.kind : IS_INSTRUCTION_FILE_ANSWER_SMOKE ? INSTRUCTION_FILE_ANSWER_TASK.kind : undefined,
         runId: RUN_ID,
         nonce: NONCE,
         callId: CALL_ID,
@@ -844,12 +895,12 @@ async function main() {
         evidence.preferencesBefore = JSON.parse(await cdp.evalMain(preferencesExpression()) || 'null');
         console.log(`preferencesBefore: ${JSON.stringify(evidence.preferencesBefore)}`);
 
-        if (IS_LIST_COMMAND_SMOKE) {
-          evidence.diagnostics.prePromptScratchInstall = await cdp.evalIso(isoContextId, installObserversExpression(), { timeoutMs: 10000 });
+        if (IS_SCRATCH_TOOL_SMOKE) {
+            evidence.diagnostics.prePromptScratchInstall = await cdp.evalIso(isoContextId, installObserversExpression(), { timeoutMs: 10000 });
         }
 
         evidence.exposedToolNames = parseToolNames(await cdp.evalIso(isoContextId, getToolsExpression(), { awaitPromise: true, timeoutMs: 30000 }));
-        if (!IS_LIST_COMMAND_SMOKE && !evidence.exposedToolNames.includes(EXPECTED_TOOL)) {
+        if (!IS_SCRATCH_TOOL_SMOKE && !evidence.exposedToolNames.includes(EXPECTED_TOOL)) {
             evidence.diagnostics.forceReconnect = parseMaybeJson(await cdp.evalIso(isoContextId, forceReconnectExpression(), { awaitPromise: true, timeoutMs: 30000 }));
             await wait(1500);
             evidence.exposedToolNames = parseToolNames(await cdp.evalIso(isoContextId, getToolsExpression(), { awaitPromise: true, timeoutMs: 30000 }));
@@ -862,6 +913,11 @@ async function main() {
             evidence.diagnostics.directToolPreflight = {
                 scratchShim: true,
                 result: buildListCommandResult(),
+            };
+        } else if (IS_WORKSPACE_TREE_SMOKE) {
+            evidence.diagnostics.directToolPreflight = {
+                scratchShim: true,
+                result: buildWorkspaceTreeResult(),
             };
         } else {
             const preflightToolArgs = EXPECTED_TOOL === 'echo'
@@ -951,7 +1007,7 @@ async function main() {
 
         const observerInstall = await cdp.evalIso(isoContextId, installObserversExpression(), { timeoutMs: 10000 });
         evidence.diagnostics.observerInstall = observerInstall;
-        if (IS_LIST_COMMAND_SMOKE) {
+        if (IS_SCRATCH_TOOL_SMOKE) {
             evidence.diagnostics.postObserverBridgeConfigure = parseMaybeJson(await cdp.evalIso(isoContextId, bridgeConfigExpression({
                 enabled: STREAM_BRIDGE_ENABLED,
                 cutoffEnabled: STREAM_BRIDGE_ENABLED,

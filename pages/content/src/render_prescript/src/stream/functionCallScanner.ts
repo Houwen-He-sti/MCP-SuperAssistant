@@ -216,6 +216,7 @@ export function createFunctionCallScanner() {
         const trimmed = patchText.trimEnd();
         return patchText.includes('function_call_start')
             || (patchText.includes('```jsonl') && /"type"\s*:\s*"function_/.test(patchText))
+            || (patchText.includes('```jsonl') && /\{\s*$/.test(trimmed))
             || (patchText.includes('```jsonl') && /"type"\s*:\s*"$/.test(trimmed));
     }
 

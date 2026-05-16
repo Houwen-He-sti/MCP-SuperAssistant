@@ -589,6 +589,57 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.equal(r3.identity!.arguments, null);
     });
 
+    test('starts accumulating when JSONL object is split before type key', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitAfterObjectOpen = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/-',
+                v: {
+                    id: 'turn-1',
+                    type: 'agent-inference',
+                    value: [{ content: '```json\n{"status":"continue"}\n```\n\n```jsonl\n{' }],
+                },
+            }],
+        });
+        const startAndFirstParameter = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '"type":"function_call_start","name":"get_child_item","call_id":"call_tree_1"}\n{"type":"parameter","key":"Path","value":"MCP-Su',
+            }],
+        });
+        const restAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'perAssistant/scripts/temp/tree-smoke-fixture"}\n{"type":"parameter","key":"Depth","value":2}\n{"type":"function_call_end","call_id":"call_tree_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitAfterObjectOpen);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(startAndFirstParameter);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(restAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'get_child_item');
+        assert.equal(r3.identity!.callId, 'call_tree_1');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture',
+            Depth: '2',
+        });
+    });
+
     test('o:a complete in single patch (start + end)', () => {
         const complete = JSON.stringify({
             type: 'patch',

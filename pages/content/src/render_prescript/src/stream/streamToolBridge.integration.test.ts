@@ -1023,6 +1023,26 @@ describe('Integration: injectResultIfSafe contract', () => {
     assert.equal(result.outcome, 'INJECT_SKIPPED_NO_INSPECT');
   });
 
+  test('getInputContent transient null → retries before inserting', async () => {
+    let inspectCalls = 0;
+    let inserted = false;
+
+    const result = await injectResultIfSafe({
+      callId: 'call_retry', name: 'tool_retry', status: 'success',
+      result: 'data', autoSubmit: false,
+      inspectRetry: { attempts: 2, intervalMs: 0 },
+      adapter: () => ({
+        insertText: async () => { inserted = true; return true; },
+        submitForm: async () => true,
+        getInputContent: () => (++inspectCalls < 2 ? null : ''),
+      }),
+    });
+
+    assert.equal(result.outcome, 'RESULT_INJECTED');
+    assert.equal(inserted, true);
+    assert.equal(inspectCalls, 2);
+  });
+
   test('with nonce → ACK instruction appended to formatted result', async () => {
     let capturedText = '';
     const result = await injectResultIfSafe({

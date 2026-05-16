@@ -10,10 +10,13 @@ const {
     SAFE_FINAL_PREFERENCES,
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
+    WORKSPACE_TREE_TASK,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
     buildListCommandPrompt,
     buildListCommandResult,
+    buildWorkspaceTreePrompt,
+    buildWorkspaceTreeResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -29,6 +32,7 @@ const {
     validateGenericBridgeEvidence,
     validateInstructionFileAnswerEvidence,
     validateListCommandEvidence,
+    validateWorkspaceTreeEvidence,
     validateMultiRoundEchoCountEvidence,
     validatePreferenceRestore,
     validateReviewModuleContextEvidence,
@@ -45,6 +49,7 @@ const multiRoundCallIds = [
 ];
 const instructionCallId = 'call_read_workspace_file_1778865000000';
 const listCommandCallId = 'call_list_command_1778865000000';
+const workspaceTreeCallId = 'call_get_child_item_1778865000000';
 
 function makePassingInstructionFileAnswerEvidence(overrides = {}) {
     return {
@@ -117,6 +122,38 @@ function makePassingListCommandEvidence(overrides = {}) {
             { type: 'submitFormResult', method: 'send-button', result: true },
         ],
         finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","tree_command":"Get-ChildItem","read_file_command":"Get-Content","search_text_command":"Select-String","workspace_root":"' + LIST_COMMAND_TASK.workspaceRoot.replaceAll('\\', '\\\\') + '","path_policy_summary":"Use workspace-relative paths only; no .., drive paths, home paths, UNC paths, URLs, or outside-workspace paths.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
+        oracleSource: 'turn-scoped',
+        ...overrides,
+    };
+}
+
+function makePassingWorkspaceTreeEvidence(overrides = {}) {
+    const workspaceTreeResult = buildWorkspaceTreeResult();
+    const resultText = JSON.stringify({
+        content: [{ type: 'text', text: JSON.stringify(workspaceTreeResult, null, 2) }],
+        isError: false,
+    });
+    return {
+        nonce,
+        callId: workspaceTreeCallId,
+        freshChatBefore: true,
+        preferencesBefore: { autoInsert: true, autoSubmit: true, autoExecute: false },
+        preferencesAfter: { ...SAFE_FINAL_PREFERENCES },
+        finallyRestoreAttempted: true,
+        autoSubmitCount: 1,
+        exposedToolNames: ['echo', 'get_bridge_info', 'get_task_status', 'read_workspace_file', WORKSPACE_TREE_TASK.toolName],
+        executedToolCalls: [
+            { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, args: { Path: WORKSPACE_TREE_TASK.path, Depth: WORKSPACE_TREE_TASK.depth }, resultText },
+        ],
+        insertedResults: [
+            { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, text: `<function_result call_id="${workspaceTreeCallId}" name="${WORKSPACE_TREE_TASK.toolName}" status="success">${resultText}</function_result>` },
+        ],
+        events: [
+            { type: 'submitForm', method: 'send-button', hasFunctionResult: true },
+            { type: 'submitButtonClickResult', result: { ok: true, method: 'send-button-click' } },
+            { type: 'submitFormResult', method: 'send-button', result: true },
+        ],
+        finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","command_executed":"Get-ChildItem","path":"' + WORKSPACE_TREE_TASK.path + '","entry_count":3,"entries":["alpha.txt","nested","nested/beta.md"],"path_policy_summary":"Use workspace-relative paths only.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
         oracleSource: 'turn-scoped',
         ...overrides,
     };
@@ -353,6 +390,24 @@ assert.ok(listCommandResult.safety.includes('read_only=true'), 'list_command res
 assert.ok(listCommandResult.safety.includes('exec_enabled=false'), 'list_command result forbids exec');
 assert.ok(!JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(listCommandResult, null, 2) }], isError: false }).includes('structuredContent'), 'list_command runner payload does not duplicate structuredContent');
 assert.ok(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(listCommandResult, null, 2) }], isError: false }).length < 900, 'list_command runner payload stays compact for Notion continuation');
+
+const workspaceTreePrompt = buildWorkspaceTreePrompt({ nonce, callId: workspaceTreeCallId });
+assert.ok(workspaceTreePrompt.includes('Workspace Tree Smoke'), 'workspace_tree prompt names the smoke kind');
+assert.ok(workspaceTreePrompt.includes(WORKSPACE_TREE_TASK.toolName), 'workspace_tree prompt requires bounded tree tool');
+assert.ok(workspaceTreePrompt.includes('Get-ChildItem'), 'workspace_tree prompt maps to Get-ChildItem');
+assert.ok(workspaceTreePrompt.includes(WORKSPACE_TREE_TASK.path), 'workspace_tree prompt fixes the allowed path');
+assert.ok(workspaceTreePrompt.includes('"Depth","value":2'), 'workspace_tree prompt fixes the allowed depth');
+assert.ok(workspaceTreePrompt.includes('no prose outside'), 'workspace_tree prompt requires machine final JSON');
+assert.ok(!workspaceTreePrompt.includes('REQUEST_CHANGES'), 'workspace_tree prompt does not include review-specific states');
+
+const workspaceTreeResult = buildWorkspaceTreeResult();
+assert.equal(workspaceTreeResult.status, 'ok', 'workspace_tree result has ok status');
+assert.equal(workspaceTreeResult.command, 'Get-ChildItem', 'workspace_tree result reports command');
+assert.equal(workspaceTreeResult.path, WORKSPACE_TREE_TASK.path, 'workspace_tree result reports fixed path');
+assert.ok(workspaceTreeResult.entries.some((entry) => entry.path === 'alpha.txt' && entry.type === 'file'), 'workspace_tree result includes file entry');
+assert.ok(workspaceTreeResult.entries.some((entry) => entry.path === 'nested/beta.md' && entry.type === 'file'), 'workspace_tree result includes nested file entry');
+assert.ok(workspaceTreeResult.safety.includes('read_only=true'), 'workspace_tree result is read-only');
+assert.ok(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(workspaceTreeResult, null, 2) }], isError: false }).length < 1400, 'workspace_tree runner payload stays compact for Notion continuation');
 
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/chat'), true, 'accepts Notion /chat route');
 assert.equal(isNotionAiRouteUrl('https://www.notion.so/ai?targetConfig=1'), true, 'accepts Notion /ai route');
@@ -599,6 +654,43 @@ listCommandFail = validateListCommandEvidence(makePassingListCommandEvidence({
 }), LIST_COMMAND_TASK);
 assert.equal(listCommandFail.ok, false, 'list_command smoke rejects incomplete safety summary');
 assert.ok(listCommandFail.failures.includes('final_safety_summary_missing'));
+
+const workspaceTreePass = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence(), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreePass.ok, true, workspaceTreePass.failures.join(', '));
+
+let workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    executedToolCalls: [
+        { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, args: { Path: '../outside', Depth: 1 }, resultText: JSON.stringify(buildWorkspaceTreeResult()) },
+    ],
+}), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreeFail.ok, false, 'workspace_tree smoke rejects outside path request');
+assert.ok(workspaceTreeFail.failures.includes('tree_path_mismatch'));
+
+workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    executedToolCalls: [
+        { name: WORKSPACE_TREE_TASK.toolName, callId: workspaceTreeCallId, args: { Path: WORKSPACE_TREE_TASK.path, Depth: WORKSPACE_TREE_TASK.depth + 1 }, resultText: JSON.stringify(buildWorkspaceTreeResult()) },
+    ],
+}), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreeFail.ok, false, 'workspace_tree smoke rejects depth above limit');
+assert.ok(workspaceTreeFail.failures.includes('tree_depth_exceeds_limit'));
+
+workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    executedToolCalls: [{ name: 'get_bridge_info', callId: workspaceTreeCallId, args: {}, resultText: '{}' }],
+}), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreeFail.ok, false, 'workspace_tree smoke rejects wrong tool');
+assert.ok(workspaceTreeFail.failures.includes('unexpected_tool_executed'));
+
+workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","command_executed":"Get-ChildItem","path":"' + WORKSPACE_TREE_TASK.path + '","entry_count":1,"entries":["alpha.txt"],"path_policy_summary":"Use workspace-relative paths only.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
+}), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreeFail.ok, false, 'workspace_tree smoke rejects missing final entries');
+assert.ok(workspaceTreeFail.failures.includes('final_entry_missing'));
+
+workspaceTreeFail = validateWorkspaceTreeEvidence(makePassingWorkspaceTreeEvidence({
+    finalResponseText: '```json\n{"status":"done","nonce":"' + nonce + '","command_executed":"Get-Content","path":"' + WORKSPACE_TREE_TASK.path + '","entry_count":3,"entries":["alpha.txt","nested","nested/beta.md"],"path_policy_summary":"Use workspace-relative paths only.","safety_summary":"read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false"}\n```',
+}), WORKSPACE_TREE_TASK);
+assert.equal(workspaceTreeFail.ok, false, 'workspace_tree smoke rejects wrong final command');
+assert.ok(workspaceTreeFail.failures.includes('final_command_mismatch'));
 
 let multiRoundFail = validateMultiRoundEchoCountEvidence(makePassingMultiRoundEvidence({ autoSubmitCount: 2 }));
 assert.equal(multiRoundFail.ok, false, 'multi-round smoke requires one result submit per tool round');

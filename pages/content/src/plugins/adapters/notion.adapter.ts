@@ -344,7 +344,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
      * Required by streamToolBridge fail-closed logic to check for user drafts.
      */
     getInputContent(): string | null {
-        const selectors = this.selectors.CHAT_INPUT.split(', ');
+        const selectors = [
+            ...this.selectors.NATIVE_CHAT_INPUT.split(', '),
+            ...this.selectors.CHAT_INPUT.split(', '),
+        ];
         for (const sel of selectors) {
             const el = document.querySelector(sel.trim()) as HTMLElement;
             if (el) return el.textContent || '';

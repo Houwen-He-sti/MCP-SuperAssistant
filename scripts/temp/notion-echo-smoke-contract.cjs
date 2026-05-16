@@ -70,6 +70,18 @@ const LIST_COMMAND_TASK = Object.freeze({
     commandNames: Object.freeze(['Get-ChildItem', 'Get-Content', 'Select-String']),
     workspaceRoot: LIST_COMMAND_WORKSPACE_ROOT,
 });
+const WORKSPACE_TREE_FIXTURE_PATH = 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture';
+const WORKSPACE_TREE_TASK = Object.freeze({
+    kind: 'workspace_tree',
+    allowedTools: Object.freeze(['get_child_item']),
+    toolName: 'get_child_item',
+    command: 'Get-ChildItem',
+    workspaceRoot: LIST_COMMAND_WORKSPACE_ROOT,
+    path: WORKSPACE_TREE_FIXTURE_PATH,
+    depth: 2,
+    maxResults: 20,
+    expectedEntries: Object.freeze(['alpha.txt', 'nested', 'nested/beta.md']),
+});
 
 const NOTION_AI_ROUTE_RE = /notion\.so\/(?:chat|ai)(?:[/?#]|$)/;
 
@@ -262,6 +274,107 @@ function buildListCommandPrompt({ nonce, callId, task = LIST_COMMAND_TASK, trunk
         'Final JSON schema after the tool result is inserted:',
         '```json',
         '{"status":"done","nonce":"CURRENT_NONCE","tree_command":"...","read_file_command":"...","search_text_command":"...","workspace_root":"...","path_policy_summary":"...","safety_summary":"..."}',
+        '```',
+        'The final response must be exactly one fenced JSON block and no prose outside it.',
+    ].join('\n');
+}
+
+function resolveWorkspaceRelativePath(relativePath, workspaceRoot = LIST_COMMAND_WORKSPACE_ROOT) {
+    const rawPath = String(relativePath || '');
+    const normalized = rawPath.replaceAll('\\', '/');
+    const forbidden = !rawPath
+        || rawPath.includes('\0')
+        || normalized.includes('..')
+        || normalized.startsWith('~')
+        || normalized.startsWith('//')
+        || /^[a-z]+:\/\//i.test(normalized)
+        || /^[a-z]:/i.test(rawPath)
+        || path.isAbsolute(rawPath);
+    if (forbidden) throw new Error(`Unsafe workspace-relative path: ${rawPath}`);
+    const root = path.resolve(workspaceRoot);
+    const resolved = path.resolve(root, rawPath);
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+        throw new Error(`Path escapes workspace: ${rawPath}`);
+    }
+    return resolved;
+}
+
+function ensureWorkspaceTreeFixture(task = WORKSPACE_TREE_TASK) {
+    const fixtureRoot = resolveWorkspaceRelativePath(task.path, task.workspaceRoot);
+    fs.mkdirSync(path.join(fixtureRoot, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(fixtureRoot, 'alpha.txt'), 'TREE_SMOKE_ALPHA\n', 'utf8');
+    fs.writeFileSync(path.join(fixtureRoot, 'nested', 'beta.md'), 'TREE_SMOKE_BETA\n', 'utf8');
+    return fixtureRoot;
+}
+
+function collectWorkspaceTreeEntries(rootPath, maxDepth, maxResults) {
+    const entries = [];
+    function visit(currentPath, depth) {
+        if (entries.length >= maxResults) return;
+        const children = fs.readdirSync(currentPath, { withFileTypes: true })
+            .sort((left, right) => left.name.localeCompare(right.name));
+        children.forEach((child) => {
+            if (entries.length >= maxResults) return;
+            const fullPath = path.join(currentPath, child.name);
+            const relative = path.relative(rootPath, fullPath).replaceAll(path.sep, '/');
+            entries.push({ path: relative, type: child.isDirectory() ? 'directory' : 'file' });
+            if (child.isDirectory() && depth < maxDepth) visit(fullPath, depth + 1);
+        });
+    }
+    visit(rootPath, 1);
+    return entries;
+}
+
+function buildWorkspaceTreeResult(task = WORKSPACE_TREE_TASK) {
+    const rootPath = ensureWorkspaceTreeFixture(task);
+    return {
+        status: 'ok',
+        command: task.command,
+        workspace_root: task.workspaceRoot,
+        path: task.path,
+        depth: task.depth,
+        max_results: task.maxResults,
+        path_policy: 'workspace_relative only; forbid .., absolute_path, drive_path, home_path, unc_path, url, outside_workspace',
+        safety: 'read_only=true; write_enabled=false; exec_enabled=false; network_enabled=false',
+        entries: collectWorkspaceTreeEntries(rootPath, task.depth, task.maxResults),
+    };
+}
+
+function buildWorkspaceTreePrompt({ nonce, callId, task = WORKSPACE_TREE_TASK, trunk = loadSharedBridgeTrunk() }) {
+    if (!nonce || !callId) throw new Error('nonce and callId are required');
+    return [
+        trunk.trim(),
+        '',
+        '---',
+        '',
+        '# 当前任务：Workspace Tree Smoke',
+        '',
+        'Use exactly one bounded read-only workspace tree operation. This smoke validates the next local file-handling slice after command discovery.',
+        'Rules:',
+        `1. Output one \`continue\` JSON block, then call \`${task.toolName}\` exactly once.`,
+        `2. The tool is the safe bridge equivalent of \`${task.command}\`, not arbitrary command execution.`,
+        `3. Use only path \`${task.path}\` and depth ${task.depth}.`,
+        '4. Do not call write tools, exec tools, Git tools, network tools, or any other file command.',
+        '5. After the tree result is returned, produce exactly one final fenced JSON block.',
+        '',
+        `Current nonce: ${nonce}`,
+        `Current call_id: ${callId}`,
+        `Workspace root: ${task.workspaceRoot}`,
+        '',
+        'Expected first response:',
+        '```json',
+        `{"status":"continue","nonce":"${nonce}","reason":"need bounded workspace tree"}`,
+        '```',
+        '```jsonl',
+        `{"type":"function_call_start","name":"${task.toolName}","call_id":"${callId}"}`,
+        `{"type":"parameter","key":"Path","value":"${task.path}"}`,
+        `{"type":"parameter","key":"Depth","value":${task.depth}}`,
+        `{"type":"function_call_end","call_id":"${callId}"}`,
+        '```',
+        '',
+        'Final JSON schema after the tool result is inserted:',
+        '```json',
+        '{"status":"done","nonce":"CURRENT_NONCE","command_executed":"Get-ChildItem","path":"...","entry_count":0,"entries":["..."],"path_policy_summary":"...","safety_summary":"..."}',
         '```',
         'The final response must be exactly one fenced JSON block and no prose outside it.',
     ].join('\n');
@@ -749,6 +862,79 @@ function validateListCommandEvidence(evidence, task = LIST_COMMAND_TASK) {
     return { ok: uniqueFailures.length === 0, failures: uniqueFailures };
 }
 
+function validateWorkspaceTreeEvidence(evidence, task = WORKSPACE_TREE_TASK) {
+    const failures = [];
+    const data = evidence || {};
+    const nonce = data.nonce;
+    const callId = data.callId;
+    const calls = Array.isArray(data.executedToolCalls) ? data.executedToolCalls : [];
+    const results = Array.isArray(data.insertedResults) ? data.insertedResults : [];
+    const finalJson = extractLastJsonBlock(data.finalResponseText || '');
+
+    if (data.freshChatBefore !== true) failures.push('fresh_chat_missing');
+    if (!data.preferencesBefore) failures.push('preferences_before_missing');
+    if (data.finallyRestoreAttempted !== true) failures.push('finally_restore_not_attempted');
+    failures.push(...validatePreferenceRestore(data.preferencesAfter).failures);
+
+    const exposedTools = Array.isArray(data.exposedToolNames) ? data.exposedToolNames : [];
+    if (exposedTools.some(isWriteCapableTool)) failures.push('write_capable_tool_exposed');
+
+    if (calls.length !== 1) failures.push('executed_count_not_one');
+    const call = calls[0];
+    if (!call || call.name !== task.toolName) failures.push('unexpected_tool_executed');
+    if (calls.some((item) => isWriteCapableTool(item?.name))) failures.push('write_capable_tool_executed');
+    if (call?.callId && call.callId !== callId) failures.push('current_call_id_missing');
+
+    const requestedPath = String(call?.args?.Path ?? call?.args?.path ?? '');
+    const requestedDepth = Number(call?.args?.Depth ?? call?.args?.depth ?? NaN);
+    if (requestedPath !== task.path) failures.push('tree_path_mismatch');
+    if (!Number.isFinite(requestedDepth) || requestedDepth > task.depth || requestedDepth < 0) failures.push('tree_depth_exceeds_limit');
+
+    const inserted = results.find((result) => result?.callId === callId || containsNonce(result?.text, callId));
+    if (!inserted) failures.push('inserted_result_call_id_mismatch');
+    validateSendButtonHandoffs(data, failures, 1);
+
+    const resultText = call?.resultText || call?.result || inserted?.text || '';
+    if (!containsNonce(resultText, task.command)) failures.push('tree_result_missing_command');
+    if (!containsNonce(resultText, task.path)) failures.push('tree_result_missing_path');
+    if (!containsLiteral(resultText, task.workspaceRoot)) failures.push('tree_result_missing_workspace_root');
+    task.expectedEntries.forEach((entry) => {
+        if (!containsNonce(resultText, entry)) failures.push('tree_result_missing_entry');
+    });
+
+    if (!finalJson) {
+        failures.push('final_json_missing');
+    } else {
+        try {
+            const payload = JSON.parse(finalJson);
+            if (payload.status !== 'done') failures.push('final_status_not_done');
+            if (payload.nonce !== nonce) failures.push('final_nonce_mismatch');
+            if (payload.command_executed !== task.command) failures.push('final_command_mismatch');
+            if (payload.path !== task.path) failures.push('final_path_mismatch');
+            const finalEntries = Array.isArray(payload.entries) ? payload.entries.map((entry) => String(entry)) : [];
+            if (!Array.isArray(payload.entries)) failures.push('final_entries_not_array');
+            task.expectedEntries.forEach((entry) => {
+                if (!finalEntries.some((value) => value.includes(entry))) failures.push('final_entry_missing');
+            });
+            if (Number(payload.entry_count || 0) < task.expectedEntries.length) failures.push('final_entry_count_too_low');
+            const pathPolicy = String(payload.path_policy_summary || '').toLowerCase();
+            if (!(pathPolicy.includes('workspace-relative') || (pathPolicy.includes('workspace') && pathPolicy.includes('relative')) || pathPolicy.includes('工作区相对'))) failures.push('final_path_policy_missing');
+            const safety = String(payload.safety_summary || '').toLowerCase();
+            const mentionsReadOnly = safety.includes('read-only') || safety.includes('read only') || safety.includes('read_only') || safety.includes('只读');
+            const mentionsWriteBoundary = safety.includes('write') || safety.includes('写');
+            const mentionsExecBoundary = safety.includes('exec') || safety.includes('execution') || safety.includes('execute') || safety.includes('执行');
+            if (!mentionsReadOnly || !mentionsWriteBoundary || !mentionsExecBoundary) failures.push('final_safety_summary_missing');
+        } catch {
+            failures.push('final_json_invalid');
+        }
+    }
+
+    if (data.oracleSource !== 'turn-scoped') failures.push('oracle_not_turn_scoped');
+
+    const uniqueFailures = [...new Set(failures)];
+    return { ok: uniqueFailures.length === 0, failures: uniqueFailures };
+}
+
 function validateReviewModuleContextEvidence(evidence) {
     const failures = [];
     const data = evidence || {};
@@ -926,12 +1112,15 @@ module.exports = {
     REVIEW_PR_FILE_CONTEXT_MAX_BYTES,
     INSTRUCTION_FILE_ANSWER_TASK,
     LIST_COMMAND_TASK,
+    WORKSPACE_TREE_TASK,
     SAFE_FINAL_PREFERENCES,
     WRITE_CAPABLE_TOOL_NAMES,
     buildEchoClosedLoopPrompt,
     buildInstructionFileAnswerPrompt,
     buildListCommandPrompt,
     buildListCommandResult,
+    buildWorkspaceTreePrompt,
+    buildWorkspaceTreeResult,
     buildMultiRoundEchoCountPrompt,
     buildReviewModuleContextPrompt,
     buildReviewModuleFileContextPrompt,
@@ -942,6 +1131,7 @@ module.exports = {
     validateGenericBridgeEvidence,
     validateInstructionFileAnswerEvidence,
     validateListCommandEvidence,
+    validateWorkspaceTreeEvidence,
     validateMultiRoundEchoCountEvidence,
     validateEchoClosedLoopEvidence,
     validateEchoToolExecutions,

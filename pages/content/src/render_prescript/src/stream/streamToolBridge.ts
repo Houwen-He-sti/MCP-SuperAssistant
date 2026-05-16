@@ -187,6 +187,27 @@ export interface InjectResultParams {
   adapter: () => AdapterLike | null;
   /** Gate 5c.1: If provided, append ACK instruction with this nonce. */
   nonce?: string;
+  inspectRetry?: {
+    attempts: number;
+    intervalMs: number;
+  };
+}
+
+const DEFAULT_BROWSER_INSPECT_RETRY_ATTEMPTS = 20;
+const DEFAULT_BROWSER_INSPECT_RETRY_INTERVAL_MS = 100;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getDefaultInspectRetry(): { attempts: number; intervalMs: number } {
+  if (typeof window === 'undefined') {
+    return { attempts: 0, intervalMs: 0 };
+  }
+  return {
+    attempts: DEFAULT_BROWSER_INSPECT_RETRY_ATTEMPTS,
+    intervalMs: DEFAULT_BROWSER_INSPECT_RETRY_INTERVAL_MS,
+  };
 }
 
 /**
@@ -217,6 +238,13 @@ export async function injectResultIfSafe(params: InjectResultParams): Promise<In
   let existingContent: string | null;
   try {
     existingContent = currentAdapter.getInputContent();
+    const inspectRetry = params.inspectRetry ?? getDefaultInspectRetry();
+    for (let attempt = 0; existingContent === null && attempt < inspectRetry.attempts; attempt++) {
+      if (inspectRetry.intervalMs > 0) {
+        await delay(inspectRetry.intervalMs);
+      }
+      existingContent = currentAdapter.getInputContent();
+    }
   } catch {
     return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
   }
