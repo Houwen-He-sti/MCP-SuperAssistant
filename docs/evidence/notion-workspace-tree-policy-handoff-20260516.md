@@ -98,3 +98,14 @@ Live trace smoke after the hardening produced a final event like:
 - `injectOutcome: RESULT_INJECTED`
 
 The smoke inserted a result into the input and then cleared that inserted draft. This confirms that final trace events can answer "where did it stop" and "how long did it take to deliver into the input" without relying on provider-local `operation_duration_ms`.
+
+## GPT Review Follow-up
+
+GPT review flagged several real issues. We accepted and fixed the ones that improve the current read-only path without widening scope:
+
+- `read_workspace_file` now reads only `limit + 1` bytes instead of reading the full file before slicing.
+- `get_child_item` no longer sorts an entire directory before applying `max_results`; it scans a bounded sample, marks truncation, and structures `list_failed` / `stat_failed` errors.
+- Provider results no longer expose the absolute `workspace_root`; they report `workspace_root_configured` instead.
+- Scanner rejects malformed JSONL blocks with missing parameter `value`, duplicate starts, or mismatched `function_call_end.call_id`, while preserving explicit `null` values.
+
+We intentionally did not make `cutoffEnabled = mcpEnabled` while `autoExecute` is off. That would improve detection telemetry, but it could also cut off Notion's response without executing a tool. The safer follow-up is a passive detection/diagnostic mode that does not abandon the stream. Prompt live-tool fallback and read-only result redelivery are also valid follow-ups, but not required to keep the current `get_child_item` increment safe.

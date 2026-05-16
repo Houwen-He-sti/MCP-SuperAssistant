@@ -511,6 +511,39 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         });
     });
 
+    test('rejects parameter lines that omit value', () => {
+        const block = [
+            '{"type":"function_call_start","name":"get_child_item","call_id":"c_missing"}',
+            '{"type":"parameter","key":"Path"}',
+            '{"type":"function_call_end","call_id":"c_missing"}',
+        ].join('\n');
+
+        assert.equal(extractIdentityFromJsonlBlock(block), null);
+    });
+
+    test('preserves explicit null parameter values', () => {
+        const block = [
+            '{"type":"function_call_start","name":"echo","call_id":"c_null"}',
+            '{"type":"parameter","key":"message","value":null}',
+            '{"type":"function_call_end","call_id":"c_null"}',
+        ].join('\n');
+
+        const identity = extractIdentityFromJsonlBlock(block);
+
+        assert.ok(identity);
+        assert.deepEqual(JSON.parse(identity.arguments!), { message: null });
+    });
+
+    test('rejects mismatched function_call_end call_id', () => {
+        const block = [
+            '{"type":"function_call_start","name":"echo","call_id":"c_start"}',
+            '{"type":"parameter","key":"message","value":"hello"}',
+            '{"type":"function_call_end","call_id":"c_other"}',
+        ].join('\n');
+
+        assert.equal(extractIdentityFromJsonlBlock(block), null);
+    });
+
     test('ignores Notion record-map snapshots that contain prior function calls', () => {
         const scanner = createFunctionCallScanner();
         const recordMap = JSON.stringify({

@@ -156,6 +156,8 @@ export function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentit
     const lines = text.split('\n');
     let name: string | null = null;
     let callId: string | null = null;
+    let endCallId: string | null = null;
+    let invalid = false;
     const args: Record<string, unknown> = {};
 
     for (const rawLine of lines) {
@@ -164,17 +166,25 @@ export function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentit
         try {
             const obj = JSON.parse(trimmed);
             if (obj.type === 'function_call_start') {
+                if (name !== null) invalid = true;
                 name = typeof obj.name === 'string' ? obj.name : null;
                 callId = typeof obj.call_id === 'string' ? obj.call_id : null;
             } else if (obj.type === 'parameter' && typeof obj.key === 'string') {
+                if (!Object.prototype.hasOwnProperty.call(obj, 'value')) {
+                    invalid = true;
+                    continue;
+                }
                 args[obj.key] = obj.value;
+            } else if (obj.type === 'function_call_end') {
+                endCallId = typeof obj.call_id === 'string' ? obj.call_id : null;
             }
         } catch {
             continue;
         }
     }
 
-    if (!name) return null;
+    if (!name || invalid) return null;
+    if (endCallId !== null && callId !== null && endCallId !== callId) return null;
 
     return {
         name,
