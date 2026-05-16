@@ -19,6 +19,7 @@ import {
   type McpClientLike,
   type StreamToolBridgeConfig,
 } from './streamToolBridge';
+import { deriveStoredBridgeConfig } from './streamToolBridgeConfig';
 import { normalizeToUiEvent } from './toolLoopUiEvents';
 import type { StreamEvent } from './types';
 
@@ -48,7 +49,77 @@ const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
   toolTimeoutMs: 30_000,
 };
 
-let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG };
+const UI_STORE_KEY = 'mcp-super-assistant-ui-store';
+const MAX_RECENT_BRIDGE_EVENTS = 50;
+
+export interface StreamToolBridgeTraceEvent {
+  timestamp: number;
+  type: BridgeEvent['type'];
+  streamId?: string;
+  callId?: string;
+  toolName?: string;
+  status?: string;
+  phase?: string;
+  errorCode?: string;
+  error?: string;
+  toolDurationMs?: number;
+  durationMs?: number;
+  elapsedMs?: number;
+  injectOutcome?: string;
+  outcome?: string;
+}
+
+let recentBridgeEvents: StreamToolBridgeTraceEvent[] = [];
+
+function sanitizeBridgeEvent(event: BridgeEvent): StreamToolBridgeTraceEvent {
+  if (event.type === 'bridge_handoff_ack') {
+    return {
+      timestamp: event.timestamp,
+      type: event.type,
+      streamId: event.streamId,
+      callId: event.callId,
+      toolName: event.functionName,
+      outcome: event.outcome,
+    };
+  }
+
+  return {
+    timestamp: event.timestamp ?? Date.now(),
+    type: event.type,
+    streamId: event.streamId,
+    callId: event.identity?.callId ?? undefined,
+    toolName: event.identity?.name ?? undefined,
+    status: event.status,
+    phase: event.phase,
+    errorCode: event.errorCode,
+    error: event.error,
+    toolDurationMs: event.toolDurationMs,
+    durationMs: event.durationMs,
+    elapsedMs: event.elapsedMs,
+    injectOutcome: event.injectOutcome,
+  };
+}
+
+function recordBridgeEvent(event: BridgeEvent): StreamToolBridgeTraceEvent {
+  const traceEvent = sanitizeBridgeEvent(event);
+  recentBridgeEvents.push(traceEvent);
+  if (recentBridgeEvents.length > MAX_RECENT_BRIDGE_EVENTS) {
+    recentBridgeEvents = recentBridgeEvents.slice(-MAX_RECENT_BRIDGE_EVENTS);
+  }
+  return traceEvent;
+}
+
+function readStoredBridgeConfig(): Partial<StreamToolBridgeInitConfig> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(UI_STORE_KEY) || '{}');
+    return deriveStoredBridgeConfig(stored?.state || {});
+  } catch {
+    return {};
+  }
+}
+
+let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG, ...readStoredBridgeConfig() };
 let bridgeHandler: ((event: unknown) => Promise<void>) | null = null;
 let unsubscribe: (() => void) | null = null;
 let unsubscribeTextScan: (() => void) | null = null;
@@ -181,14 +252,15 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
     },
     ackTracker: ackTrackerInstance,
     onEvent: (event: BridgeEvent) => {
+      const traceEvent = recordBridgeEvent(event);
       // Log bridge events to console for observability
       if (event.type === 'bridge_handoff_ack') {
         // Track the stream that triggered handoff — text scan skips this stream
         lastHandoffStreamId = event.streamId;
-        console.debug('[StreamToolBridge]', 'bridge_handoff_ack', event.nonce, event.functionName);
+        console.debug('[StreamToolBridge]', traceEvent);
       } else {
         const level = event.status === 'failed' ? 'warn' : 'debug';
-        console[level]('[StreamToolBridge]', event.status, event.phase || '', event.errorCode || '');
+        console[level]('[StreamToolBridge]', traceEvent);
       }
 
       // Gate 6B: Dispatch normalized UI event via CustomEvent for content script consumption
@@ -265,6 +337,7 @@ export function getStreamToolBridgeInfo(): {
   ackTrackerActive: boolean;
   ackPendingCount: number;
   lastModelAckEvent: import('./ackTracker').ModelAckEvent | null;
+  recentEvents: StreamToolBridgeTraceEvent[];
 } {
   const mcpClient = resolveMcpClient();
   const currentAdapter = resolveCurrentAdapter();
@@ -280,5 +353,10 @@ export function getStreamToolBridgeInfo(): {
     ackTrackerActive: ackTrackerInstance !== null,
     ackPendingCount: ackTrackerInstance?.getPendingCount() ?? 0,
     lastModelAckEvent: lastModelAckEvent ? { ...lastModelAckEvent } : null,
+    recentEvents: getStreamToolBridgeTrace(),
   };
+}
+
+export function getStreamToolBridgeTrace(): StreamToolBridgeTraceEvent[] {
+  return recentBridgeEvents.map((event) => ({ ...event }));
 }

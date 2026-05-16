@@ -38,6 +38,9 @@ export interface ToolLoopUiEvent {
     errorCode?: string;
     error?: string;
     injectOutcome?: InjectOutcome;
+    toolDurationMs?: number;
+    durationMs?: number;
+    elapsedMs?: number;
     /** Gate 6E: ACK latency from ackTracker (ms). Only present on model_ack_* events. */
     latencyMs?: number;
 }
@@ -90,12 +93,15 @@ export function normalizeToUiEvent(raw: RawEvent): ToolLoopUiEvent | null {
     // StreamToolExecutionEvent
     if (raw.type === 'stream_tool_execution') {
         const evt = raw as StreamToolExecutionEvent;
-        const base: Pick<ToolLoopUiEvent, 'version' | 'timestamp' | 'streamId' | 'callId' | 'toolName'> = {
+        const base: Pick<ToolLoopUiEvent, 'version' | 'timestamp' | 'streamId' | 'callId' | 'toolName' | 'toolDurationMs' | 'durationMs' | 'elapsedMs'> = {
             version: 1,
-            timestamp,
+            timestamp: evt.timestamp ?? timestamp,
             streamId: evt.streamId,
             callId: evt.identity?.callId ?? undefined,
             toolName: evt.identity?.name ?? undefined,
+            toolDurationMs: evt.toolDurationMs,
+            durationMs: evt.durationMs,
+            elapsedMs: evt.elapsedMs,
         };
 
         switch (evt.status) {

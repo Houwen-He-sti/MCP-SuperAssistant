@@ -410,6 +410,21 @@ describe('extractPatchTextContent — o:a (append) operations', () => {
         });
         assert.equal(extractPatchTextContent(multi), 'part1\npart2\n');
     });
+
+    test('extracts content when o:a appends a text block directly', () => {
+        const directTextAppend = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/1/value/-',
+                v: { type: 'text', content: '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_' },
+            }],
+        });
+        assert.equal(
+            extractPatchTextContent(directTextAppend),
+            '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_',
+        );
+    });
 });
 
 describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
@@ -429,6 +444,93 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.equal(r2.identity!.name, 'echo');
         assert.equal(r2.identity!.callId, 'c1');
         assert.deepEqual(JSON.parse(r2.identity!.arguments!), { message: 'hello' });
+    });
+
+    test('detects direct text append followed by split o:x parameters', () => {
+        const scanner = createFunctionCallScanner();
+        const start = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/1/value/-',
+                v: { type: 'text', content: '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_' },
+            }],
+        });
+        const middle = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/1/value/1/content',
+                v: 'scripts_1"}\n{"type":"parameter","key":"Path","value":"MCP-SuperAssistant/scripts"}\n{"type":"parameter","key":"Dep',
+            }],
+        });
+        const end = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/1/value/1/content',
+                v: 'th","value":1}\n{"type":"function_call_end","call_id":"c_scripts_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(start);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(middle);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(end);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'get_child_item');
+        assert.equal(r3.identity!.callId, 'c_scripts_1');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts',
+            Depth: 1,
+        });
+    });
+
+    test('preserves JSON parameter value types for MCP schema validation', () => {
+        const block = [
+            '{"type":"function_call_start","name":"get_child_item","call_id":"c_typed"}',
+            '{"type":"parameter","key":"Path","value":"MCP-SuperAssistant/scripts"}',
+            '{"type":"parameter","key":"Depth","value":1}',
+            '{"type":"parameter","key":"includeHidden","value":false}',
+            '{"type":"function_call_end","call_id":"c_typed"}',
+        ].join('\n');
+
+        const identity = extractIdentityFromJsonlBlock(block);
+
+        assert.ok(identity);
+        assert.deepEqual(JSON.parse(identity.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts',
+            Depth: 1,
+            includeHidden: false,
+        });
+    });
+
+    test('ignores Notion record-map snapshots that contain prior function calls', () => {
+        const scanner = createFunctionCallScanner();
+        const recordMap = JSON.stringify({
+            type: 'record-map',
+            recordMap: {
+                thread_message: {
+                    one: {
+                        value: {
+                            value: [
+                                { type: 'text', content: '{"type":"function_call_start","name":"get_child_item","call_id":"old"}' },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+
+        const result = scanner.processLine(recordMap);
+        assert.equal(result.detected, false);
+        assert.equal(result.accumulating, false);
     });
 
     test('existing o:x behavior is not regressed', () => {
@@ -537,7 +639,7 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.equal(r3.identity!.callId, 'call_read_2');
         assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
             path: 'ai-web-agent-mcp/tests/test_tool_card_allowlist.py',
-            max_bytes: '1200',
+            max_bytes: 1200,
         });
     });
 
@@ -636,7 +738,7 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.equal(r3.identity!.callId, 'call_tree_1');
         assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
             Path: 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture',
-            Depth: '2',
+            Depth: 2,
         });
     });
 

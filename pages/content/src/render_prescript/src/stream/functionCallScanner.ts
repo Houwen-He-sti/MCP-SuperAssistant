@@ -132,14 +132,17 @@ export function extractPatchTextContent(line: string): string | null {
             if (op.o === 'x' && typeof op.v === 'string' && typeof op.p === 'string' && op.p.endsWith('/content')) {
                 text += op.v;
             }
-            // o:"a" — append operation; content nested in v.value[].content
-            // Used by Notion's agent-inference blocks for the initial function_call_start
+            // o:"a" — append operation; content can be the appended value itself
+            // or nested in v.value[].content, depending on Notion's block shape.
             if (op.o === 'a' && op.v && typeof op.v === 'object' && Array.isArray(op.v.value)) {
                 for (const entry of op.v.value) {
                     if (entry && typeof entry.content === 'string') {
                         text += entry.content;
                     }
                 }
+            }
+            if (op.o === 'a' && op.v && typeof op.v === 'object' && typeof op.v.content === 'string') {
+                text += op.v.content;
             }
         }
         return text || null;
@@ -153,7 +156,7 @@ export function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentit
     const lines = text.split('\n');
     let name: string | null = null;
     let callId: string | null = null;
-    const args: Record<string, string> = {};
+    const args: Record<string, unknown> = {};
 
     for (const rawLine of lines) {
         const trimmed = rawLine.trim();
@@ -164,7 +167,7 @@ export function extractIdentityFromJsonlBlock(text: string): FunctionCallIdentit
                 name = typeof obj.name === 'string' ? obj.name : null;
                 callId = typeof obj.call_id === 'string' ? obj.call_id : null;
             } else if (obj.type === 'parameter' && typeof obj.key === 'string') {
-                args[obj.key] = typeof obj.value === 'string' ? obj.value : JSON.stringify(obj.value);
+                args[obj.key] = obj.value;
             }
         } catch {
             continue;
@@ -207,6 +210,16 @@ export function createFunctionCallScanner() {
         try {
             const obj = JSON.parse(line);
             return obj?.type === 'patch';
+        } catch {
+            return false;
+        }
+    }
+
+    function isNotionRecordMapLine(line: string): boolean {
+        if (!line.includes('"record-map"')) return false;
+        try {
+            const obj = JSON.parse(line);
+            return obj?.type === 'record-map';
         } catch {
             return false;
         }
@@ -275,6 +288,10 @@ export function createFunctionCallScanner() {
         const patchText = extractPatchTextContent(trimmedLine);
         if (patchText !== null && shouldStartPatchAccumulation(patchText)) {
             return startPatchAccumulation(patchText, trimmedLine);
+        }
+
+        if (isNotionRecordMapLine(trimmedLine)) {
+            return { detected: false, identity: null, rawLine: '', accumulating: false };
         }
 
         if (!detectFunctionCall(trimmedLine)) {

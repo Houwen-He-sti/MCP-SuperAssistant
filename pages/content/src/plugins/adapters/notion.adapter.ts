@@ -1,4 +1,5 @@
-import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
+import { buildReadOnlyNotionBridgePrompt } from '../../components/sidebar/Instructions/notionBridgePromptBuilder';
+import { wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
@@ -13,10 +14,10 @@ import { BaseAdapterPlugin } from './base.adapter';
  */
 
 /**
- * Bridge protocol prompt loaded from prompt-templates/notion-bridge.md.
+ * Bridge protocol prompt for native first-conversation injection.
  * Wrapped with <mcp-system-prompt> for UI card rendering.
  */
-const BRIDGE_PROMPT = wrapWithSystemPromptTag(assembleNotionBridgePrompt());
+const BRIDGE_PROMPT = wrapWithSystemPromptTag(buildReadOnlyNotionBridgePrompt());
 
 import { isNativeAiRoute, isSupportedPath } from './notion.routes.js';
 import { createNotionSubmitContext } from './notion/submit-context';

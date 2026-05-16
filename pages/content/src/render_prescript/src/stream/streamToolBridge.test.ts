@@ -65,16 +65,20 @@ interface MockAdapterOptions {
   submitThrows?: string | null;
   insertReturnsFalse?: boolean;
   submitReturnsFalse?: boolean;
+  insertDelay?: number;
 }
 
 function createMockAdapter(options: MockAdapterOptions = {}): AdapterLike & { _calls: { insertText: string[]; submitForm: boolean[] } } {
-  const { hasContent = false, hasGetInputContent = true, getInputContentReturnsNull = false, insertThrows = null, submitThrows = null, insertReturnsFalse = false, submitReturnsFalse = false } = options;
+  const { hasContent = false, hasGetInputContent = true, getInputContentReturnsNull = false, insertThrows = null, submitThrows = null, insertReturnsFalse = false, submitReturnsFalse = false, insertDelay = 0 } = options;
   const calls = { insertText: [] as string[], submitForm: [] as boolean[] };
 
   const adapter: AdapterLike & { _calls: typeof calls } = {
     insertText: async (text: string): Promise<boolean> => {
       if (insertThrows) throw new Error(insertThrows);
       if (insertReturnsFalse) return false;
+      if (insertDelay > 0) {
+        await new Promise(r => setTimeout(r, insertDelay));
+      }
       calls.insertText.push(text);
       return true;
     },
@@ -170,7 +174,7 @@ describe('streamToolBridge', () => {
   test('1. bridge disabled — event does not trigger execution', async () => {
     const mockClient = createMockMcpClient();
     const mockGuard = createMockGuard();
-    const mockAdapter = createMockAdapter();
+    const mockAdapter = createMockAdapter({ insertDelay: 5 });
     const mockStorage = createMockStorage();
 
     const events: StreamToolExecutionEvent[] = [];
@@ -238,6 +242,24 @@ describe('streamToolBridge', () => {
     // Verify succeeded event emitted
     const successEvent = events.find(e => e.status === 'succeeded');
     assert.ok(successEvent, 'succeeded event should be emitted');
+    assert.strictEqual(successEvent.phase, 'inject');
+    assert.strictEqual(typeof successEvent.timestamp, 'number');
+    assert.strictEqual(typeof successEvent.elapsedMs, 'number');
+    assert.strictEqual(typeof successEvent.toolDurationMs, 'number');
+    assert.strictEqual(typeof successEvent.durationMs, 'number');
+    assert.ok(successEvent.durationMs! >= successEvent.toolDurationMs!, 'durationMs should include result delivery work');
+
+    const reservedEvent = events.find(e => e.status === 'reserved');
+    assert.ok(reservedEvent, 'reserved event should be emitted');
+    assert.strictEqual(reservedEvent.phase, 'reserve');
+    assert.strictEqual(typeof reservedEvent.timestamp, 'number');
+    assert.strictEqual(typeof reservedEvent.elapsedMs, 'number');
+
+    const executingEvent = events.find(e => e.status === 'executing');
+    assert.ok(executingEvent, 'executing event should be emitted');
+    assert.strictEqual(executingEvent.phase, 'tool_call');
+    assert.strictEqual(typeof executingEvent.timestamp, 'number');
+    assert.strictEqual(typeof executingEvent.elapsedMs, 'number');
   });
 
   test('3. identity.name null — skip execution', async () => {

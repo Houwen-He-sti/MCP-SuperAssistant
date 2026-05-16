@@ -19,7 +19,7 @@ import {
   updateStalledStreamTimeoutConfig
 } from './observer/index';
 import { styles } from './renderer/styles';
-import { configureStreamToolBridge, getStreamToolBridgeInfo, initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
+import { configureStreamToolBridge, getStreamToolBridgeInfo, getStreamToolBridgeTrace, initStreamToolBridge, installStreamInterceptor, onStreamEvent } from './stream';
 
 // Install Notion AI stream interceptor:
 // - On Notion: SKIP the isolated world interceptor (can't intercept MAIN world fetch).
@@ -423,13 +423,14 @@ if (typeof window !== 'undefined') {
   // Expose Phase 3 bridge control for runtime activation
   (window as any).configureStreamToolBridge = configureStreamToolBridge;
   (window as any).getStreamToolBridgeInfo = getStreamToolBridgeInfo;
+  (window as any).getStreamToolBridgeTrace = getStreamToolBridgeTrace;
 }
 
 // --- Exports for potential module usage ---
 export {
   checkForUnprocessedFunctionCalls, checkForUnprocessedFunctionResults, checkStalledStreams, CONFIG, configure as configureFunctionCallRenderer, configureStreamToolBridge, detectPreExistingIncompleteBlocks, processUpdateQueue as forceStreamingUpdate,
   // Stream tool bridge diagnostics (Gate 3A)
-  getStreamToolBridgeInfo, initializeRenderer as initialize,
+  getStreamToolBridgeInfo, getStreamToolBridgeTrace, initializeRenderer as initialize,
   // Stream tool bridge (Phase 3)
   initStreamToolBridge,
   // Stream interceptor (Phase 1)
