@@ -1,4 +1,4 @@
-import type { TransportType, PluginConfig } from './plugin.js';
+import type { PluginConfig, TransportType } from './plugin.js';
 
 export interface GlobalConfig {
   timeout: number;
@@ -50,7 +50,7 @@ export interface ConnectionRequest {
 }
 
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
-  defaultTransport: 'sse',
+  defaultTransport: 'streamable-http',
   defaultUri: 'http://localhost:3006/sse',
   plugins: {
     sse: {
