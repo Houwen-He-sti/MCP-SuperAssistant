@@ -1,5 +1,6 @@
 import { exampleThemeStorage } from '@extension/storage';
 import 'webextension-polyfill';
+import { computeMigrationResult, needsSseToStreamableHttpMigration } from '../mcpclient/migration';
 
 // Build marker for runtime verification (PR #39 URL tracking)
 (globalThis as Record<string, unknown>).__MCP_SUPERASSISTANT_BUILD_INFO__ = {
@@ -549,15 +550,14 @@ chrome.runtime.onInstalled.addListener(async details => {
     });
 
     // Migrate old SSE config to streamable-http (R2 hardening)
-    // Previously the default was SSE with /sse endpoint; now it's streamable-http with /mcp.
-    // If the user had the old default stored, migrate it silently.
+    // Delegated to migration.ts for testability.
     const stored = await chrome.storage.local.get(['mcpServerUrl', 'mcpConnectionType']);
-    const oldSseUrl = 'http://localhost:3006/sse';
-    if (stored.mcpServerUrl === oldSseUrl && (!stored.mcpConnectionType || stored.mcpConnectionType === 'sse')) {
+    if (needsSseToStreamableHttpMigration(stored)) {
       logger.debug('[Migration] Migrating stored config from SSE to streamable-http');
+      const result = computeMigrationResult();
       await chrome.storage.local.set({
-        mcpServerUrl: DEFAULT_STREAMABLE_HTTP_URL,
-        mcpConnectionType: 'streamable-http',
+        mcpServerUrl: result.newUrl,
+        mcpConnectionType: result.newType,
       });
     }
 

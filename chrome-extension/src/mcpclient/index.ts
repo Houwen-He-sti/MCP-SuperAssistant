@@ -124,9 +124,10 @@ export async function createMcpClient(config?: Partial<import('./types/config.js
 }
 
 /**
- * Auto-detect transport type from URI
+ * Auto-detect transport type from URI.
+ * Exported for testing — internal consumers should use this via index.ts exports.
  */
-function detectTransportType(uri: string): import('./types/plugin.js').TransportType {
+export function detectTransportType(uri: string): import('./types/plugin.js').TransportType {
   try {
     const url = new URL(uri);
     if (url.protocol === 'ws:' || url.protocol === 'wss:') {
