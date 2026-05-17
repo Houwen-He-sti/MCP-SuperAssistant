@@ -51,7 +51,7 @@ export interface ConnectionRequest {
 
 export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   defaultTransport: 'streamable-http',
-  defaultUri: 'http://localhost:3006/sse',
+  defaultUri: 'http://localhost:3006/mcp',
   plugins: {
     sse: {
       keepAlive: true,
