@@ -19,7 +19,7 @@ export const MAX_ARGS_SIZE = 65_536;
 // --- Interfaces ---
 
 export interface StreamToolBridgeConfig {
-  enabled: boolean;           // allows MCP tool execution
+  enabled: boolean; // allows MCP tool execution
   autoInsert: boolean;
   autoSubmit: boolean;
   toolTimeoutMs: number;
@@ -108,7 +108,13 @@ export interface StreamEvent {
 
 // --- Adapter Diagnostic (P0-3) ---
 
-export type AdapterStatus = 'ok' | 'partial' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
+export type AdapterStatus =
+  | 'ok'
+  | 'partial'
+  | 'input_not_found'
+  | 'input_not_editable'
+  | 'submit_not_found'
+  | 'unknown_error';
 
 export interface AdapterDiagnostic {
   adapterAvailable: boolean;
@@ -200,7 +206,7 @@ const DEFAULT_BROWSER_INSPECT_RETRY_ATTEMPTS = 20;
 const DEFAULT_BROWSER_INSPECT_RETRY_INTERVAL_MS = 100;
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function getDefaultInspectRetry(): { attempts: number; intervalMs: number } {
@@ -339,7 +345,14 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     ) => emit(streamId, targetIdentity, status, extra, startedAt);
 
     // Step 0b: Check enabled
-    if (!config.enabled) return;
+    if (!config.enabled) {
+      emitStep(identity || ({} as FunctionCallIdentityLike), 'failed', {
+        phase: 'identity',
+        error: 'Tool execution disabled by config',
+        errorCode: 'EXECUTION_DISABLED',
+      });
+      return;
+    }
 
     // Step 1: Validate identity
     if (!identity || !identity.name) {
@@ -422,7 +435,10 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       const entry = streamCallCounts.get(streamId);
       const currentCount = entry ? entry.count : 0;
       if (currentCount >= maxCalls) {
-        guard.executionGuardStore.markFailed(reservedKey, `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`);
+        guard.executionGuardStore.markFailed(
+          reservedKey,
+          `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`,
+        );
         emitStep(identity, 'failed', {
           phase: 'reserve',
           error: `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`,
@@ -492,9 +508,12 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
         // Gate 5: inject error result for AI consumption
         if (config.autoInsert) {
           const { outcome, error: injectError } = await injectResultIfSafe({
-            callId, name: identity.name!, status: 'error',
+            callId,
+            name: identity.name!,
+            status: 'error',
             result: 'Tool execution timeout',
-            autoSubmit: !!config.autoSubmit, adapter,
+            autoSubmit: !!config.autoSubmit,
+            adapter,
           });
           emitStep(identity, 'failed', {
             phase: 'error_inject',
@@ -518,9 +537,12 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       // Gate 5: inject error result for AI consumption
       if (config.autoInsert) {
         const { outcome, error: injectError } = await injectResultIfSafe({
-          callId, name: identity.name!, status: 'error',
+          callId,
+          name: identity.name!,
+          status: 'error',
           result: (e as Error).message,
-          autoSubmit: !!config.autoSubmit, adapter,
+          autoSubmit: !!config.autoSubmit,
+          adapter,
         });
         emitStep(identity, 'failed', {
           phase: 'error_inject',
@@ -548,16 +570,27 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Step 9: DOM injection via shared safe-injection helper (Gate 5 refactor)
     if (config.autoInsert) {
       // Gate 5c.1: Generate nonce for ACK tracking (only for success + autoSubmit)
-      const nonce = (config.autoSubmit && ackTracker) ? generateNonce(callId) : undefined;
+      const nonce = config.autoSubmit && ackTracker ? generateNonce(callId) : undefined;
 
       const { outcome, error: injectError } = await injectResultIfSafe({
-        callId, name: identity.name!, status: 'success',
-        result, autoSubmit: !!config.autoSubmit, adapter, nonce,
+        callId,
+        name: identity.name!,
+        status: 'success',
+        result,
+        autoSubmit: !!config.autoSubmit,
+        adapter,
+        nonce,
       });
 
       switch (outcome) {
         case 'RESULT_SUBMITTED':
-          emitStep(identity, 'succeeded', { phase: 'submit', result, durationMs: Date.now() - startTime, toolDurationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'submit',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           // Gate 5c.1: Register nonce first, then emit bridge handoff ACK
           if (nonce && ackTracker) {
             ackTracker.registerPending(nonce, callId, identity.name!);
@@ -573,7 +606,13 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           }
           return;
         case 'RESULT_INJECTED':
-          emitStep(identity, 'succeeded', { phase: 'inject', result, durationMs: Date.now() - startTime, toolDurationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'inject',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           return;
         case 'INJECT_SKIPPED_NO_ADAPTER':
           emitStep(identity, 'failed', {
@@ -587,7 +626,8 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           return;
         case 'INJECT_SKIPPED_NO_INSPECT':
           emitStep(identity, 'succeeded', {
-            result, durationMs: Date.now() - startTime,
+            result,
+            durationMs: Date.now() - startTime,
             toolDurationMs,
             phase: 'inject',
             error: 'Cannot inspect input content — insert skipped (fail-closed)',
@@ -596,7 +636,13 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           });
           return;
         case 'INJECT_SKIPPED_DRAFT':
-          emitStep(identity, 'succeeded', { phase: 'inject', result, durationMs: Date.now() - startTime, toolDurationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'inject',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           return;
         case 'INSERT_FAILED':
           emitStep(identity, 'failed', {
