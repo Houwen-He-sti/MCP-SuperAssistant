@@ -1,9 +1,9 @@
-import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { createLogger } from '@extension/shared/lib/logger';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { ITransportPlugin, PluginMetadata, PluginConfig } from '../../types/plugin.js';
-import { createLogger } from '@extension/shared/lib/logger';
-
+import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { ITransportPlugin, PluginConfig, PluginMetadata } from '../../types/plugin.js';
+import { isCspEvalError } from '../evalErrorGuard.js';
 
 const logger = createLogger('StreamableHttpPlugin');
 
@@ -13,7 +13,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
     version: '1.0.0',
     transportType: 'streamable-http',
     description: 'Streamable HTTP transport for MCP protocol',
-    author: 'MCP SuperAssistant'
+    author: 'MCP SuperAssistant',
   };
 
   private transport: Transport | null = null;
@@ -164,33 +164,53 @@ export class StreamableHttpPlugin implements ITransportPlugin {
         const p = client.listResources().then(({ resources }) => {
           resources.forEach(item => primitives.push({ type: 'resource', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[StreamableHttpPlugin] listResources probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[StreamableHttpPlugin] listResources probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       if (capabilities?.tools || isProbing) {
         const p = client.listTools().then(({ tools }) => {
           tools.forEach(item => primitives.push({ type: 'tool', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[StreamableHttpPlugin] listTools probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[StreamableHttpPlugin] listTools probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       if (capabilities?.prompts || isProbing) {
         const p = client.listPrompts().then(({ prompts }) => {
           prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[StreamableHttpPlugin] listPrompts probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[StreamableHttpPlugin] listPrompts probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       await Promise.all(promises);
       logger.debug(`Retrieved ${primitives.length} primitives`);
       return primitives;
     } catch (error) {
+      // Chrome MV3 CSP blocks 'unsafe-eval' needed by MCP SDK's AJV JSON Schema compilation
+      // (new Function()). Return empty primitives gracefully instead of crashing.
+      if (isCspEvalError(error)) {
+        logger.warn(
+          '[StreamableHttpPlugin] CSP blocks unsafe-eval (MCP SDK schema compilation). Returning empty primitives.',
+        );
+        return [];
+      }
       logger.error('[StreamableHttpPlugin] Failed to get primitives:', error);
       throw error;
     }

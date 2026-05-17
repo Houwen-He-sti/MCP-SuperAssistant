@@ -147,7 +147,7 @@ To connect the Chrome extension to a local server for proxying connections:
    ```
    or 
    ```bash
-   npx -y @srbhptl39/mcp-superassistant-proxy --config ./config.json --outputTransport streamableHttp
+   npx -y @srbhptl39/mcp-superassistant-proxy --config ./config.json --outputTransport streamableHttp --stateful
    ```
    or
    ```bash
@@ -174,6 +174,7 @@ To connect the Chrome extension to a local server for proxying connections:
    - For SSE: `http://localhost:3006/sse`
    - For Streamable HTTP: `http://localhost:3006/mcp`
    - For WebSocket: `ws://localhost:3006/message`
+   - For Streamable HTTP with browser clients, keep proxy in `--stateful` mode so `Mcp-Session-Id` is emitted and follow-up calls can reuse the session.
    - Choose the appropriate transport method (SSE or Streamable HTTP or WebSocket) 
    - You can add any remote MCP server URL here as well, if it supports CORS or is proxied via this local proxy server. Try [Composio mcp](https://mcp.composio.dev/), [Zappier mcp](https://zapier.com/mcp), or [smithery](https://smithery.ai/) or any other remote MCP server.
 5. Click "Connect" to establish the connection
