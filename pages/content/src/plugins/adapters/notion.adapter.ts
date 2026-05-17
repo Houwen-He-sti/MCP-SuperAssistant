@@ -1,7 +1,8 @@
+import { buildReadOnlyNotionBridgePrompt } from '../../components/sidebar/Instructions/notionBridgePromptBuilder';
+import { wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
 
 /**
  * Notion AI Adapter — supports both:
@@ -13,13 +14,14 @@ import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../compo
  */
 
 /**
- * Bridge protocol prompt loaded from prompt-templates/notion-bridge.md.
+ * Bridge protocol prompt for native first-conversation injection.
  * Wrapped with <mcp-system-prompt> for UI card rendering.
  */
-const BRIDGE_PROMPT = wrapWithSystemPromptTag(assembleNotionBridgePrompt());
+const BRIDGE_PROMPT = wrapWithSystemPromptTag(buildReadOnlyNotionBridgePrompt());
 
-import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
-import { waitForSubmitButtonAndClick, isNotionSubmitButtonReady } from './notion/submit-readiness.js';import { createNotionSubmitContext } from './notion/submit-context';
+import { isNativeAiRoute, isSupportedPath } from './notion.routes.js';
+import { createNotionSubmitContext } from './notion/submit-context';
+import { waitForSubmitButtonAndClick } from './notion/submit-readiness.js';
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
     readonly version = '1.1.0';
@@ -75,15 +77,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
     /**
      * Route gating: activate on Notion AI pages.
-     * Supports both:
-     * 1. Native Notion AI agent (face icon) on any Notion page
-     * 2. Legacy /ai, /chat, /agent paths (fallback)
+     * Uses DOM-based detection per PR #49 decision — no legacy path checks.
      */
     isSupported(): boolean {
         const path = window.location.pathname;
-
-        // Legacy /ai panel paths are always supported
-        if (isLegacyPath(path)) return true;
 
         // Native Notion AI agent: detect by presence of AI chat input on any Notion page
         const nativeInput = document.querySelector(this.selectors.NATIVE_CHAT_INPUT);
@@ -348,7 +345,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
      * Required by streamToolBridge fail-closed logic to check for user drafts.
      */
     getInputContent(): string | null {
-        const selectors = this.selectors.CHAT_INPUT.split(', ');
+        const selectors = [
+            ...this.selectors.NATIVE_CHAT_INPUT.split(', '),
+            ...this.selectors.CHAT_INPUT.split(', '),
+        ];
         for (const sel of selectors) {
             const el = document.querySelector(sel.trim()) as HTMLElement;
             if (el) return el.textContent || '';

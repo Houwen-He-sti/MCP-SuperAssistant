@@ -1,12 +1,10 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { LoggingMessageNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 
-import type { ITransportPlugin, PluginMetadata, PluginConfig } from '../../types/plugin.js';
-import type { SSEPluginConfig } from '../../types/config.js';
 import { createLogger } from '@extension/shared/lib/logger';
-
+import type { SSEPluginConfig } from '../../types/config.js';
+import type { ITransportPlugin, PluginConfig, PluginMetadata } from '../../types/plugin.js';
 
 const logger = createLogger('SSEPlugin');
 
@@ -181,33 +179,51 @@ export class SSEPlugin implements ITransportPlugin {
         const p = client.listResources().then(({ resources }) => {
           resources.forEach(item => primitives.push({ type: 'resource', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[SSEPlugin] listResources probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[SSEPlugin] listResources probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       if (capabilities?.tools || isProbing) {
         const p = client.listTools().then(({ tools }) => {
           tools.forEach(item => primitives.push({ type: 'tool', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[SSEPlugin] listTools probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[SSEPlugin] listTools probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       if (capabilities?.prompts || isProbing) {
         const p = client.listPrompts().then(({ prompts }) => {
           prompts.forEach(item => primitives.push({ type: 'prompt', value: item }));
         });
-        promises.push(isProbing ? p.catch(error => {
-          logger.debug('[SSEPlugin] listPrompts probe failed (expected if unsupported):', error);
-        }) : p);
+        promises.push(
+          isProbing
+            ? p.catch(error => {
+                logger.debug('[SSEPlugin] listPrompts probe failed (expected if unsupported):', error);
+              })
+            : p,
+        );
       }
 
       await Promise.all(promises);
       logger.debug(`Retrieved ${primitives.length} primitives`);
       return primitives;
     } catch (error) {
+      // Chrome MV3 CSP blocks 'unsafe-eval' needed by MCP SDK's AJV JSON Schema compilation
+      // (new Function()). Return empty primitives gracefully instead of crashing.
+      if (error instanceof EvalError || (error as Error)?.message?.includes('unsafe-eval')) {
+        logger.warn('[SSEPlugin] CSP blocks unsafe-eval (MCP SDK schema compilation). Returning empty primitives.');
+        return [];
+      }
       logger.error('[SSEPlugin] Failed to get primitives:', error);
       throw error;
     }

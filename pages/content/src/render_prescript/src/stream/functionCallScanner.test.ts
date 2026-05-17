@@ -210,7 +210,7 @@ describe('createFunctionCallScanner — Notion patch format (cross-patch)', () =
         assert.equal(result.identity!.callId, 'q1');
     });
 
-    test('non-patch line during accumulation triggers best-effort extraction', () => {
+    test('non-patch line during accumulation keeps waiting for end marker', () => {
         const scanner = createFunctionCallScanner();
 
         // Start accumulating with a patch that has function_call_start with full name
@@ -225,11 +225,10 @@ describe('createFunctionCallScanner — Notion patch format (cross-patch)', () =
         const r1 = scanner.processLine(startPatch);
         assert.equal(r1.accumulating, true);
 
-        // Non-patch line interrupts — should extract what we have
+        // Non-patch line interrupts — should not execute partial data
         const r2 = scanner.processLine('{"type":"some_other_line","name":"irrelevant"}');
-        assert.equal(r2.detected, true, 'should detect with partial data');
-        assert.ok(r2.identity !== null);
-        assert.equal(r2.identity!.name, 'my_tool');
+        assert.equal(r2.detected, false, 'should not detect without function_call_end');
+        assert.equal(r2.accumulating, true, 'should keep waiting for content patches');
     });
 
     test('scanner resets after detection', () => {
@@ -411,6 +410,21 @@ describe('extractPatchTextContent — o:a (append) operations', () => {
         });
         assert.equal(extractPatchTextContent(multi), 'part1\npart2\n');
     });
+
+    test('extracts content when o:a appends a text block directly', () => {
+        const directTextAppend = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/1/value/-',
+                v: { type: 'text', content: '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_' },
+            }],
+        });
+        assert.equal(
+            extractPatchTextContent(directTextAppend),
+            '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_',
+        );
+    });
 });
 
 describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
@@ -432,6 +446,126 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.deepEqual(JSON.parse(r2.identity!.arguments!), { message: 'hello' });
     });
 
+    test('detects direct text append followed by split o:x parameters', () => {
+        const scanner = createFunctionCallScanner();
+        const start = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/1/value/-',
+                v: { type: 'text', content: '```jsonl\n{"type":"function_call_start","name":"get_child_item","call_id":"c_' },
+            }],
+        });
+        const middle = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/1/value/1/content',
+                v: 'scripts_1"}\n{"type":"parameter","key":"Path","value":"MCP-SuperAssistant/scripts"}\n{"type":"parameter","key":"Dep',
+            }],
+        });
+        const end = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/1/value/1/content',
+                v: 'th","value":1}\n{"type":"function_call_end","call_id":"c_scripts_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(start);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(middle);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(end);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'get_child_item');
+        assert.equal(r3.identity!.callId, 'c_scripts_1');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts',
+            Depth: 1,
+        });
+    });
+
+    test('preserves JSON parameter value types for MCP schema validation', () => {
+        const block = [
+            '{"type":"function_call_start","name":"get_child_item","call_id":"c_typed"}',
+            '{"type":"parameter","key":"Path","value":"MCP-SuperAssistant/scripts"}',
+            '{"type":"parameter","key":"Depth","value":1}',
+            '{"type":"parameter","key":"includeHidden","value":false}',
+            '{"type":"function_call_end","call_id":"c_typed"}',
+        ].join('\n');
+
+        const identity = extractIdentityFromJsonlBlock(block);
+
+        assert.ok(identity);
+        assert.deepEqual(JSON.parse(identity.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts',
+            Depth: 1,
+            includeHidden: false,
+        });
+    });
+
+    test('rejects parameter lines that omit value', () => {
+        const block = [
+            '{"type":"function_call_start","name":"get_child_item","call_id":"c_missing"}',
+            '{"type":"parameter","key":"Path"}',
+            '{"type":"function_call_end","call_id":"c_missing"}',
+        ].join('\n');
+
+        assert.equal(extractIdentityFromJsonlBlock(block), null);
+    });
+
+    test('preserves explicit null parameter values', () => {
+        const block = [
+            '{"type":"function_call_start","name":"echo","call_id":"c_null"}',
+            '{"type":"parameter","key":"message","value":null}',
+            '{"type":"function_call_end","call_id":"c_null"}',
+        ].join('\n');
+
+        const identity = extractIdentityFromJsonlBlock(block);
+
+        assert.ok(identity);
+        assert.deepEqual(JSON.parse(identity.arguments!), { message: null });
+    });
+
+    test('rejects mismatched function_call_end call_id', () => {
+        const block = [
+            '{"type":"function_call_start","name":"echo","call_id":"c_start"}',
+            '{"type":"parameter","key":"message","value":"hello"}',
+            '{"type":"function_call_end","call_id":"c_other"}',
+        ].join('\n');
+
+        assert.equal(extractIdentityFromJsonlBlock(block), null);
+    });
+
+    test('ignores Notion record-map snapshots that contain prior function calls', () => {
+        const scanner = createFunctionCallScanner();
+        const recordMap = JSON.stringify({
+            type: 'record-map',
+            recordMap: {
+                thread_message: {
+                    one: {
+                        value: {
+                            value: [
+                                { type: 'text', content: '{"type":"function_call_start","name":"get_child_item","call_id":"old"}' },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+
+        const result = scanner.processLine(recordMap);
+        assert.equal(result.detected, false);
+        assert.equal(result.accumulating, false);
+    });
+
     test('existing o:x behavior is not regressed', () => {
         // Original 3-line o:x cross-patch still works
         const scanner = createFunctionCallScanner();
@@ -441,6 +575,204 @@ describe('createFunctionCallScanner — o:a then o:x cross-patch', () => {
         assert.equal(r.detected, true);
         assert.equal(r.identity!.name, 'read_workspace_file');
         assert.deepEqual(JSON.parse(r.identity!.arguments!), { path: 'README.md' });
+    });
+
+    test('heartbeat between split start and parameters does not trigger partial identity', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitStart = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '```jsonl\n{"type":"function_call_start","name',
+            }],
+        });
+        const splitNameAndDescription = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '":"read_workspace_file","call_id":"call_read_1"}\n{"type":"description","text":"read target"}',
+            }],
+        });
+        const heartbeat = JSON.stringify({ type: 'heartbeat' });
+        const paramsAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '\n{"type":"parameter","key":"path","value":"ai-web-agent-mcp/tests/test_tool_card_allowlist.py"}\n{"type":"parameter","key":"max_bytes","value":"1200"}\n{"type":"function_call_end","call_id":"call_read_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitStart);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(splitNameAndDescription);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(heartbeat);
+        assert.equal(r3.detected, false, 'heartbeat must not execute a partial call');
+        assert.equal(r3.accumulating, true, 'heartbeat should keep waiting for function_call_end');
+
+        const r4 = scanner.processLine(paramsAndEnd);
+        assert.equal(r4.detected, true);
+        assert.equal(r4.accumulating, false);
+        assert.equal(r4.identity!.name, 'read_workspace_file');
+        assert.equal(r4.identity!.callId, 'call_read_1');
+        assert.deepEqual(JSON.parse(r4.identity!.arguments!), {
+            path: 'ai-web-agent-mcp/tests/test_tool_card_allowlist.py',
+            max_bytes: '1200',
+        });
+    });
+
+    test('starts accumulating when function_call_start token is split after function_ fragment', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitFunctionPrefix = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: ' changed file before review\"}\n```\n\n```jsonl\n{"type":"function_',
+            }],
+        });
+        const splitCallStart = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'call_start","name":"read_workspace_file","call_id":"call_read_2"}\n{"type":"description","text":"read target"}',
+            }],
+        });
+        const paramsAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '\n{"type":"parameter","key":"path","value":"ai-web-agent-mcp/tests/test_tool_card_allowlist.py"}\n{"type":"parameter","key":"max_bytes","value":1200}\n{"type":"function_call_end","call_id":"call_read_2"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitFunctionPrefix);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(splitCallStart);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(paramsAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'read_workspace_file');
+        assert.equal(r3.identity!.callId, 'call_read_2');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            path: 'ai-web-agent-mcp/tests/test_tool_card_allowlist.py',
+            max_bytes: 1200,
+        });
+    });
+
+    test('starts accumulating when JSONL type value is split before function_call_start', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitAfterTypeQuote = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/-',
+                v: {
+                    id: 'turn-1',
+                    type: 'agent-inference',
+                    value: [{ content: '```json\n{"status":"continue"}\n```\n\n```jsonl\n{"type":"' }],
+                },
+            }],
+        });
+        const startAndDescription = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'function_call_start","name":"list_command","call_id":"call_list_1"}\n{"type":"description","text":"discover commands"',
+            }],
+        });
+        const closeDescriptionAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '}\n{"type":"function_call_end","call_id":"call_list_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitAfterTypeQuote);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(startAndDescription);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(closeDescriptionAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'list_command');
+        assert.equal(r3.identity!.callId, 'call_list_1');
+        assert.equal(r3.identity!.arguments, null);
+    });
+
+    test('starts accumulating when JSONL object is split before type key', () => {
+        const scanner = createFunctionCallScanner();
+
+        const splitAfterObjectOpen = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'a',
+                p: '/s/-',
+                v: {
+                    id: 'turn-1',
+                    type: 'agent-inference',
+                    value: [{ content: '```json\n{"status":"continue"}\n```\n\n```jsonl\n{' }],
+                },
+            }],
+        });
+        const startAndFirstParameter = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: '"type":"function_call_start","name":"get_child_item","call_id":"call_tree_1"}\n{"type":"parameter","key":"Path","value":"MCP-Su',
+            }],
+        });
+        const restAndEnd = JSON.stringify({
+            type: 'patch',
+            v: [{
+                o: 'x',
+                p: '/s/8/value/0/content',
+                v: 'perAssistant/scripts/temp/tree-smoke-fixture"}\n{"type":"parameter","key":"Depth","value":2}\n{"type":"function_call_end","call_id":"call_tree_1"}\n```',
+            }],
+        });
+
+        const r1 = scanner.processLine(splitAfterObjectOpen);
+        assert.equal(r1.detected, false);
+        assert.equal(r1.accumulating, true);
+
+        const r2 = scanner.processLine(startAndFirstParameter);
+        assert.equal(r2.detected, false);
+        assert.equal(r2.accumulating, true);
+
+        const r3 = scanner.processLine(restAndEnd);
+        assert.equal(r3.detected, true);
+        assert.equal(r3.accumulating, false);
+        assert.equal(r3.identity!.name, 'get_child_item');
+        assert.equal(r3.identity!.callId, 'call_tree_1');
+        assert.deepEqual(JSON.parse(r3.identity!.arguments!), {
+            Path: 'MCP-SuperAssistant/scripts/temp/tree-smoke-fixture',
+            Depth: 2,
+        });
     });
 
     test('o:a complete in single patch (start + end)', () => {
@@ -488,12 +820,10 @@ describe('createFunctionCallScanner — buffer cap', () => {
         });
         const r2 = scanner.processLine(bigPatch);
 
-        // Should abort accumulation — best-effort identity extraction from what we have
+        // Should abort accumulation without executing partial arguments
         assert.equal(r2.accumulating, false, 'should stop accumulating');
-        // identity may or may not be extracted (partial data), but accumulation must stop
-        assert.equal(r2.detected, true, 'should detect with partial data');
-        assert.ok(r2.identity !== null, 'should extract partial identity');
-        assert.equal(r2.identity!.name, 'big_tool');
+        assert.equal(r2.detected, false, 'should not detect with incomplete oversized data');
+        assert.equal(r2.identity, null);
     });
 
     test('MAX_PATCH_BUFFER_SIZE is 128KB', () => {

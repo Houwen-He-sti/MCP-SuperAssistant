@@ -20,7 +20,7 @@ import {
   resetMcpConnectionState,
   resetMcpConnectionStateForRecovery,
   runWithBackwardsCompatibility,
-  type TransportType
+  type TransportType,
 } from '../mcpclient/index';
 import { RemoteConfigManager } from './remote-config-manager';
 
@@ -35,7 +35,7 @@ import type {
   RequestMessage,
   ResponseMessage,
   ServerConfigUpdatedBroadcast,
-  ToolUpdateBroadcast
+  ToolUpdateBroadcast,
 } from '../../../pages/content/src/types/messages';
 
 // Default MCP server URLs
@@ -44,11 +44,11 @@ const logger = createLogger('BACKGROUND');
 
 const DEFAULT_SSE_URL = 'http://localhost:3006/sse';
 const DEFAULT_WEBSOCKET_URL = 'ws://localhost:3006/message';
-const DEFAULT_STREAMABLE_HTTP_URL = 'http://localhost:3006';
+const DEFAULT_STREAMABLE_HTTP_URL = 'http://localhost:3006/mcp';
 
 // Connection type management
 type ConnectionType = TransportType;
-const DEFAULT_CONNECTION_TYPE: ConnectionType = 'sse';
+const DEFAULT_CONNECTION_TYPE: ConnectionType = 'streamable-http';
 
 // Remote Config Manager
 let remoteConfigManager: RemoteConfigManager | null = null;
@@ -57,14 +57,14 @@ let remoteConfigManager: RemoteConfigManager | null = null;
 const tabLabels = new Map<number, { label: string; source: string; url?: string }>();
 
 // Clean up tab labels when tabs are closed
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(tabId => {
   if (tabLabels.delete(tabId)) {
     logger.debug(`[TabLabels] Cleaned up label for closed tab ${tabId}`);
   }
 });
 
 // Background script state management with connection type support
-let serverUrl: string = DEFAULT_SSE_URL;
+let serverUrl: string = DEFAULT_STREAMABLE_HTTP_URL;
 let connectionType: ConnectionType = DEFAULT_CONNECTION_TYPE;
 let isConnected: boolean = false;
 let connectionCount: number = 0;
@@ -80,23 +80,24 @@ async function initializeServerConfig(): Promise<void> {
 
     // Load connection type first to determine default URL
     connectionType = (result.mcpConnectionType as ConnectionType) || DEFAULT_CONNECTION_TYPE;
-    const defaultUrl = connectionType === 'websocket'
-      ? DEFAULT_WEBSOCKET_URL
-      : connectionType === 'streamable-http'
-        ? DEFAULT_STREAMABLE_HTTP_URL
-        : DEFAULT_SSE_URL;
+    const defaultUrl =
+      connectionType === 'websocket'
+        ? DEFAULT_WEBSOCKET_URL
+        : connectionType === 'streamable-http'
+          ? DEFAULT_STREAMABLE_HTTP_URL
+          : DEFAULT_SSE_URL;
 
     serverUrl = result.mcpServerUrl || defaultUrl;
     isInitialized = true;
 
     logger.debug('[Background] Server config loaded from storage:', {
       url: serverUrl,
-      type: connectionType
+      type: connectionType,
     });
   } catch (error) {
     logger.warn('[Background] Failed to load server config from storage, using defaults:', error);
     connectionType = DEFAULT_CONNECTION_TYPE;
-    serverUrl = DEFAULT_SSE_URL;
+    serverUrl = DEFAULT_STREAMABLE_HTTP_URL;
     isInitialized = true;
   }
 }
@@ -177,11 +178,11 @@ const MAX_CONNECTION_ATTEMPTS = 3;
 
 /**
  * Enhanced error categorization for better tool vs connection error distinction
- * 
+ *
  * This function analyzes error messages to determine whether an error indicates
  * a connection problem (server unavailable) or a tool-specific issue (tool not found, invalid args, etc.)
  * This helps prevent unnecessary disconnection states when only tool execution fails.
- * 
+ *
  * @param error - The error to categorize
  * @returns Object containing categorization flags and category string
  */
@@ -233,14 +234,14 @@ function categorizeToolError(error: Error): { isConnectionError: boolean; isTool
 
 /**
  * Initialize the extension
- * 
+ *
  * This function is called once when the extension starts and handles:
  * - Theme initialization
  * - Server URL loading from storage
  * - Initial connection status check and broadcast
  * - Asynchronous server connection attempt if needed
  * - Initial tools fetching and broadcast if connected
- * 
+ *
  * The initialization is designed to be non-blocking and resilient to failures.
  */
 async function initializeExtension() {
@@ -320,10 +321,10 @@ async function initializeExtension() {
 
 /**
  * Try to connect to the MCP server with retry logic
- * 
+ *
  * This function is separated from extension initialization to prevent blocking
  * and includes comprehensive error handling and retry logic with exponential backoff.
- * 
+ *
  * @param uri - The MCP server URI to connect to
  * @returns Promise that resolves when connection attempt is complete (success or failure)
  */
@@ -383,7 +384,7 @@ async function tryConnectToServer(uri: string, type: ConnectionType = connection
 
       setTimeout(() => {
         isConnecting = false; // Reset connecting flag
-        tryConnectToServer(uri).catch(() => { }); // Try again
+        tryConnectToServer(uri).catch(() => {}); // Try again
       }, delayMs);
     } else {
       logger.debug('Maximum connection attempts reached. Will try again during periodic check.');
@@ -450,7 +451,7 @@ setInterval(async () => {
       logger.warn('[Background] Error resetting MCP connection state:', error);
     }
 
-    tryConnectToServer(serverUrl, connectionType).catch(() => { });
+    tryConnectToServer(serverUrl, connectionType).catch(() => {});
   }
 }, PERIODIC_CHECK_INTERVAL);
 
@@ -513,7 +514,7 @@ chrome.runtime.onInstalled.addListener(async details => {
         extension_version: currentVersion,
         install_date: installDate,
         ...demographicData,
-      }
+      },
     });
 
     // Initialize analytics user properties
@@ -534,7 +535,6 @@ chrome.runtime.onInstalled.addListener(async details => {
     if (remoteConfigManager && remoteConfigManager.initialized) {
       await remoteConfigManager.fetchConfig(true);
     }
-
   } else if (details.reason === 'update') {
     const previousVersion = details.previousVersion || 'unknown';
     logger.debug(`Extension updated from ${previousVersion} to ${currentVersion}`);
@@ -545,8 +545,21 @@ chrome.runtime.onInstalled.addListener(async details => {
     await chrome.storage.local.set({
       version: currentVersion,
       previousVersion: previousVersion,
-      lastUpdateDate: new Date().toISOString()
+      lastUpdateDate: new Date().toISOString(),
     });
+
+    // Migrate old SSE config to streamable-http (R2 hardening)
+    // Previously the default was SSE with /sse endpoint; now it's streamable-http with /mcp.
+    // If the user had the old default stored, migrate it silently.
+    const stored = await chrome.storage.local.get(['mcpServerUrl', 'mcpConnectionType']);
+    const oldSseUrl = 'http://localhost:3006/sse';
+    if (stored.mcpServerUrl === oldSseUrl && (!stored.mcpConnectionType || stored.mcpConnectionType === 'sse')) {
+      logger.debug('[Migration] Migrating stored config from SSE to streamable-http');
+      await chrome.storage.local.set({
+        mcpServerUrl: DEFAULT_STREAMABLE_HTTP_URL,
+        mcpConnectionType: 'streamable-http',
+      });
+    }
 
     // Update analytics user properties
     await analyticsService.updateUserProperties({
@@ -570,19 +583,21 @@ chrome.runtime.onInstalled.addListener(async details => {
 
     // Broadcast version update to content scripts
     setTimeout(() => {
-      chrome.tabs.query({}, (tabs) => {
+      chrome.tabs.query({}, tabs => {
         tabs.forEach(tab => {
           if (tab.id) {
-            chrome.tabs.sendMessage(tab.id, {
-              type: 'app:version-updated',
-              data: {
-                oldVersion: previousVersion,
-                newVersion: currentVersion,
-                timestamp: Date.now()
-              }
-            }).catch(() => {
-              // Ignore errors for tabs that can't receive messages
-            });
+            chrome.tabs
+              .sendMessage(tab.id, {
+                type: 'app:version-updated',
+                data: {
+                  oldVersion: previousVersion,
+                  newVersion: currentVersion,
+                  timestamp: Date.now(),
+                },
+              })
+              .catch(() => {
+                // Ignore errors for tabs that can't receive messages
+              });
           }
         });
       });
@@ -622,7 +637,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     origin: message.origin || 'unknown',
     id: message.id,
     hasPayload: !!message.payload,
-    from: sender.tab ? `tab-${sender.tab.id}` : 'extension'
+    from: sender.tab ? `tab-${sender.tab.id}` : 'extension',
   });
 
   // Handle MCP client connection status changes
@@ -683,7 +698,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 /**
  * Enhanced MCP message handler with proper error handling, type safety, and response formatting
- * 
+ *
  * @param message - The message received from the content script
  * @param sender - Chrome runtime message sender information
  * @param sendResponse - Callback function to send response back to sender
@@ -691,7 +706,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMcpMessage(
   message: RequestMessage,
   sender: chrome.runtime.MessageSender,
-  sendResponse: (response: ResponseMessage) => void
+  sendResponse: (response: ResponseMessage) => void,
 ) {
   const startTime = Date.now();
   const messageType = message.type as McpMessageType;
@@ -734,7 +749,7 @@ async function handleMcpMessage(
         result = {
           status: actualStatus ? 'connected' : 'disconnected',
           isConnected: actualStatus,
-          timestamp: Date.now()
+          timestamp: Date.now(),
         };
         break;
       }
@@ -744,7 +759,11 @@ async function handleMcpMessage(
         logger.debug(`Getting tools (forceRefresh: ${forceRefresh})`);
 
         try {
-          const primitives = await getPrimitivesWithBackwardsCompatibility(getServerUrl(), forceRefresh, connectionType);
+          const primitives = await getPrimitivesWithBackwardsCompatibility(
+            getServerUrl(),
+            forceRefresh,
+            connectionType,
+          );
           logger.debug(`Retrieved ${primitives.length} primitives from server`);
 
           // Use the helper function to normalize tools with proper schema handling
@@ -776,7 +795,7 @@ async function handleMcpMessage(
           // Set a reasonable timeout for the reconnection process
           const reconnectionPromise = forceReconnectToMcpServer(getServerUrl(), connectionType);
           const timeoutPromise = new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error('Reconnection timeout after 20 seconds')), 20000)
+            setTimeout(() => reject(new Error('Reconnection timeout after 20 seconds')), 20000),
           );
 
           await Promise.race([reconnectionPromise, timeoutPromise]);
@@ -824,10 +843,15 @@ async function handleMcpMessage(
 
       case 'mcp:get-server-config': {
         const stored = await chrome.storage.local.get(['mcpServerUrl', 'mcpConnectionType']);
-        const defaultUrl = connectionType === 'websocket' ? DEFAULT_WEBSOCKET_URL : DEFAULT_SSE_URL;
+        const defaultUrl =
+          connectionType === 'websocket'
+            ? DEFAULT_WEBSOCKET_URL
+            : connectionType === 'streamable-http'
+              ? DEFAULT_STREAMABLE_HTTP_URL
+              : DEFAULT_SSE_URL;
         result = {
           uri: stored.mcpServerUrl || defaultUrl,
-          connectionType: stored.mcpConnectionType || connectionType
+          connectionType: stored.mcpConnectionType || connectionType,
         };
         break;
       }
@@ -844,7 +868,12 @@ async function handleMcpMessage(
         if (!newType) {
           try {
             const url = new URL(config.uri);
-            newType = (url.protocol === 'ws:' || url.protocol === 'wss:') ? 'websocket' : 'sse';
+            newType =
+              url.protocol === 'ws:' || url.protocol === 'wss:'
+                ? 'websocket'
+                : url.pathname === '/mcp' || url.pathname.startsWith('/mcp')
+                  ? 'streamable-http'
+                  : 'streamable-http';
           } catch {
             newType = connectionType; // fallback to current type
           }
@@ -854,7 +883,7 @@ async function handleMcpMessage(
         // Update storage and background script state
         await chrome.storage.local.set({
           mcpServerUrl: config.uri,
-          mcpConnectionType: newType
+          mcpConnectionType: newType,
         });
         updateServerConfig(config.uri, newType);
 
@@ -908,24 +937,26 @@ async function handleMcpMessage(
         result = {
           timestamp: Date.now(),
           isConnected,
-          receivedTimestamp: timestamp
+          receivedTimestamp: timestamp,
         };
 
         // Also broadcast heartbeat response via context bridge
         if (message.id) {
           // Send heartbeat response event to all tabs
           setTimeout(() => {
-            chrome.tabs.query({}, (tabs) => {
+            chrome.tabs.query({}, tabs => {
               tabs.forEach(tab => {
                 if (tab.id) {
-                  chrome.tabs.sendMessage(tab.id, {
-                    type: 'mcp:heartbeat-response',
-                    payload: { timestamp: Date.now(), isConnected },
-                    origin: 'background',
-                    timestamp: Date.now()
-                  }).catch(() => {
-                    // Ignore errors for tabs that can't receive messages
-                  });
+                  chrome.tabs
+                    .sendMessage(tab.id, {
+                      type: 'mcp:heartbeat-response',
+                      payload: { timestamp: Date.now(), isConnected },
+                      origin: 'background',
+                      timestamp: Date.now(),
+                    })
+                    .catch(() => {
+                      // Ignore errors for tabs that can't receive messages
+                    });
                 }
               });
             });
@@ -939,7 +970,9 @@ async function handleMcpMessage(
         if (tabId != null) {
           if (payload.label) {
             tabLabels.set(tabId, { label: payload.label, source: payload.source, url: payload.url });
-            logger.debug(`[TabLabels] Tab ${tabId} labeled "${payload.label}" (${payload.source}) url=${payload.url ?? '?'}`);
+            logger.debug(
+              `[TabLabels] Tab ${tabId} labeled "${payload.label}" (${payload.source}) url=${payload.url ?? '?'}`,
+            );
           } else {
             if (tabLabels.delete(tabId)) {
               logger.debug(`[TabLabels] Tab ${tabId} label cleared`);
@@ -1003,9 +1036,8 @@ async function handleMcpMessage(
       timestamp: Date.now(),
       processingTime,
       origin: 'background',
-      id: message.id
+      id: message.id,
     });
-
   } catch (error) {
     const processingTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1020,19 +1052,19 @@ async function handleMcpMessage(
       timestamp: Date.now(),
       processingTime,
       origin: 'background',
-      id: message.id
+      id: message.id,
     });
   }
 }
 
 /**
  * Broadcast connection status to all content scripts via context bridge
- * 
+ *
  * @param isConnected - Whether the MCP server is connected
  * @param error - Optional error message if connection failed
  */
 function broadcastConnectionStatusToContentScripts(isConnected: boolean, error?: string) {
-  const status = error ? 'error' : (isConnected ? 'connected' : 'disconnected');
+  const status = error ? 'error' : isConnected ? 'connected' : 'disconnected';
 
   logger.debug(`Broadcasting connection status: ${status} (connected: ${isConnected})`);
 
@@ -1042,13 +1074,13 @@ function broadcastConnectionStatusToContentScripts(isConnected: boolean, error?:
       status: status as any, // Type assertion needed due to status calculation
       error: error || undefined,
       isConnected,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     },
     origin: 'background',
-    timestamp: Date.now()
+    timestamp: Date.now(),
   };
 
-  chrome.tabs.query({}, (tabs) => {
+  chrome.tabs.query({}, tabs => {
     tabs.forEach(tab => {
       if (tab.id) {
         chrome.tabs.sendMessage(tab.id, broadcastMessage).catch(() => {
@@ -1061,7 +1093,7 @@ function broadcastConnectionStatusToContentScripts(isConnected: boolean, error?:
 
 /**
  * Broadcast tools update to all content scripts via context bridge
- * 
+ *
  * @param tools - Array of available MCP tools
  */
 function broadcastToolsUpdateToContentScripts(tools: any[]) {
@@ -1070,13 +1102,13 @@ function broadcastToolsUpdateToContentScripts(tools: any[]) {
   const broadcastMessage: BaseMessage & { payload: ToolUpdateBroadcast } = {
     type: 'mcp:tool-update',
     payload: {
-      tools
+      tools,
     },
     origin: 'background',
-    timestamp: Date.now()
+    timestamp: Date.now(),
   };
 
-  chrome.tabs.query({}, (tabs) => {
+  chrome.tabs.query({}, tabs => {
     tabs.forEach(tab => {
       if (tab.id) {
         chrome.tabs.sendMessage(tab.id, broadcastMessage).catch(() => {
@@ -1089,7 +1121,7 @@ function broadcastToolsUpdateToContentScripts(tools: any[]) {
 
 /**
  * Broadcast server config update to all content scripts via context bridge
- * 
+ *
  * @param config - The updated server configuration
  */
 function broadcastConfigUpdateToContentScripts(config: { uri: string; connectionType?: string }) {
@@ -1098,13 +1130,13 @@ function broadcastConfigUpdateToContentScripts(config: { uri: string; connection
   const broadcastMessage: BaseMessage & { payload: ServerConfigUpdatedBroadcast } = {
     type: 'mcp:server-config-updated',
     payload: {
-      config: config as any // Type assertion due to partial config structure
+      config: config as any, // Type assertion due to partial config structure
     },
     origin: 'background',
-    timestamp: Date.now()
+    timestamp: Date.now(),
   };
 
-  chrome.tabs.query({}, (tabs) => {
+  chrome.tabs.query({}, tabs => {
     tabs.forEach(tab => {
       if (tab.id) {
         chrome.tabs.sendMessage(tab.id, broadcastMessage).catch(() => {
@@ -1117,7 +1149,7 @@ function broadcastConfigUpdateToContentScripts(config: { uri: string; connection
 
 /**
  * Enhanced Remote Config message handler
- * 
+ *
  * @param message - The message received from the content script
  * @param sender - Chrome runtime message sender information
  * @param sendResponse - Callback function to send response back to sender
@@ -1125,7 +1157,7 @@ function broadcastConfigUpdateToContentScripts(config: { uri: string; connection
 async function handleRemoteConfigMessage(
   message: any,
   sender: chrome.runtime.MessageSender,
-  sendResponse: (response: any) => void
+  sendResponse: (response: any) => void,
 ) {
   const startTime = Date.now();
 
@@ -1177,7 +1209,7 @@ async function handleRemoteConfigMessage(
         result = {
           initialized: remoteConfigManager.initialized,
           lastFetchTime: await remoteConfigManager.getLastFetchTimePublic(),
-          timestamp: Date.now()
+          timestamp: Date.now(),
         };
         break;
       }
@@ -1187,7 +1219,7 @@ async function handleRemoteConfigMessage(
         const success = await remoteConfigManager.clearCacheAndRefresh();
         result = {
           success,
-          timestamp: Date.now()
+          timestamp: Date.now(),
         };
         break;
       }
@@ -1201,12 +1233,11 @@ async function handleRemoteConfigMessage(
       success: true,
       data: result,
       processingTime: Date.now() - startTime,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     };
 
     logger.debug(`Remote Config message processed successfully: ${message.type} (${response.processingTime}ms)`);
     sendResponse(response);
-
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error(`Error processing Remote Config message ${message.type}:`, error);
@@ -1216,7 +1247,7 @@ async function handleRemoteConfigMessage(
       success: false,
       error: errorMessage,
       processingTime: Date.now() - startTime,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     };
 
     sendResponse(response);
@@ -1242,4 +1273,3 @@ async function initializeRemoteConfig(): Promise<void> {
     // Don't throw - let the extension continue without remote config
   }
 }
-

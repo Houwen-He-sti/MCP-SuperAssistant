@@ -81,10 +81,14 @@ describe('normalizeToUiEvent — status mapping', () => {
     });
 
     test('succeeded (no injectOutcome) → tool_execution_succeeded', () => {
-        const raw = makeStreamEvent('succeeded', { result: { data: 'secret' }, durationMs: 123 });
+        const raw = makeStreamEvent('succeeded', { result: { data: 'secret' }, timestamp: 1000, toolDurationMs: 100, durationMs: 123, elapsedMs: 130 });
         const result = normalizeToUiEvent(raw);
         assert.ok(result);
         assert.equal(result.type, 'tool_execution_succeeded');
+        assert.equal(result.timestamp, 1000);
+        assert.equal(result.toolDurationMs, 100);
+        assert.equal(result.durationMs, 123);
+        assert.equal(result.elapsedMs, 130);
     });
 
     test('failed (generic) → tool_execution_failed', () => {

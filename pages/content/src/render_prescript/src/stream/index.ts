@@ -19,7 +19,8 @@ export type {
     StreamToolBridgeDeps,
     StreamToolExecutionEvent
 } from './streamToolBridge';
-export { configureStreamToolBridge, getStreamToolBridgeInfo, initStreamToolBridge } from './streamToolBridgeInit';
+export { configureStreamToolBridge, getStreamToolBridgeInfo, getStreamToolBridgeTrace, initStreamToolBridge } from './streamToolBridgeInit';
+export type { StreamToolBridgeTraceEvent } from './streamToolBridgeInit';
 export type {
     StreamCutoffConfig,
     StreamCutoffEvent,

@@ -19,7 +19,7 @@ export const MAX_ARGS_SIZE = 65_536;
 // --- Interfaces ---
 
 export interface StreamToolBridgeConfig {
-  enabled: boolean;           // allows MCP tool execution
+  enabled: boolean; // allows MCP tool execution
   autoInsert: boolean;
   autoSubmit: boolean;
   toolTimeoutMs: number;
@@ -40,6 +40,9 @@ export interface StreamToolExecutionEvent {
   result?: unknown;
   error?: string;
   errorCode?: string;
+  timestamp?: number;
+  elapsedMs?: number;
+  toolDurationMs?: number;
   durationMs?: number;
   /** Gate 6B: Injection outcome for UI event mapping. Set when autoInsert is attempted, regardless of final status. */
   injectOutcome?: InjectOutcome;
@@ -105,7 +108,13 @@ export interface StreamEvent {
 
 // --- Adapter Diagnostic (P0-3) ---
 
-export type AdapterStatus = 'ok' | 'partial' | 'input_not_found' | 'input_not_editable' | 'submit_not_found' | 'unknown_error';
+export type AdapterStatus =
+  | 'ok'
+  | 'partial'
+  | 'input_not_found'
+  | 'input_not_editable'
+  | 'submit_not_found'
+  | 'unknown_error';
 
 export interface AdapterDiagnostic {
   adapterAvailable: boolean;
@@ -154,6 +163,12 @@ function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; input
   }
 }
 
+function isMcpSessionInitializationError(errorMessage: string): boolean {
+  const normalized = errorMessage.toLowerCase();
+  return normalized.includes('before initialization was complete')
+    || (normalized.includes('-32602') && normalized.includes('initialization'));
+}
+
 // --- Constants (Gate 5) ---
 
 /** Default max tool calls per stream when circuitBreaker config is undefined. */
@@ -187,6 +202,27 @@ export interface InjectResultParams {
   adapter: () => AdapterLike | null;
   /** Gate 5c.1: If provided, append ACK instruction with this nonce. */
   nonce?: string;
+  inspectRetry?: {
+    attempts: number;
+    intervalMs: number;
+  };
+}
+
+const DEFAULT_BROWSER_INSPECT_RETRY_ATTEMPTS = 20;
+const DEFAULT_BROWSER_INSPECT_RETRY_INTERVAL_MS = 100;
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getDefaultInspectRetry(): { attempts: number; intervalMs: number } {
+  if (typeof window === 'undefined') {
+    return { attempts: 0, intervalMs: 0 };
+  }
+  return {
+    attempts: DEFAULT_BROWSER_INSPECT_RETRY_ATTEMPTS,
+    intervalMs: DEFAULT_BROWSER_INSPECT_RETRY_INTERVAL_MS,
+  };
 }
 
 /**
@@ -217,6 +253,13 @@ export async function injectResultIfSafe(params: InjectResultParams): Promise<In
   let existingContent: string | null;
   try {
     existingContent = currentAdapter.getInputContent();
+    const inspectRetry = params.inspectRetry ?? getDefaultInspectRetry();
+    for (let attempt = 0; existingContent === null && attempt < inspectRetry.attempts; attempt++) {
+      if (inspectRetry.intervalMs > 0) {
+        await delay(inspectRetry.intervalMs);
+      }
+      existingContent = currentAdapter.getInputContent();
+    }
   } catch {
     return { outcome: 'INJECT_SKIPPED_NO_INSPECT' };
   }
@@ -275,12 +318,21 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     }
   }
 
-  function emit(streamId: string, identity: FunctionCallIdentityLike, status: StreamToolExecutionEvent['status'], extra: Partial<StreamToolExecutionEvent> = {}) {
+  function emit(
+    streamId: string,
+    identity: FunctionCallIdentityLike,
+    status: StreamToolExecutionEvent['status'],
+    extra: Partial<StreamToolExecutionEvent> = {},
+    startedAt?: number,
+  ) {
+    const timestamp = Date.now();
     onEvent({
       type: 'stream_tool_execution',
       streamId,
       identity,
       status,
+      timestamp,
+      ...(startedAt !== undefined ? { elapsedMs: timestamp - startedAt } : {}),
       ...extra,
     });
   }
@@ -291,13 +343,26 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     const streamId = event.streamId || 'unknown';
     const identity = event.identity;
+    const startedAt = Date.now();
+    const emitStep = (
+      targetIdentity: FunctionCallIdentityLike,
+      status: StreamToolExecutionEvent['status'],
+      extra: Partial<StreamToolExecutionEvent> = {},
+    ) => emit(streamId, targetIdentity, status, extra, startedAt);
 
     // Step 0b: Check enabled
-    if (!config.enabled) return;
+    if (!config.enabled) {
+      emitStep(identity || ({} as FunctionCallIdentityLike), 'failed', {
+        phase: 'identity',
+        error: 'Tool execution disabled by config',
+        errorCode: 'EXECUTION_DISABLED',
+      });
+      return;
+    }
 
     // Step 1: Validate identity
     if (!identity || !identity.name) {
-      emit(streamId, identity || ({} as FunctionCallIdentityLike), 'failed', {
+      emitStep(identity || ({} as FunctionCallIdentityLike), 'failed', {
         phase: 'identity',
         error: 'identity.name is null or missing',
         errorCode: 'IDENTITY_INVALID',
@@ -308,7 +373,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Step 1b: Tool allowlist check (before parse to save work on rejected tools)
     if (config.toolAllowlist && config.toolAllowlist.length > 0) {
       if (!config.toolAllowlist.includes(identity.name)) {
-        emit(streamId, identity, 'failed', {
+        emitStep(identity, 'failed', {
           phase: 'identity',
           error: `Tool "${identity.name}" not in allowlist`,
           errorCode: 'TOOL_NOT_ALLOWED',
@@ -324,7 +389,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     // Step 2a: Reject oversized arguments BEFORE parse (prevent DoS on JSON.parse)
     if (rawArgs.length > MAX_ARGS_SIZE) {
-      emit(streamId, identity, 'failed', {
+      emitStep(identity, 'failed', {
         phase: 'parse',
         error: `Arguments too large: ${rawArgs.length} bytes (max ${MAX_ARGS_SIZE})`,
         errorCode: 'ARGS_TOO_LARGE',
@@ -335,7 +400,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     try {
       parsedArgs = JSON.parse(rawArgs);
     } catch (e) {
-      emit(streamId, identity, 'failed', {
+      emitStep(identity, 'failed', {
         phase: 'parse',
         error: `JSON parse failed: ${(e as Error).message}`,
         errorCode: 'PARSE_ERROR',
@@ -345,7 +410,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     // Step 2b: Validate parsed type is a plain object (not array, null, number, string)
     if (parsedArgs === null || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
-      emit(streamId, identity, 'failed', {
+      emitStep(identity, 'failed', {
         phase: 'parse',
         error: `Arguments must be a plain object, got ${Array.isArray(parsedArgs) ? 'array' : typeof parsedArgs}`,
         errorCode: 'ARGS_NOT_OBJECT',
@@ -360,14 +425,14 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     const guardInput = { functionName: identity.name, callId, params: parsedArgs };
     const reservedKey = guard.reserveExecution(guardInput);
     if (reservedKey === null) {
-      emit(streamId, identity, 'duplicate', { phase: 'reserve' });
+      emitStep(identity, 'duplicate', { phase: 'reserve' });
       return;
     }
 
     // Gate 6B: Emit reserved status — identity resolved + dedup gate passed.
     // Note: circuit breaker and mcpClient checks happen AFTER this point,
     // so 'reserved' means "detected and accepted for processing", not "execution guaranteed".
-    emit(streamId, identity, 'reserved');
+    emitStep(identity, 'reserved', { phase: 'reserve' });
 
     // Step 4b (Gate 5): Circuit breaker check — only after valid + reserved + non-duplicate
     sweepExpiredEntries();
@@ -376,8 +441,11 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       const entry = streamCallCounts.get(streamId);
       const currentCount = entry ? entry.count : 0;
       if (currentCount >= maxCalls) {
-        guard.executionGuardStore.markFailed(reservedKey, `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`);
-        emit(streamId, identity, 'failed', {
+        guard.executionGuardStore.markFailed(
+          reservedKey,
+          `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`,
+        );
+        emitStep(identity, 'failed', {
           phase: 'reserve',
           error: `Circuit breaker: max ${maxCalls} tool calls per stream exceeded`,
           errorCode: 'CIRCUIT_BREAKER_OPEN',
@@ -391,7 +459,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     const mcpClient = resolveMcpClient();
     if (!mcpClient) {
       guard.executionGuardStore.markFailed(reservedKey, 'mcpClient not available');
-      emit(streamId, identity, 'failed', {
+      emitStep(identity, 'failed', {
         phase: 'mcp_client',
         error: 'mcpClient not available',
         errorCode: 'MCP_CLIENT_MISSING',
@@ -401,7 +469,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
 
     if (!mcpClient.isReady || !mcpClient.isReady()) {
       guard.executionGuardStore.markFailed(reservedKey, 'mcpClient not ready');
-      emit(streamId, identity, 'failed', {
+      emitStep(identity, 'failed', {
         phase: 'mcp_client',
         error: 'mcpClient not ready',
         errorCode: 'MCP_CLIENT_NOT_READY',
@@ -412,7 +480,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Step 6: Execute tool with timeout
     const executionId = ++executionCounter;
     const startTime = Date.now();
-    emit(streamId, identity, 'executing');
+    emitStep(identity, 'executing', { phase: 'tool_call' });
 
     let result: unknown;
     let timedOut = false;
@@ -435,47 +503,61 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       clearTimeout(timeoutHandle!);
       if (expiredExecutions.has(executionId)) {
         guard.executionGuardStore.markFailed(reservedKey, 'timeout');
-        emit(streamId, identity, 'failed', {
+        const toolDurationMs = Date.now() - startTime;
+        emitStep(identity, 'failed', {
           phase: 'tool_call',
           error: 'Tool execution timeout',
           errorCode: 'TIMEOUT',
-          durationMs: Date.now() - startTime,
+          durationMs: toolDurationMs,
+          toolDurationMs,
         });
         // Gate 5: inject error result for AI consumption
         if (config.autoInsert) {
           const { outcome, error: injectError } = await injectResultIfSafe({
-            callId, name: identity.name!, status: 'error',
+            callId,
+            name: identity.name!,
+            status: 'error',
             result: 'Tool execution timeout',
-            autoSubmit: !!config.autoSubmit, adapter,
+            autoSubmit: !!config.autoSubmit,
+            adapter,
           });
-          emit(streamId, identity, 'failed', {
+          emitStep(identity, 'failed', {
             phase: 'error_inject',
             error: injectError || undefined,
             errorCode: outcome,
             durationMs: Date.now() - startTime,
+            toolDurationMs,
           });
         }
         return;
       }
-      guard.executionGuardStore.markFailed(reservedKey, (e as Error).message);
-      emit(streamId, identity, 'failed', {
-        phase: 'tool_call',
-        error: (e as Error).message,
-        errorCode: 'TOOL_ERROR',
-        durationMs: Date.now() - startTime,
+      const toolDurationMs = Date.now() - startTime;
+      const errorMessage = (e as Error).message;
+      const isSessionInitializationError = isMcpSessionInitializationError(errorMessage);
+      guard.executionGuardStore.markFailed(reservedKey, errorMessage);
+      emitStep(identity, 'failed', {
+        phase: isSessionInitializationError ? 'mcp_client' : 'tool_call',
+        error: errorMessage,
+        errorCode: isSessionInitializationError ? 'MCP_SESSION_NOT_INITIALIZED' : 'TOOL_ERROR',
+        durationMs: toolDurationMs,
+        toolDurationMs,
       });
       // Gate 5: inject error result for AI consumption
       if (config.autoInsert) {
         const { outcome, error: injectError } = await injectResultIfSafe({
-          callId, name: identity.name!, status: 'error',
-          result: (e as Error).message,
-          autoSubmit: !!config.autoSubmit, adapter,
+          callId,
+          name: identity.name!,
+          status: 'error',
+          result: errorMessage,
+          autoSubmit: !!config.autoSubmit,
+          adapter,
         });
-        emit(streamId, identity, 'failed', {
+        emitStep(identity, 'failed', {
           phase: 'error_inject',
           error: injectError || undefined,
           errorCode: outcome,
           durationMs: Date.now() - startTime,
+          toolDurationMs,
         });
       }
       return;
@@ -486,7 +568,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
       return;
     }
 
-    const durationMs = Date.now() - startTime;
+    const toolDurationMs = Date.now() - startTime;
 
     // Step 8: Mark succeeded + persist
     guard.executionGuardStore.markSucceeded(reservedKey);
@@ -496,16 +578,27 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     // Step 9: DOM injection via shared safe-injection helper (Gate 5 refactor)
     if (config.autoInsert) {
       // Gate 5c.1: Generate nonce for ACK tracking (only for success + autoSubmit)
-      const nonce = (config.autoSubmit && ackTracker) ? generateNonce(callId) : undefined;
+      const nonce = config.autoSubmit && ackTracker ? generateNonce(callId) : undefined;
 
       const { outcome, error: injectError } = await injectResultIfSafe({
-        callId, name: identity.name!, status: 'success',
-        result, autoSubmit: !!config.autoSubmit, adapter, nonce,
+        callId,
+        name: identity.name!,
+        status: 'success',
+        result,
+        autoSubmit: !!config.autoSubmit,
+        adapter,
+        nonce,
       });
 
       switch (outcome) {
         case 'RESULT_SUBMITTED':
-          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'submit',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           // Gate 5c.1: Register nonce first, then emit bridge handoff ACK
           if (nonce && ackTracker) {
             ackTracker.registerPending(nonce, callId, identity.name!);
@@ -521,43 +614,61 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           }
           return;
         case 'RESULT_INJECTED':
-          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'inject',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           return;
         case 'INJECT_SKIPPED_NO_ADAPTER':
-          emit(streamId, identity, 'failed', {
+          emitStep(identity, 'failed', {
             phase: 'inject',
             error: 'No adapter available for DOM injection',
             errorCode: 'ADAPTER_MISSING',
-            durationMs,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
             injectOutcome: outcome,
           });
           return;
         case 'INJECT_SKIPPED_NO_INSPECT':
-          emit(streamId, identity, 'succeeded', {
-            result, durationMs,
+          emitStep(identity, 'succeeded', {
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            phase: 'inject',
             error: 'Cannot inspect input content — insert skipped (fail-closed)',
             errorCode: 'INSERT_SKIPPED_NO_INSPECT',
             injectOutcome: outcome,
           });
           return;
         case 'INJECT_SKIPPED_DRAFT':
-          emit(streamId, identity, 'succeeded', { result, durationMs, injectOutcome: outcome });
+          emitStep(identity, 'succeeded', {
+            phase: 'inject',
+            result,
+            durationMs: Date.now() - startTime,
+            toolDurationMs,
+            injectOutcome: outcome,
+          });
           return;
         case 'INSERT_FAILED':
-          emit(streamId, identity, 'failed', {
+          emitStep(identity, 'failed', {
             phase: 'inject',
             error: injectError || 'insertText failed',
             errorCode: 'INSERT_FAILED',
             durationMs: Date.now() - startTime,
+            toolDurationMs,
             injectOutcome: outcome,
           });
           return;
         case 'SUBMIT_FAILED':
-          emit(streamId, identity, 'failed', {
+          emitStep(identity, 'failed', {
             phase: 'submit',
             error: injectError || 'submitForm failed',
             errorCode: 'SUBMIT_FAILED',
             durationMs: Date.now() - startTime,
+            toolDurationMs,
             injectOutcome: outcome,
           });
           return;
@@ -565,6 +676,6 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
     }
 
     // Step 10: Emit success (no autoInsert, or injection not attempted)
-    emit(streamId, identity, 'succeeded', { result, durationMs });
+    emitStep(identity, 'succeeded', { phase: 'tool_call', result, durationMs: toolDurationMs, toolDurationMs });
   };
 }

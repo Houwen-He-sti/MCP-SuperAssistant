@@ -22,7 +22,7 @@ import {
   type StorageLike,
   type StreamEvent,
   type StreamToolBridgeConfig,
-  type StreamToolExecutionEvent
+  type StreamToolExecutionEvent,
 } from './streamToolBridge.ts';
 
 // --- Mock infrastructure ---
@@ -34,7 +34,9 @@ interface MockMcpClientOptions {
   callToolDelay?: number;
 }
 
-function createMockMcpClient(options: MockMcpClientOptions = {}): McpClientLike & { _calls: Array<{ name: string; params: Record<string, unknown> }> } {
+function createMockMcpClient(
+  options: MockMcpClientOptions = {},
+): McpClientLike & { _calls: Array<{ name: string; params: Record<string, unknown> }> } {
   const {
     isReady = true,
     callToolResult = { content: 'tool result' },
@@ -65,16 +67,31 @@ interface MockAdapterOptions {
   submitThrows?: string | null;
   insertReturnsFalse?: boolean;
   submitReturnsFalse?: boolean;
+  insertDelay?: number;
 }
 
-function createMockAdapter(options: MockAdapterOptions = {}): AdapterLike & { _calls: { insertText: string[]; submitForm: boolean[] } } {
-  const { hasContent = false, hasGetInputContent = true, getInputContentReturnsNull = false, insertThrows = null, submitThrows = null, insertReturnsFalse = false, submitReturnsFalse = false } = options;
+function createMockAdapter(
+  options: MockAdapterOptions = {},
+): AdapterLike & { _calls: { insertText: string[]; submitForm: boolean[] } } {
+  const {
+    hasContent = false,
+    hasGetInputContent = true,
+    getInputContentReturnsNull = false,
+    insertThrows = null,
+    submitThrows = null,
+    insertReturnsFalse = false,
+    submitReturnsFalse = false,
+    insertDelay = 0,
+  } = options;
   const calls = { insertText: [] as string[], submitForm: [] as boolean[] };
 
   const adapter: AdapterLike & { _calls: typeof calls } = {
     insertText: async (text: string): Promise<boolean> => {
       if (insertThrows) throw new Error(insertThrows);
       if (insertReturnsFalse) return false;
+      if (insertDelay > 0) {
+        await new Promise(r => setTimeout(r, insertDelay));
+      }
       calls.insertText.push(text);
       return true;
     },
@@ -102,7 +119,9 @@ interface MockGuardOptions {
   reserveResult?: string | null;
 }
 
-function createMockGuard(options: MockGuardOptions = {}): ExecutionGuardLike & { _calls: { reserve: unknown[]; markSucceeded: string[]; markFailed: Array<{ key: string; error?: string }> } } {
+function createMockGuard(options: MockGuardOptions = {}): ExecutionGuardLike & {
+  _calls: { reserve: unknown[]; markSucceeded: string[]; markFailed: Array<{ key: string; error?: string }> };
+} {
   const { reserveResult = 'mock-key-123' } = options;
   const calls = {
     reserve: [] as unknown[],
@@ -110,19 +129,25 @@ function createMockGuard(options: MockGuardOptions = {}): ExecutionGuardLike & {
     markFailed: [] as Array<{ key: string; error?: string }>,
   };
   return {
-    reserveExecution: (input) => {
+    reserveExecution: input => {
       calls.reserve.push(input);
       return reserveResult;
     },
     executionGuardStore: {
-      markSucceeded: (key: string) => { calls.markSucceeded.push(key); },
-      markFailed: (key: string, error?: string) => { calls.markFailed.push({ key, error }); },
+      markSucceeded: (key: string) => {
+        calls.markSucceeded.push(key);
+      },
+      markFailed: (key: string, error?: string) => {
+        calls.markFailed.push({ key, error });
+      },
     },
     _calls: calls,
   };
 }
 
-function createMockStorage(): StorageLike & { _calls: Array<{ name: string; callId: string; params: Record<string, unknown>; sig: string }> } {
+function createMockStorage(): StorageLike & {
+  _calls: Array<{ name: string; callId: string; params: Record<string, unknown>; sig: string }>;
+} {
   const calls: Array<{ name: string; callId: string; params: Record<string, unknown>; sig: string }> = [];
   return {
     storeExecutedFunction: (name, callId, params, sig) => {
@@ -166,11 +191,10 @@ function makeNonCutoffEvent(): StreamEvent {
 // --- Tests ---
 
 describe('streamToolBridge', () => {
-
   test('1. bridge disabled — event does not trigger execution', async () => {
     const mockClient = createMockMcpClient();
     const mockGuard = createMockGuard();
-    const mockAdapter = createMockAdapter();
+    const mockAdapter = createMockAdapter({ insertDelay: 5 });
     const mockStorage = createMockStorage();
 
     const events: StreamToolExecutionEvent[] = [];
@@ -180,13 +204,28 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
 
     assert.strictEqual(mockClient._calls.length, 0, 'callTool should not be called when disabled');
     assert.strictEqual(mockGuard._calls.reserve.length, 0, 'reserve should not be called when disabled');
+    assert.strictEqual(mockAdapter._calls.insertText.length, 0, 'insertText must not run when execution is disabled');
+    assert.strictEqual(mockAdapter._calls.submitForm.length, 0, 'submitForm must not run when execution is disabled');
+
+    const disabledEvent = events.find(e => e.status === 'failed' && e.errorCode === 'EXECUTION_DISABLED');
+    assert.ok(disabledEvent, 'disabled execution should still emit a trace event');
+    assert.strictEqual(disabledEvent!.phase, 'identity');
+
+    const terminalSuccessEvent = events.find(
+      e => e.status === 'succeeded' || e.injectOutcome === 'RESULT_INJECTED' || e.injectOutcome === 'RESULT_SUBMITTED',
+    );
+    assert.equal(
+      terminalSuccessEvent,
+      undefined,
+      'disabled execution must not emit success/injected/submitted terminal state',
+    );
   });
 
   test('2. happy path — cutoff → parse → reserve → execute → succeed → insert', async () => {
@@ -202,7 +241,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -238,6 +277,27 @@ describe('streamToolBridge', () => {
     // Verify succeeded event emitted
     const successEvent = events.find(e => e.status === 'succeeded');
     assert.ok(successEvent, 'succeeded event should be emitted');
+    assert.strictEqual(successEvent.phase, 'inject');
+    assert.strictEqual(typeof successEvent.timestamp, 'number');
+    assert.strictEqual(typeof successEvent.elapsedMs, 'number');
+    assert.strictEqual(typeof successEvent.toolDurationMs, 'number');
+    assert.strictEqual(typeof successEvent.durationMs, 'number');
+    assert.ok(
+      successEvent.durationMs! >= successEvent.toolDurationMs!,
+      'durationMs should include result delivery work',
+    );
+
+    const reservedEvent = events.find(e => e.status === 'reserved');
+    assert.ok(reservedEvent, 'reserved event should be emitted');
+    assert.strictEqual(reservedEvent.phase, 'reserve');
+    assert.strictEqual(typeof reservedEvent.timestamp, 'number');
+    assert.strictEqual(typeof reservedEvent.elapsedMs, 'number');
+
+    const executingEvent = events.find(e => e.status === 'executing');
+    assert.ok(executingEvent, 'executing event should be emitted');
+    assert.strictEqual(executingEvent.phase, 'tool_call');
+    assert.strictEqual(typeof executingEvent.timestamp, 'number');
+    assert.strictEqual(typeof executingEvent.elapsedMs, 'number');
   });
 
   test('3. identity.name null — skip execution', async () => {
@@ -252,7 +312,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: null, callId: 'c1', arguments: '{}' } }));
@@ -277,7 +337,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'get_bridge_info', callId: 'c1', arguments: null } }));
@@ -303,7 +363,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c1', arguments: 'not-valid-json{{{' } }));
@@ -329,7 +389,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -353,7 +413,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -378,7 +438,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -404,7 +464,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -432,7 +492,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -460,7 +520,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -479,6 +539,34 @@ describe('streamToolBridge', () => {
     const failEvent = events.find(e => e.status === 'failed' && e.phase === 'tool_call');
     assert.ok(failEvent);
     assert.strictEqual(failEvent.phase, 'tool_call');
+    assert.strictEqual(failEvent.errorCode, 'TOOL_ERROR');
+  });
+
+  test('11b. MCP session initialization error — classify as MCP_SESSION_NOT_INITIALIZED', async () => {
+    const mockClient = createMockMcpClient({
+      callToolError: 'MCP error -32602: Failed to validate request: Received request before initialization was complete',
+    });
+    const mockGuard = createMockGuard({ reserveResult: 'key-init' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: evt => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    const failEvent = events.find(e => e.status === 'failed' && e.errorCode === 'MCP_SESSION_NOT_INITIALIZED');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.phase, 'mcp_client');
+    assert.ok(failEvent.error!.includes('before initialization was complete'));
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1, 'error result should still be injected');
   });
 
   test('12. autoInsert=true — result inserted via adapter.insertText', async () => {
@@ -494,7 +582,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -520,7 +608,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -550,7 +638,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -571,7 +659,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => createMockAdapter(),
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeNonCutoffEvent());
@@ -586,7 +674,7 @@ describe('streamToolBridge', () => {
     const mockClient = createMockMcpClient({ callToolResult: 'result' });
     const mockGuard = createMockGuard();
     // Override: first call returns key, second returns null
-    mockGuard.reserveExecution = (input) => {
+    mockGuard.reserveExecution = input => {
       mockGuard._calls.reserve.push(input);
       reserveCallCount++;
       return reserveCallCount === 1 ? 'key-first' : null;
@@ -601,14 +689,11 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Fire two cutoff events rapidly
-    await Promise.all([
-      handler(makeCutoffEvent()),
-      handler(makeCutoffEvent()),
-    ]);
+    await Promise.all([handler(makeCutoffEvent()), handler(makeCutoffEvent())]);
 
     // Only one should execute
     assert.strictEqual(mockClient._calls.length, 1, 'only first should execute');
@@ -631,7 +716,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -659,7 +744,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -691,7 +776,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -716,7 +801,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -741,7 +826,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -766,7 +851,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -791,7 +876,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -814,7 +899,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null, // no adapter available
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -844,7 +929,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard1,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     const cancelEvent: StreamEvent = {
@@ -864,7 +949,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard2,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events2.push(evt),
+      onEvent: evt => events2.push(evt),
     });
 
     const drainEvent: StreamEvent = {
@@ -896,7 +981,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -920,7 +1005,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -935,7 +1020,7 @@ describe('streamToolBridge', () => {
 
   // --- Gate 3B: Parameter validation (type checking + size limits) ---
 
-  test('25. arguments=\'[]\' (array) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+  test("25. arguments='[]' (array) — reject with ARGS_NOT_OBJECT before reserve", async () => {
     const mockClient = createMockMcpClient();
     const mockGuard = createMockGuard();
     const mockStorage = createMockStorage();
@@ -947,7 +1032,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c1', arguments: '[]' } }));
@@ -960,7 +1045,7 @@ describe('streamToolBridge', () => {
     assert.ok(failEvent.error!.includes('array'));
   });
 
-  test('26. arguments=\'123\' (number) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+  test("26. arguments='123' (number) — reject with ARGS_NOT_OBJECT before reserve", async () => {
     const mockClient = createMockMcpClient();
     const mockGuard = createMockGuard();
     const mockStorage = createMockStorage();
@@ -972,7 +1057,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c2', arguments: '123' } }));
@@ -984,7 +1069,7 @@ describe('streamToolBridge', () => {
     assert.ok(failEvent.error!.includes('number'));
   });
 
-  test('27. arguments=\'null\' (JSON null) — reject with ARGS_NOT_OBJECT before reserve', async () => {
+  test("27. arguments='null' (JSON null) — reject with ARGS_NOT_OBJECT before reserve", async () => {
     const mockClient = createMockMcpClient();
     const mockGuard = createMockGuard();
     const mockStorage = createMockStorage();
@@ -996,7 +1081,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c3', arguments: 'null' } }));
@@ -1019,7 +1104,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c4', arguments: '"hello"' } }));
@@ -1042,7 +1127,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Create oversized args (> 64KB)
@@ -1057,7 +1142,7 @@ describe('streamToolBridge', () => {
     assert.strictEqual(failEvent.errorCode, 'ARGS_TOO_LARGE');
   });
 
-  test('30. arguments=\'{}\' (empty object string) — treated as empty args, execution proceeds', async () => {
+  test("30. arguments='{}' (empty object string) — treated as empty args, execution proceeds", async () => {
     const mockClient = createMockMcpClient({ callToolResult: 'ok' });
     const mockGuard = createMockGuard({ reserveResult: 'key-empty' });
     const mockStorage = createMockStorage();
@@ -1069,7 +1154,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'echo', callId: 'c6', arguments: '{}' } }));
@@ -1080,7 +1165,7 @@ describe('streamToolBridge', () => {
     assert.ok(successEvent);
   });
 
-  test('31. parameterized execution — echo(message=\'hello\') receives correct params', async () => {
+  test("31. parameterized execution — echo(message='hello') receives correct params", async () => {
     const mockClient = createMockMcpClient({ callToolResult: { echoed: 'hello' } });
     const mockGuard = createMockGuard({ reserveResult: 'key-echo' });
     const mockStorage = createMockStorage();
@@ -1092,12 +1177,14 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
-    await handler(makeCutoffEvent({
-      identity: { name: 'echo', callId: 'call-echo-1', arguments: '{"message":"hello"}' },
-    }));
+    await handler(
+      makeCutoffEvent({
+        identity: { name: 'echo', callId: 'call-echo-1', arguments: '{"message":"hello"}' },
+      }),
+    );
 
     assert.strictEqual(mockClient._calls.length, 1);
     assert.strictEqual(mockClient._calls[0].name, 'echo');
@@ -1119,7 +1206,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     const complexArgs = JSON.stringify({
@@ -1128,9 +1215,11 @@ describe('streamToolBridge', () => {
       tags: ['a', 'b'],
     });
 
-    await handler(makeCutoffEvent({
-      identity: { name: 'search', callId: 'call-complex', arguments: complexArgs },
-    }));
+    await handler(
+      makeCutoffEvent({
+        identity: { name: 'search', callId: 'call-complex', arguments: complexArgs },
+      }),
+    );
 
     assert.strictEqual(mockClient._calls.length, 1);
     assert.deepStrictEqual(mockClient._calls[0].params, {
@@ -1152,7 +1241,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-str', arguments: '"hello"' } }));
@@ -1164,7 +1253,7 @@ describe('streamToolBridge', () => {
     assert.strictEqual(failEvent.errorCode, 'ARGS_NOT_OBJECT');
   });
 
-  test('34. arguments=\'null\' (JSON null literal) → ARGS_NOT_OBJECT rejection', async () => {
+  test("34. arguments='null' (JSON null literal) → ARGS_NOT_OBJECT rejection", async () => {
     const mockClient = createMockMcpClient({ callToolResult: 'ok' });
     const mockGuard = createMockGuard({ reserveResult: 'key-null-str' });
     const mockStorage = createMockStorage();
@@ -1176,7 +1265,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent({ identity: { name: 'tool', callId: 'c-null-str', arguments: 'null' } }));
@@ -1200,7 +1289,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Create args exactly at MAX_ARGS_SIZE (65536) code units
@@ -1230,7 +1319,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => null,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Create args at MAX_ARGS_SIZE + 1
@@ -1269,7 +1358,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1299,7 +1388,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1321,8 +1410,8 @@ describe('streamToolBridge', () => {
 
   test('40. getAdapterDiagnostic — full adapter, empty input → ok, inputEmpty=true, length=0', () => {
     const adapter: AdapterLike = {
-      insertText: async () => { },
-      submitForm: async () => { },
+      insertText: async () => {},
+      submitForm: async () => {},
       getInputContent: () => '',
     };
     const diag = getAdapterDiagnostic(adapter);
@@ -1334,8 +1423,8 @@ describe('streamToolBridge', () => {
 
   test('41. getAdapterDiagnostic — full adapter, input has content → ok, inputEmpty=false', () => {
     const adapter: AdapterLike = {
-      insertText: async () => { },
-      submitForm: async () => { },
+      insertText: async () => {},
+      submitForm: async () => {},
       getInputContent: () => 'user draft text here',
     };
     const diag = getAdapterDiagnostic(adapter);
@@ -1347,8 +1436,8 @@ describe('streamToolBridge', () => {
 
   test('42. getAdapterDiagnostic — adapter without getInputContent → partial, input fields null', () => {
     const adapter: AdapterLike = {
-      insertText: async () => { },
-      submitForm: async () => { },
+      insertText: async () => {},
+      submitForm: async () => {},
       // no getInputContent
     };
     const diag = getAdapterDiagnostic(adapter);
@@ -1360,7 +1449,7 @@ describe('streamToolBridge', () => {
 
   test('43. getAdapterDiagnostic — adapter without submitForm → submit_not_found', () => {
     const adapter: AdapterLike = {
-      insertText: async () => { },
+      insertText: async () => {},
       getInputContent: () => 'draft',
       // no submitForm
     };
@@ -1373,9 +1462,11 @@ describe('streamToolBridge', () => {
 
   test('44. getAdapterDiagnostic — getInputContent throws → partial, input fields null gracefully', () => {
     const adapter: AdapterLike = {
-      insertText: async () => { },
-      submitForm: async () => { },
-      getInputContent: () => { throw new Error('DOM detached'); },
+      insertText: async () => {},
+      submitForm: async () => {},
+      getInputContent: () => {
+        throw new Error('DOM detached');
+      },
     };
     const diag = getAdapterDiagnostic(adapter);
     assert.strictEqual(diag.adapterAvailable, true);
@@ -1467,7 +1558,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: createMockStorage(),
-      onEvent: (e) => events.push(e),
+      onEvent: e => events.push(e),
     });
 
     await handler(makeCutoffEvent());
@@ -1497,7 +1588,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: createMockStorage(),
-      onEvent: (e) => events.push(e),
+      onEvent: e => events.push(e),
     });
 
     await handler(makeCutoffEvent());
@@ -1526,7 +1617,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: createMockStorage(),
-      onEvent: (e) => events.push(e),
+      onEvent: e => events.push(e),
     });
 
     await handler(makeCutoffEvent()); // identity.name = 'mcp__web_search'
@@ -1546,7 +1637,7 @@ describe('streamToolBridge', () => {
       autoInsert: true,
       autoSubmit: false,
       toolTimeoutMs: 5000,
-      toolAllowlist: ['echo', 'read_file'],  // mcp__web_search NOT in list
+      toolAllowlist: ['echo', 'read_file'], // mcp__web_search NOT in list
     };
 
     const handler = createStreamToolHandler({
@@ -1555,7 +1646,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: createMockStorage(),
-      onEvent: (e) => events.push(e),
+      onEvent: e => events.push(e),
     });
 
     await handler(makeCutoffEvent()); // identity.name = 'mcp__web_search'
@@ -1605,29 +1696,45 @@ describe('streamToolBridge', () => {
       reserveExecution: () => `key-${++guardCounter}`,
       executionGuardStore: {
         markSucceeded: () => {},
-        markFailed: (key: string, error?: string) => { mockGuard._calls.markFailed.push({ key, error }); },
+        markFailed: (key: string, error?: string) => {
+          mockGuard._calls.markFailed.push({ key, error });
+        },
       },
       _calls: { markFailed: [] },
     };
     const mockAdapter = createMockAdapter();
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 3 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 3 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Execute 3 times — all should succeed
     for (let i = 0; i < 3; i++) {
-      await handler({ type: 'stream_cutoff', streamId: 'stream-cb', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream-cb',
+        identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' },
+      });
     }
     assert.strictEqual(mockClient._calls.length, 3, 'first 3 calls execute');
 
     // 4th call — should be blocked
-    await handler({ type: 'stream_cutoff', streamId: 'stream-cb', identity: { name: 'echo', callId: 'call-blocked', arguments: '{}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-cb',
+      identity: { name: 'echo', callId: 'call-blocked', arguments: '{}' },
+    });
     assert.strictEqual(mockClient._calls.length, 3, '4th call blocked by circuit breaker');
 
     const cbEvent = events.find(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN');
@@ -1647,19 +1754,37 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 2 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 2 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Stream A: 2 calls (max)
-    await handler({ type: 'stream_cutoff', streamId: 'stream-A', identity: { name: 'echo', callId: 'a1', arguments: '{}' } });
-    await handler({ type: 'stream_cutoff', streamId: 'stream-A', identity: { name: 'echo', callId: 'a2', arguments: '{}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-A',
+      identity: { name: 'echo', callId: 'a1', arguments: '{}' },
+    });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-A',
+      identity: { name: 'echo', callId: 'a2', arguments: '{}' },
+    });
     // Stream B: still has budget
-    await handler({ type: 'stream_cutoff', streamId: 'stream-B', identity: { name: 'echo', callId: 'b1', arguments: '{}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-B',
+      identity: { name: 'echo', callId: 'b1', arguments: '{}' },
+    });
 
     assert.strictEqual(mockClient._calls.length, 3, 'all 3 calls execute');
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
@@ -1677,17 +1802,27 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 0 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 0 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Execute 10 times — all should succeed (no limit)
     for (let i = 0; i < 10; i++) {
-      await handler({ type: 'stream_cutoff', streamId: 'stream-nolimit', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream-nolimit',
+        identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' },
+      });
     }
     assert.strictEqual(mockClient._calls.length, 10, 'all 10 calls execute with no limit');
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
@@ -1710,15 +1845,22 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Execute 6 times — first 5 succeed, 6th blocked
     for (let i = 0; i < 6; i++) {
-      await handler({ type: 'stream_cutoff', streamId: 'stream-def', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream-def',
+        identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' },
+      });
     }
     assert.strictEqual(mockClient._calls.length, 5, 'default limit is 5');
-    assert.ok(events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), '6th call blocked');
+    assert.ok(
+      events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'),
+      '6th call blocked',
+    );
   });
 
   test('57. circuit breaker — parse failures do not consume budget', async () => {
@@ -1733,19 +1875,37 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 2 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 2 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // Send invalid args (parse failure — should not consume budget)
-    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-bad', arguments: 'not-json' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-pf',
+      identity: { name: 'echo', callId: 'c-bad', arguments: 'not-json' },
+    });
     // Send 2 valid calls — both should succeed
-    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-1', arguments: '{}' } });
-    await handler({ type: 'stream_cutoff', streamId: 'stream-pf', identity: { name: 'echo', callId: 'c-2', arguments: '{"x":1}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-pf',
+      identity: { name: 'echo', callId: 'c-1', arguments: '{}' },
+    });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-pf',
+      identity: { name: 'echo', callId: 'c-2', arguments: '{"x":1}' },
+    });
 
     assert.strictEqual(mockClient._calls.length, 2, 'both valid calls execute');
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip');
@@ -1757,28 +1917,48 @@ describe('streamToolBridge', () => {
     // Guard returns null on second call (duplicate)
     let callCount = 0;
     const mockGuard: ExecutionGuardLike = {
-      reserveExecution: () => { callCount++; return callCount <= 1 ? `key-${callCount}` : null; },
+      reserveExecution: () => {
+        callCount++;
+        return callCount <= 1 ? `key-${callCount}` : null;
+      },
       executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
     };
     const mockAdapter = createMockAdapter();
     const events: StreamToolExecutionEvent[] = [];
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: 1 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: 1 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     // First call: succeeds (uses budget 1/1)
-    await handler({ type: 'stream_cutoff', streamId: 'stream-dup', identity: { name: 'echo', callId: 'c1', arguments: '{}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-dup',
+      identity: { name: 'echo', callId: 'c1', arguments: '{}' },
+    });
     // Second call: duplicate (guard returns null) — should NOT consume budget
-    await handler({ type: 'stream_cutoff', streamId: 'stream-dup', identity: { name: 'echo', callId: 'c1', arguments: '{}' } });
+    await handler({
+      type: 'stream_cutoff',
+      streamId: 'stream-dup',
+      identity: { name: 'echo', callId: 'c1', arguments: '{}' },
+    });
 
     assert.strictEqual(mockClient._calls.length, 1, 'only first call executes');
-    assert.ok(events.some(e => e.status === 'duplicate'), 'duplicate detected');
+    assert.ok(
+      events.some(e => e.status === 'duplicate'),
+      'duplicate detected',
+    );
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'), 'no breaker trip from duplicate');
   });
 
@@ -1797,7 +1977,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1826,7 +2006,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1852,7 +2032,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1875,7 +2055,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1904,7 +2084,7 @@ describe('streamToolBridge', () => {
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     await handler(makeCutoffEvent());
@@ -1924,8 +2104,12 @@ describe('streamToolBridge', () => {
 
   test('64. injectResultIfSafe — no adapter → INJECT_SKIPPED_NO_ADAPTER', async () => {
     const { outcome } = await injectResultIfSafe({
-      callId: 'c1', name: 'test', status: 'success', result: 'data',
-      autoSubmit: false, adapter: () => null,
+      callId: 'c1',
+      name: 'test',
+      status: 'success',
+      result: 'data',
+      autoSubmit: false,
+      adapter: () => null,
     });
     assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_ADAPTER');
   });
@@ -1933,8 +2117,12 @@ describe('streamToolBridge', () => {
   test('65. injectResultIfSafe — no getInputContent → INJECT_SKIPPED_NO_INSPECT', async () => {
     const adapter: AdapterLike = { insertText: async () => true };
     const { outcome } = await injectResultIfSafe({
-      callId: 'c1', name: 'test', status: 'success', result: 'data',
-      autoSubmit: false, adapter: () => adapter,
+      callId: 'c1',
+      name: 'test',
+      status: 'success',
+      result: 'data',
+      autoSubmit: false,
+      adapter: () => adapter,
     });
     assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_INSPECT');
   });
@@ -1945,8 +2133,12 @@ describe('streamToolBridge', () => {
       getInputContent: () => 'some draft',
     };
     const { outcome } = await injectResultIfSafe({
-      callId: 'c1', name: 'test', status: 'success', result: 'data',
-      autoSubmit: false, adapter: () => adapter,
+      callId: 'c1',
+      name: 'test',
+      status: 'success',
+      result: 'data',
+      autoSubmit: false,
+      adapter: () => adapter,
     });
     assert.strictEqual(outcome, 'INJECT_SKIPPED_DRAFT');
   });
@@ -1954,13 +2146,20 @@ describe('streamToolBridge', () => {
   test('67. injectResultIfSafe — success + autoSubmit=true → RESULT_SUBMITTED', async () => {
     const calls: string[] = [];
     const adapter: AdapterLike = {
-      insertText: async (text) => { calls.push(text); return true; },
+      insertText: async text => {
+        calls.push(text);
+        return true;
+      },
       submitForm: async () => true,
       getInputContent: () => '',
     };
     const { outcome } = await injectResultIfSafe({
-      callId: 'c1', name: 'echo', status: 'success', result: { msg: 'hi' },
-      autoSubmit: true, adapter: () => adapter,
+      callId: 'c1',
+      name: 'echo',
+      status: 'success',
+      result: { msg: 'hi' },
+      autoSubmit: true,
+      adapter: () => adapter,
     });
     assert.strictEqual(outcome, 'RESULT_SUBMITTED');
     assert.strictEqual(calls.length, 1);
@@ -1969,12 +2168,18 @@ describe('streamToolBridge', () => {
 
   test('68. injectResultIfSafe — insertText throws → INSERT_FAILED with error message', async () => {
     const adapter: AdapterLike = {
-      insertText: async () => { throw new Error('DOM gone'); },
+      insertText: async () => {
+        throw new Error('DOM gone');
+      },
       getInputContent: () => '',
     };
     const { outcome, error } = await injectResultIfSafe({
-      callId: 'c1', name: 'test', status: 'error', result: 'oops',
-      autoSubmit: false, adapter: () => adapter,
+      callId: 'c1',
+      name: 'test',
+      status: 'error',
+      result: 'oops',
+      autoSubmit: false,
+      adapter: () => adapter,
     });
     assert.strictEqual(outcome, 'INSERT_FAILED');
     assert.strictEqual(error, 'DOM gone');
@@ -1983,11 +2188,17 @@ describe('streamToolBridge', () => {
   test('69. injectResultIfSafe — getInputContent throws → INJECT_SKIPPED_NO_INSPECT', async () => {
     const adapter: AdapterLike = {
       insertText: async () => true,
-      getInputContent: () => { throw new Error('DOM detached'); },
+      getInputContent: () => {
+        throw new Error('DOM detached');
+      },
     };
     const { outcome } = await injectResultIfSafe({
-      callId: 'c1', name: 'test', status: 'success', result: 'data',
-      autoSubmit: false, adapter: () => adapter,
+      callId: 'c1',
+      name: 'test',
+      status: 'success',
+      result: 'data',
+      autoSubmit: false,
+      adapter: () => adapter,
     });
     assert.strictEqual(outcome, 'INJECT_SKIPPED_NO_INSPECT');
   });
@@ -2004,19 +2215,28 @@ describe('streamToolBridge', () => {
     const events: StreamToolExecutionEvent[] = [];
 
     const handler = createStreamToolHandler({
-      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000, circuitBreaker: { maxToolCallsPerStream: -1 } },
+      config: {
+        enabled: true,
+        autoInsert: false,
+        autoSubmit: false,
+        toolTimeoutMs: 30000,
+        circuitBreaker: { maxToolCallsPerStream: -1 },
+      },
       mcpClient: () => mockClient,
       guard: mockGuard,
       adapter: () => mockAdapter,
       storage: mockStorage,
-      onEvent: (evt) => events.push(evt),
+      onEvent: evt => events.push(evt),
     });
 
     for (let i = 0; i < 10; i++) {
-      await handler({ type: 'stream_cutoff', streamId: 'stream-neg', identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' } });
+      await handler({
+        type: 'stream_cutoff',
+        streamId: 'stream-neg',
+        identity: { name: 'echo', callId: `call-${i}`, arguments: '{}' },
+      });
     }
     assert.strictEqual(mockClient._calls.length, 10, 'all 10 calls execute with negative maxCalls');
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'));
   });
-
 });

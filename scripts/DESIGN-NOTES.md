@@ -1,0 +1,362 @@
+# CDP 诊断脚本设计笔记
+
+> 从 L5B-2 预观察工作中提炼的设计哲学、本质性发现和可复用模式。
+>
+> Author: Opus 4.7 | Date: 2026-05-13
+
+---
+
+## 1. 核心设计哲学
+
+### 1.1 两阶段预观察模式
+
+**问题**：浏览器扩展的端到端路径涉及多个独立系统（扩展、SPA、MCP proxy、外部 API），直接测试全路径会遇到大量失败点，难以定位。
+
+**解决方案**：分离为两个独立阶段：
+
+```
+Phase 1 (Preflight): 全自动，验证基础设施就绪
+  ├── 扩展发现与激活检测
+  ├── DOM 注入信号检查
+  ├── 输入/提交按钮存在性
+  └── 页面上下文正确性
+
+Phase 2 (Smoke Test): 需要配置开关
+  ├── 发送测试 prompt
+  ├── 监控拦截链
+  ├── 验证外部副作用 (GitHub PR comment)
+  └── Exactly-once 检查
+```
+
+**可复用性**：任何涉及多个独立系统的端到端测试都应采用此模式。
+
+### 1.2 扩展感知的检测策略
+
+**问题**：Content scripts 运行在隔离世界（isolated world），全局变量（如 `window.mcpClient`）无法从主世界访问。
+
+**解决方案**：通过 DOM 注入信号间接检测扩展激活状态：
+
+```javascript
+// 不可靠：访问全局变量
+const mcpClient = window.mcpClient;  // ❌ 隔离世界，不可访问
+
+// 可靠：检测 DOM 注入信号
+const mcpElements = document.querySelectorAll('[class*="mcp-"]').length;  // ✅
+const mcpPopover = !!document.querySelector('.mcp-popover');  // ✅
+```
+
+**本质性发现**：Content scripts 的注入是 DOM 可见的，但其状态是不可见的。检测扩展激活只能依赖 DOM 信号，不能依赖全局状态。
+
+### 1.3 运行时扩展发现
+
+**问题**：硬编码扩展 ID（32 位哈希）会导致扩展更新后 ID 变化时测试失败。
+
+**解决方案**：通过 manifest 运行时发现扩展 ID：
+
+```javascript
+// Strategy 1: Service Worker + Runtime.evaluate
+const manifest = await chrome.runtime.getManifest();
+if (manifest.name.includes('MCP SuperAssistant')) {
+    return extensionId;
+}
+
+// Strategy 2: Extension page title
+if (page.title.includes('MCP SuperAssistant')) {
+    return extensionId;
+}
+```
+
+**可复用性**：所有依赖特定扩展的脚本都应使用运行时发现，而非硬编码 ID。
+
+---
+
+## 2. 关键技术发现
+
+### 2.1 SPA 导航不触发 Content Script 注入
+
+**现象**：通过 `Page.navigate` 导航到新页面后，content scripts 不会被注入。
+
+**原因**：Chrome 的 content script 注入只在以下情况触发：
+- 页面首次加载
+- 扩展安装/更新
+- `chrome.scripting.executeScript` 调用
+
+SPA 内部导航（如 Notion 的路由切换）不触发这些条件。
+
+**解决方案**：导航后必须执行 `Page.reload`：
+
+```javascript
+// 导航到目标页面
+ws.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url: targetUrl } }));
+await sleep(3000);
+
+// 重新加载以触发 content script 注入
+ws.send(JSON.stringify({ id: 1, method: 'Page.reload', params: { ignoreCache: false } }));
+await sleep(8000);  // 等待 SPA 完全渲染
+```
+
+**可复用性**：所有需要 content script 激活的 CDP 脚本都必须在导航后执行 reload。
+
+### 2.2 Notion /chat 页面 DOM 结构
+
+**发现**（通过 `debug-notion-chat-dom.cjs` 探针）：
+
+```javascript
+// 输入框
+const input = document.querySelector('div[role="textbox"][contenteditable="true"]');
+
+// 提交按钮 - 关键发现：button[type="submit"] 没有 aria-label
+const submitBtn = document.querySelector('button[type="submit"]');
+
+// MCP 按钮
+const mcpBtn = document.querySelector('[aria-label="MCP Settings - Active"]');
+
+// 停止按钮（生成中）
+const stopBtn = document.querySelector('[aria-label="停止"], [aria-label="Stop"]');
+```
+
+**重要**：
+- `/agent/` 路由已废弃，当前有效路由是 `/chat` 和 `/ai`
+- 提交按钮没有 `aria-label`，而且可能没有 `type` attribute；DOM property `button.type` 仍会返回默认值 `submit`。因此 selector probe 不能只用 `button[type="submit"]`，必须枚举 `document.querySelectorAll('button')` 后检查 `button.type === "submit"`。
+- Enter 键可以作为提交的 fallback
+
+### 2.3 CDP WebSocket 通信模式
+
+**封装**：`cdpSend()` 函数（见 [`scripts/l5b2-obs-mcp-write-back.cjs`](MCP-SuperAssistant/scripts/l5b2-obs-mcp-write-back.cjs)）封装了 CDP 消息的请求-响应模式：
+
+```javascript
+let _counter = 0;
+function cdpSend(ws, method, params = {}) {
+    const id = ++_counter;
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`CDP timeout: ${method}`)), 15000);
+        const handler = (raw) => {
+            const msg = JSON.parse(raw);
+            if (msg.id === id) {
+                ws.removeListener('message', handler);
+                clearTimeout(timer);
+                if (msg.error) reject(new Error(`CDP error: ${JSON.stringify(msg.error)}`));
+                else resolve(msg.result);
+            }
+        };
+        ws.on('message', handler);
+        ws.send(JSON.stringify({ id, method, params }));
+    });
+}
+```
+
+**可复用性**：所有 CDP 脚本都应使用此模式，避免手动管理消息 ID 和回调。
+
+---
+
+## 3. 错误处理模式
+
+### 3.1 分层失败检测
+
+```
+Level 1: 连接失败 (Chrome 未运行、端口未开放)
+  → 明确错误信息：确保 Chrome 以 --remote-debugging-port=9222 启动
+
+Level 2: 扩展未找到
+  → 明确错误信息：扩展未安装或名称不匹配
+
+Level 3: 页面未就绪
+  → 明确错误信息：需要导航到 Notion AI 页面
+
+Level 4: DOM 元素缺失
+  → 明确错误信息：SPA 未完全渲染，需要等待
+
+Level 5: 功能拦截失败
+  → 明确错误信息：扩展未激活或 MCP proxy 未运行
+```
+
+### 3.2 超时与重试策略
+
+```javascript
+// 连接超时
+const timer = setTimeout(() => reject(new Error(`CDP timeout: ${method}`)), 15000);
+
+// SPA 渲染等待
+await sleep(8000);  // reload 后等待
+
+// 响应生成等待
+const TIMEOUT_MS = 60000;  // Phase 2 最长等待
+while (Date.now() - startTime < TIMEOUT_MS) {
+    await sleep(3000);  // 每 3 秒检查一次
+    // ...
+}
+```
+
+---
+
+## 4. 可复用组件
+
+### 4.1 [`lib/cdp-preflight.cjs`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs)
+
+**职责**：
+- 扩展发现：`resolveExtensionId()`
+- 页面上下文确保 + 工作空间验证：`ensureAgentPage()`
+- 完整预检：`preflight()`
+- 工作空间配置读取：`readWorkspaceConfig()` → `REQUIRED_WORKSPACE`
+- 工作空间 DOM 提取纯函数：`extractWorkspaceInfoFromDocument()`
+- CDP 表达式生成 seam：`buildWorkspaceDetectionExpression()`
+- typed workspace guard：`WorkspaceMismatchError`、`checkWorkspace()`、`enforceWorkspaceInfo()`
+- polling 状态核心：`WorkspaceHealthMonitor`
+
+这些 API 都在 [`scripts/lib/cdp-preflight.cjs`](MCP-SuperAssistant/scripts/lib/cdp-preflight.cjs) 中维护；文档不再嵌入具体行号，避免后续重构后 stale。
+
+**工作空间配置优先级**：
+```
+NOTION_WORKSPACE 环境变量 > config/workspace.toml [notion].required_workspace > 硬编码 fallback
+```
+
+`config/workspace.toml` 中的 `[notion]` section 定义了所需工作空间：
+```toml
+[notion]
+required_workspace = "sjzj030的工作空间"
+```
+
+**工作空间检测方式**：通过 CDP `Runtime.evaluate` 查询 Notion 侧边栏 DOM，运行由 `buildWorkspaceDetectionExpression()` 生成的表达式，并复用 `extractWorkspaceInfoFromDocument(document.body)` 搜索包含 `的工作空间` 的文本节点。Tab title 是扩展注入的标签（如 `[notion-tab-0] Notion AI | Notion`），不是工作空间标识。
+
+DOM 观察证据（[`observe-workspace-dom.cjs`](MCP-SuperAssistant/scripts/observe-workspace-dom.cjs) 发现）：
+```html
+<div style="color: var(--c-texPri); font-weight: 500; white-space: nowrap; ...">sjzj030的工作空间</div>
+```
+
+如果 DOM 查询失败或未检测到工作空间，workspace guard 会 fail-closed：`ensureAgentPage()` 通过 `enforceWorkspaceInfo()` / `checkWorkspace()` 抛出 `WorkspaceMismatchError`。Tab title 只作为诊断信息保存在错误对象上，不再作为通过 workspace guard 的 fallback。
+
+**TDD contract**：
+- `extractWorkspaceInfoFromDocument(root)` 是无 CDP 依赖的纯提取函数。
+- `buildWorkspaceDetectionExpression()` 返回可直接传给 `Runtime.evaluate({ expression })` 的 IIFE 字符串；测试会在 Node `vm` 中注入最小 `document.body` fixture 执行该表达式。
+- `enforceWorkspaceInfo(workspaceInfo, expected)` 只接受 DOM 检测结果；即使 tab title 含有 expected workspace，`workspaceInfo.workspaceName === null` 也必须 fail-closed。
+- `ensureAgentPage(agentUrl, deps)` 保持原默认调用方式，同时允许测试注入 `getTargets`、`WebSocket`、`sleep` 和 `requiredWorkspace`。fake-CDP wiring 测试覆盖 `Runtime.evaluate` → `workspaceInfo` → `WorkspaceMismatchError` 的生产路径，不需要导航或 reload 真实浏览器。
+- `WorkspaceHealthMonitor` 只负责连续失败计数和 drift 判定；真实 polling 接入仍由后续 consumer 脚本完成。
+
+**使用方式**：
+```javascript
+const { preflight, sleep, getTargets, REQUIRED_WORKSPACE } = require('./lib/cdp-preflight.cjs');
+
+const { tab, extensionId, extensionName, workspaceInfo } = await preflight();
+console.log(`Required workspace: ${REQUIRED_WORKSPACE}`);
+console.log(`Detected workspace: ${workspaceInfo?.workspaceName ?? 'unknown'}`);
+```
+
+**测试**：
+```bash
+node scripts/test-cdp-preflight-workspace.cjs  # 工作空间配置读取 + 优先级链测试
+```
+
+### 4.2 [`debug-notion-chat-dom.cjs`](MCP-SuperAssistant/scripts/debug-notion-chat-dom.cjs)
+
+**用途**：一次性 DOM 探针，发现 Notion /chat 页面的按钮和输入框选择器。
+
+**可复用性**：如果 Notion 更新 DOM 结构，可以重新运行此脚本发现新的选择器。
+
+### 4.3 [`l5b2-obs-mcp-write-back.cjs`](MCP-SuperAssistant/scripts/l5b2-obs-mcp-write-back.cjs)
+
+**职责**：两阶段预观察脚本，验证 Notion AI → MCP-SuperAssistant → committee-bridge → GitHub API 端到端路径。
+
+脚本的 write-gate / evidence contract 不应直接内联在浏览器流程里判断。L5B-2 的 fail-closed helper 被提取到 [`lib/l5b2-writeback-preflight.cjs`](MCP-SuperAssistant/scripts/lib/l5b2-writeback-preflight.cjs)，用于在不连接 CDP、Notion、GitHub 或真实 bridge 的情况下测试：
+- MCP session 序列必须是 `initialize` → `notifications/initialized` → `tools/list` → `tools/call(get_bridge_info)`
+- `tools/list` 必须暴露 `comment_on_pr`
+- `get_bridge_info().writes_enabled === true`
+- `get_bridge_info().tools.git_write` 必须包含 `comment_on_pr`，不能把 flat `tools` array 当成事实源
+- Phase 1 只有 DOM/composer 证据时不能标记 `PREFLIGHT_OK`
+- `repoMatches` 和 `evidenceContextOk` 必须来自实际 `gh repo view` / metadata validation，不能在 write gate 中硬编码为 true
+- Phase 1 verdict 必须通过 helper 分类；只有 DOM/composer/proxy 可见性时最多是 `DOM_COMPOSER_OBSERVED`，不能升级成 acceptance-level preflight
+- CDP execution context 枚举必须先安装 `Runtime.executionContextCreated` listener，再 `Runtime.disable` / `Runtime.enable` 强制 replay；长生命周期 CDP session 中只调用 `Runtime.enable` 可能返回 0 个 context 的假阴性
+- `classifyExecutionContexts()` 必须保留 all-context summary（main / isolated / extension / other）并额外输出 `mcpSuperAssistant` focused summary；context name 优先使用 `ctx.name`，再退回 `auxData.name`
+- Phase 2 即使找到 exact PR comment，如果缺少 assistant-origin function_call 和 callTool invocation evidence，也只能是 partial verdict，不能标记 full `PASS`
+- evidence 必须带 script hash、repo commit/dirty 状态、运行命令、mode、CDP port、target URL 和 run id
+
+**可复用性**：
+- Phase 1 的 DOM 检测逻辑可以复用到其他 Notion 测试
+- Phase 1 的 execution context classifier 可以复用到其他 CDP / extension 注入观测
+- Phase 2 的 console 监控模式可以复用到其他 MCP 拦截测试
+- PR comment 验证逻辑（`gh CLI` + ACK marker）可以复用到其他 write-back 测试
+
+**测试**：
+```bash
+node scripts/test-l5b2-writeback-preflight.cjs
+```
+
+---
+
+## 5. 常见陷阱与解决方案
+
+### 5.1 导航后 DOM 检查过早
+
+**现象**：导航后立即检查 DOM，返回空结果。
+
+**原因**：SPA 需要时间渲染，Content script 注入需要 reload。
+
+**解决方案**：导航 + reload 后等待 8 秒，再检查 DOM。
+
+### 5.2 Submit 按钮选择器错误
+
+**现象**：使用 `[aria-label="Send"]` 找不到按钮。
+
+**原因**：Notion /chat 页面的 submit 按钮没有 aria-label。
+
+**解决方案**：不要只依赖 CSS selector `button[type="submit"]`。应枚举 `document.querySelectorAll('button')`，记录 `type` attribute 和 DOM property，并用 `button.type === "submit"` 捕获没有 `type` attribute 的 submit 按钮。
+
+### 5.3 隔离世界状态访问
+
+**现象**：`window.mcpClient` 返回 `undefined`。
+
+**原因**：Content scripts 运行在隔离世界，主世界无法访问。
+
+**解决方案**：通过 DOM 注入信号（如 `[class*="mcp-"]`）间接检测扩展状态。
+
+### 5.4 Execution context 枚举假阴性
+
+**现象**：Phase 1 脚本记录 `mainCount=0`、`extensionCount=0`，但独立 CDP probe 或 DOM 信号显示扩展已经注入。
+
+**原因**：`Runtime.executionContextCreated` 事件只在 listener 已安装且 Runtime domain replay 时可靠出现。对已启用 Runtime 的长生命周期 CDP session 直接调用 `Runtime.enable` 可能不会重新发送已有 contexts；如果 listener 安装在 `Runtime.enable` 之后，也会漏采同步 replay 事件。
+
+**解决方案**：先安装 listener，再忽略错误调用 `Runtime.disable`，然后调用 `Runtime.enable` 并等待 replay；之后用 `classifyExecutionContexts()` 统一分类并同时保留 all-context summary 和 MCP-SuperAssistant focused summary。
+
+### 5.5 Agent 路由废弃
+
+**现象**：导航到 `/agent/` 页面后找不到 AI 输入框。
+
+**原因**：Notion 已废弃 `/agent/` 路由，当前有效路由是 `/chat` 和 `/ai`。
+
+**解决方案**：更新所有 URL 和路由检查，使用 `/chat` 作为默认路由。
+
+---
+
+## 6. 未来改进方向
+
+### 6.1 自动化 Phase 2 配置切换
+
+当前 Phase 2 需要手动设置 `BRIDGE_ENABLE_WRITES=true`，未来可以：
+- 使用环境变量临时覆盖
+- 或通过 MCP proxy 的 API 端点动态切换
+
+### 6.2 更精确的响应检测
+
+当前通过 input 空 + stop 按钮消失判断 Notion AI 完成，未来可以：
+- 监控特定的 "完成" 信号（如 `[data-status="complete"]`）
+- 使用 MutationObserver 监听 DOM 变化
+
+### 6.3 多 Provider 支持
+
+当前脚本只针对 Notion AI，未来可以扩展到：
+- ChatGPT (通过 `chatgpt.py`)
+- Perplexity
+- DeepSeek
+
+---
+
+## 7. 总结
+
+本轮工作的核心贡献：
+
+1. **发现 SPA 导航不触发 content script 注入** — 必须 reload
+2. **发现 Notion /chat 页面 submit 按钮无 aria-label** — 使用 `button[type="submit"]`
+3. **建立两阶段预观察模式** — 分离基础设施检查和功能验证
+4. **封装 CDP 通信模式** — `cdpSend()` 可复用
+5. **建立运行时扩展发现机制** — 避免硬编码扩展 ID
+
+这些发现和模式可以复用到未来的浏览器扩展测试工作中。

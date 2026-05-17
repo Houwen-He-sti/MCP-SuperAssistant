@@ -18,9 +18,160 @@
 
 const http = require('http');
 const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
-const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
+const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/chat';
+
+// ─── Config: read required_workspace from config/workspace.toml ─────────────
+// TOML parser for simple key = "value" format (no nested objects/arrays needed)
+
+function readWorkspaceConfig() {
+    // Default workspace root: scripts/lib → MCP-SuperAssistant → workspace root
+    const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ||
+        path.resolve(__dirname, '../../..');
+    const CONFIG_PATH = path.join(WORKSPACE_ROOT, 'config', 'workspace.toml');
+
+    try {
+        const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+
+        // Parse [notion] section for required_workspace
+        const notionMatch = content.match(/\[notion\]([\s\S]*?)(?:\n\[|$)/);
+        if (notionMatch) {
+            const workspaceMatch = notionMatch[1].match(/required_workspace\s*=\s*"([^"]+)"/);
+            if (workspaceMatch) {
+                return workspaceMatch[1];
+            }
+        }
+
+        // Fallback to [workspace] section for root
+        const rootMatch = content.match(/\[workspace\]([\s\S]*?)(?:\n\[|$)/);
+        if (rootMatch) {
+            const rootPathMatch = rootMatch[1].match(/root\s*=\s*"([^"]+)"/);
+            if (rootPathMatch) {
+                return path.join(rootPathMatch[1], 'config', 'workspace.toml');
+            }
+        }
+    } catch (err) {
+        // Config file not found or unreadable — use default
+        console.log(`⚠️  Cannot read config/workspace.toml: ${err.message}`);
+    }
+
+    return null;
+}
+
+// Read required workspace at module load time
+const REQUIRED_WORKSPACE = process.env.NOTION_WORKSPACE || readWorkspaceConfig() || 'sjzj030的工作空间';
+
+// ─── WorkspaceMismatchError ──────────────────────────────────────────────
+class WorkspaceMismatchError extends Error {
+    constructor(detected, expected) {
+        super(
+            `❌ Wrong workspace: detected "${detected}", required "${expected}".\n` +
+            `   Please switch to "${expected}" in Notion sidebar, then re-run.\n` +
+            `   (AI quota may be exhausted in the wrong workspace)`
+        );
+        this.name = 'WorkspaceMismatchError';
+        this.detected = detected;
+        this.expected = expected;
+    }
+}
+
+// ─── checkWorkspace (pure function, no CDP) ─────────────────────────────
+// Compares detected workspace against expected. Throws WorkspaceMismatchError
+// on mismatch, returns { matched: true, error: null } on match.
+function checkWorkspace(detected, expected) {
+    if (detected && detected.toLowerCase().includes(expected.toLowerCase())) {
+        return { matched: true, error: null };
+    }
+    const err = new WorkspaceMismatchError(detected, expected);
+    throw err;
+}
+
+// ─── WorkspaceHealthMonitor (polling core, no CDP) ──────────────────────
+// Tracks consecutive workspace mismatch failures for drift detection.
+// Consumer calls recordCheck(detectedWorkspaceName) after each check.
+// shouldDriftFail() returns true when consecutive failures >= threshold.
+class WorkspaceHealthMonitor {
+    constructor(opts = {}) {
+        this.maxConsecutiveFailures = opts.maxConsecutiveFailures || 2;
+        this.consecutiveFailures = 0;
+    }
+
+    recordCheck(detectedWorkspace) {
+        if (!detectedWorkspace) {
+            this.consecutiveFailures++;
+            return;
+        }
+        // Compare against the expected workspace (from config)
+        if (detectedWorkspace.toLowerCase().includes(REQUIRED_WORKSPACE.toLowerCase())) {
+            this.consecutiveFailures = 0; // success resets
+        } else {
+            this.consecutiveFailures++;
+        }
+    }
+
+    shouldDriftFail() {
+        return this.consecutiveFailures >= this.maxConsecutiveFailures;
+    }
+}
+
+// ─── Workspace extraction (pure function, testable without CDP) ───────────
+//
+// Extracts the workspace name from a DOM-like root object by walking
+// text nodes. In browser context, pass `document.body`. In unit tests,
+// pass a synthetic object with childNodes tree.
+//
+// Returns: { workspaceName: string | null, confidence: string, matchedText: string | null }
+//
+function extractWorkspaceInfoFromDocument(root) {
+    const WORKSPACE_PATTERN = '的工作空间';
+    if (!root) {
+        return { workspaceName: null, confidence: 'no_root', matchedText: null };
+    }
+
+    // Recursively walk all text nodes in the DOM tree
+    const stack = [root];
+    while (stack.length > 0) {
+        const node = stack.pop();
+        if (!node) continue;
+
+        if (node.nodeType === 3) { // TEXT_NODE
+            const text = (node.textContent || '').trim();
+            if (text.includes(WORKSPACE_PATTERN)) {
+                return {
+                    workspaceName: text,
+                    confidence: 'text_match',
+                    matchedText: text,
+                };
+            }
+        }
+
+        // Push children in reverse order for depth-first traversal
+        if (node.childNodes) {
+            for (let i = node.childNodes.length - 1; i >= 0; i--) {
+                stack.push(node.childNodes[i]);
+            }
+        }
+    }
+
+    return { workspaceName: null, confidence: 'not_found', matchedText: null };
+}
+
+function buildWorkspaceDetectionExpression() {
+    return `(() => {
+        const extractWorkspaceInfoFromDocument = ${extractWorkspaceInfoFromDocument.toString()};
+        return extractWorkspaceInfoFromDocument(document.body);
+    })()`;
+}
+
+function enforceWorkspaceInfo(workspaceInfo, expected) {
+    const detected = typeof workspaceInfo === 'string'
+        ? workspaceInfo
+        : workspaceInfo?.workspaceName ?? null;
+    return checkWorkspace(detected, expected);
+}
 
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 
@@ -107,39 +258,110 @@ async function resolveExtensionId(expectedName = 'MCP SuperAssistant') {
 // SPA apps may have visually identical pages on different routes
 // that trigger different API endpoints. Always navigate explicitly.
 //
-async function ensureAgentPage(agentUrl = AGENT_URL) {
-    const targets = await getTargets();
+// Workspace enforcement: sjzj030 工作空间有 AI 配额，houwen 工作空间配额已用完
+// 强制使用 sjzj030 工作空间进行 L5B-2 测试
+//
+async function ensureAgentPage(agentUrl = AGENT_URL, deps = {}) {
+    const getTargetsFn = deps.getTargets || getTargets;
+    const WebSocketCtor = deps.WebSocket || WebSocket;
+    const sleepFn = deps.sleep || sleep;
+    const requiredWorkspace = deps.requiredWorkspace || REQUIRED_WORKSPACE;
+
+    const targets = await getTargetsFn();
     let notionTab = targets.find(t => t.type === 'page' && t.url?.includes('notion.so'));
 
     if (!notionTab) {
         throw new Error('No Notion tab found in Chrome. Open Notion first.');
     }
 
-    // Check if already on agent page
-    if (notionTab.url.includes('/agent/')) {
+    // Check workspace: detect via DOM query (NOT tab title)
+    // Tab title is extension-injected label (e.g., "[notion-tab-0] Notion AI | Notion")
+    // Actual workspace name is in Notion sidebar DOM
+    let workspaceInfo = { workspaceName: null, confidence: 'not_checked', matchedText: null };
+    const titleObserved = notionTab.title || '';
+
+    try {
+        const ws = new WebSocketCtor(notionTab.webSocketDebuggerUrl);
+        await new Promise(r => ws.on('open', r));
+
+        const expr = buildWorkspaceDetectionExpression();
+
+        const result = await new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), 5000);
+            const handler = (msg) => {
+                const o = JSON.parse(msg);
+                if (o.id === 1) {
+                    clearTimeout(timeout);
+                    ws.removeListener('message', handler);
+                    resolve(o?.result?.result?.value);
+                }
+            };
+            ws.on('message', handler);
+            ws.send(JSON.stringify({
+                id: 1,
+                method: 'Runtime.evaluate',
+                params: { expression: expr, returnByValue: true }
+            }));
+        });
+
+        ws.close();
+        workspaceInfo = result && typeof result === 'object'
+            ? result
+            : { workspaceName: typeof result === 'string' ? result : null, confidence: 'legacy_value', matchedText: result ?? null };
+    } catch (err) {
+        console.log(`⚠️  DOM query failed: ${err.message}`);
+        workspaceInfo = { workspaceName: null, confidence: 'cdp_error', matchedText: null, error: err.message };
+    }
+
+    try {
+        enforceWorkspaceInfo(workspaceInfo, requiredWorkspace);
+    } catch (err) {
+        if (err instanceof WorkspaceMismatchError) {
+            err.workspaceInfo = workspaceInfo;
+            err.titleObserved = titleObserved;
+        }
+        throw err;
+    }
+
+    // Check if already on chat page (agent page has been deprecated, /chat is the new surface)
+    if (notionTab.url.includes('/chat') || notionTab.url.includes('/ai')) {
         return {
             tab: notionTab,
             navigated: false,
             url: notionTab.url,
+            workspace: requiredWorkspace,
+            workspaceInfo,
         };
     }
 
     // Navigate to agent page
     console.log(`⚠️  Tab on ${notionTab.url.slice(0, 60)} — navigating to /agent/ ...`);
-    const ws = new WebSocket(notionTab.webSocketDebuggerUrl);
+    const ws = new WebSocketCtor(notionTab.webSocketDebuggerUrl);
     await new Promise(r => ws.on('open', r));
     ws.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url: agentUrl } }));
-    await sleep(8000);
+    await sleepFn(3000);
     ws.close();
 
+    // Reload to trigger content script injection (SPA navigation alone won't inject content scripts)
+    console.log('🔄 Reloading page to trigger content script injection...');
+    const targets2a = await getTargetsFn();
+    const reloadTab = targets2a.find(t => t.type === 'page' && t.url?.includes('notion.so'));
+    if (reloadTab) {
+        const ws2 = new WebSocketCtor(reloadTab.webSocketDebuggerUrl);
+        await new Promise(r => ws2.on('open', r));
+        ws2.send(JSON.stringify({ id: 1, method: 'Page.reload', params: { ignoreCache: false } }));
+        await sleepFn(8000);
+        ws2.close();
+    }
+
     // Re-fetch to get updated URL/wsUrl
-    const targets2 = await getTargets();
+    const targets2 = await getTargetsFn();
     notionTab = targets2.find(t => t.type === 'page' && t.url?.includes('notion.so'));
 
     if (!notionTab) {
         throw new Error('Notion tab lost after navigation');
     }
-    if (!notionTab.url.includes('/agent/')) {
+    if (!notionTab.url.includes('/chat') && !notionTab.url.includes('/ai')) {
         throw new Error(`Navigation failed: still on ${notionTab.url}`);
     }
 
@@ -147,6 +369,8 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         tab: notionTab,
         navigated: true,
         url: notionTab.url,
+        workspace: requiredWorkspace,
+        workspaceInfo,
     };
 }
 
@@ -155,13 +379,15 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
 async function preflight(opts = {}) {
     const extName = opts.extensionName || 'MCP SuperAssistant';
     const agentUrl = opts.agentUrl || AGENT_URL;
+    const resolveExtensionIdFn = opts.resolveExtensionId || resolveExtensionId;
+    const ensureAgentPageFn = opts.ensureAgentPage || ensureAgentPage;
 
     console.log('🔍 Preflight: resolving extension...');
-    const ext = await resolveExtensionId(extName);
+    const ext = await resolveExtensionIdFn(extName);
     console.log(`✅ Extension: ${ext.name} (${ext.extensionId})`);
 
     console.log('🔍 Preflight: ensuring agent page...');
-    const page = await ensureAgentPage(agentUrl);
+    const page = await ensureAgentPageFn(agentUrl);
     console.log(`✅ Page: ${page.url.slice(0, 80)}${page.navigated ? ' (navigated)' : ''}`);
 
     return {
@@ -170,7 +396,9 @@ async function preflight(opts = {}) {
         extensionWsUrl: ext.wsUrl,
         tab: page.tab,
         navigated: page.navigated,
+        workspace: page.workspace,
+        workspaceInfo: page.workspaceInfo,
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL, REQUIRED_WORKSPACE, extractWorkspaceInfoFromDocument, buildWorkspaceDetectionExpression, enforceWorkspaceInfo, WorkspaceMismatchError, checkWorkspace, WorkspaceHealthMonitor };
