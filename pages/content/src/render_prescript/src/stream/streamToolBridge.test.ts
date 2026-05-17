@@ -539,6 +539,34 @@ describe('streamToolBridge', () => {
     const failEvent = events.find(e => e.status === 'failed' && e.phase === 'tool_call');
     assert.ok(failEvent);
     assert.strictEqual(failEvent.phase, 'tool_call');
+    assert.strictEqual(failEvent.errorCode, 'TOOL_ERROR');
+  });
+
+  test('11b. MCP session initialization error — classify as MCP_SESSION_NOT_INITIALIZED', async () => {
+    const mockClient = createMockMcpClient({
+      callToolError: 'MCP error -32602: Failed to validate request: Received request before initialization was complete',
+    });
+    const mockGuard = createMockGuard({ reserveResult: 'key-init' });
+    const mockAdapter = createMockAdapter();
+    const mockStorage = createMockStorage();
+
+    const events: StreamToolExecutionEvent[] = [];
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: true, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => mockAdapter,
+      storage: mockStorage,
+      onEvent: evt => events.push(evt),
+    });
+
+    await handler(makeCutoffEvent());
+
+    const failEvent = events.find(e => e.status === 'failed' && e.errorCode === 'MCP_SESSION_NOT_INITIALIZED');
+    assert.ok(failEvent);
+    assert.strictEqual(failEvent.phase, 'mcp_client');
+    assert.ok(failEvent.error!.includes('before initialization was complete'));
+    assert.strictEqual(mockAdapter._calls.insertText.length, 1, 'error result should still be injected');
   });
 
   test('12. autoInsert=true — result inserted via adapter.insertText', async () => {

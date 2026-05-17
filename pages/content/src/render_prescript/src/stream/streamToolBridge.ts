@@ -163,6 +163,12 @@ function getInputInfo(adapter: AdapterLike): { inputEmpty: boolean | null; input
   }
 }
 
+function isMcpSessionInitializationError(errorMessage: string): boolean {
+  const normalized = errorMessage.toLowerCase();
+  return normalized.includes('before initialization was complete')
+    || (normalized.includes('-32602') && normalized.includes('initialization'));
+}
+
 // --- Constants (Gate 5) ---
 
 /** Default max tool calls per stream when circuitBreaker config is undefined. */
@@ -526,11 +532,13 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
         return;
       }
       const toolDurationMs = Date.now() - startTime;
-      guard.executionGuardStore.markFailed(reservedKey, (e as Error).message);
+      const errorMessage = (e as Error).message;
+      const isSessionInitializationError = isMcpSessionInitializationError(errorMessage);
+      guard.executionGuardStore.markFailed(reservedKey, errorMessage);
       emitStep(identity, 'failed', {
-        phase: 'tool_call',
-        error: (e as Error).message,
-        errorCode: 'TOOL_ERROR',
+        phase: isSessionInitializationError ? 'mcp_client' : 'tool_call',
+        error: errorMessage,
+        errorCode: isSessionInitializationError ? 'MCP_SESSION_NOT_INITIALIZED' : 'TOOL_ERROR',
         durationMs: toolDurationMs,
         toolDurationMs,
       });
@@ -540,7 +548,7 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
           callId,
           name: identity.name!,
           status: 'error',
-          result: (e as Error).message,
+          result: errorMessage,
           autoSubmit: !!config.autoSubmit,
           adapter,
         });
