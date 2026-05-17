@@ -64,7 +64,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 });
 
 // Background script state management with connection type support
-let serverUrl: string = DEFAULT_SSE_URL;
+let serverUrl: string = DEFAULT_STREAMABLE_HTTP_URL;
 let connectionType: ConnectionType = DEFAULT_CONNECTION_TYPE;
 let isConnected: boolean = false;
 let connectionCount: number = 0;
@@ -97,7 +97,7 @@ async function initializeServerConfig(): Promise<void> {
   } catch (error) {
     logger.warn('[Background] Failed to load server config from storage, using defaults:', error);
     connectionType = DEFAULT_CONNECTION_TYPE;
-    serverUrl = DEFAULT_SSE_URL;
+    serverUrl = DEFAULT_STREAMABLE_HTTP_URL;
     isInitialized = true;
   }
 }
@@ -548,6 +548,19 @@ chrome.runtime.onInstalled.addListener(async details => {
       lastUpdateDate: new Date().toISOString(),
     });
 
+    // Migrate old SSE config to streamable-http (R2 hardening)
+    // Previously the default was SSE with /sse endpoint; now it's streamable-http with /mcp.
+    // If the user had the old default stored, migrate it silently.
+    const stored = await chrome.storage.local.get(['mcpServerUrl', 'mcpConnectionType']);
+    const oldSseUrl = 'http://localhost:3006/sse';
+    if (stored.mcpServerUrl === oldSseUrl && (!stored.mcpConnectionType || stored.mcpConnectionType === 'sse')) {
+      logger.debug('[Migration] Migrating stored config from SSE to streamable-http');
+      await chrome.storage.local.set({
+        mcpServerUrl: DEFAULT_STREAMABLE_HTTP_URL,
+        mcpConnectionType: 'streamable-http',
+      });
+    }
+
     // Update analytics user properties
     await analyticsService.updateUserProperties({
       extension_version: currentVersion,
@@ -860,7 +873,7 @@ async function handleMcpMessage(
                 ? 'websocket'
                 : url.pathname === '/mcp' || url.pathname.startsWith('/mcp')
                   ? 'streamable-http'
-                  : 'sse';
+                  : 'streamable-http';
           } catch {
             newType = connectionType; // fallback to current type
           }

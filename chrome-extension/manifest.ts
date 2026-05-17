@@ -48,7 +48,6 @@ const manifest = {
     '*://*.chat.z.ai/*',
     '*://*.chat.qwen.ai/*',
     '*://*.notion.so/*',
-
   ],
 
   permissions: ['storage', 'clipboardWrite'],
@@ -177,7 +176,6 @@ const manifest = {
       run_at: 'document_start',
       world: 'MAIN',
     },
-
   ],
   // devtools_page: 'devtools/index.html',
   web_accessible_resources: [
