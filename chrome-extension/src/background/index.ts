@@ -873,7 +873,9 @@ async function handleMcpMessage(
                 ? 'websocket'
                 : url.pathname === '/mcp' || url.pathname.startsWith('/mcp')
                   ? 'streamable-http'
-                  : 'streamable-http';
+                  : url.pathname === '/sse' || url.pathname.startsWith('/sse')
+                    ? 'sse'
+                    : 'streamable-http';
           } catch {
             newType = connectionType; // fallback to current type
           }

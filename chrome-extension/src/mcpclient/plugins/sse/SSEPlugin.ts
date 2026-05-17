@@ -5,6 +5,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { createLogger } from '@extension/shared/lib/logger';
 import type { SSEPluginConfig } from '../../types/config.js';
 import type { ITransportPlugin, PluginConfig, PluginMetadata } from '../../types/plugin.js';
+import { isCspEvalError } from '../evalErrorGuard.js';
 
 const logger = createLogger('SSEPlugin');
 
@@ -220,7 +221,7 @@ export class SSEPlugin implements ITransportPlugin {
     } catch (error) {
       // Chrome MV3 CSP blocks 'unsafe-eval' needed by MCP SDK's AJV JSON Schema compilation
       // (new Function()). Return empty primitives gracefully instead of crashing.
-      if (error instanceof EvalError || (error as Error)?.message?.includes('unsafe-eval')) {
+      if (isCspEvalError(error)) {
         logger.warn('[SSEPlugin] CSP blocks unsafe-eval (MCP SDK schema compilation). Returning empty primitives.');
         return [];
       }

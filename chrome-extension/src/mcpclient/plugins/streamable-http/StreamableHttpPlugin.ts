@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { ITransportPlugin, PluginConfig, PluginMetadata } from '../../types/plugin.js';
+import { isCspEvalError } from '../evalErrorGuard.js';
 
 const logger = createLogger('StreamableHttpPlugin');
 
@@ -204,7 +205,7 @@ export class StreamableHttpPlugin implements ITransportPlugin {
     } catch (error) {
       // Chrome MV3 CSP blocks 'unsafe-eval' needed by MCP SDK's AJV JSON Schema compilation
       // (new Function()). Return empty primitives gracefully instead of crashing.
-      if (error instanceof EvalError || (error as Error)?.message?.includes('unsafe-eval')) {
+      if (isCspEvalError(error)) {
         logger.warn(
           '[StreamableHttpPlugin] CSP blocks unsafe-eval (MCP SDK schema compilation). Returning empty primitives.',
         );
