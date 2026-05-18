@@ -58,6 +58,20 @@ let ackTrackerInstance: AckTracker | null = null;
 let lastHandoffStreamId: string | null = null;
 /** Last model ACK event for diagnostic observability (GPT P1-2/P1-7). */
 let lastModelAckEvent: import('./ackTracker').ModelAckEvent | null = null;
+/** Content-hash dedup for DOM-scanned messages (GPT P0-1). Cleared on re-init. */
+const domScannedHashes = new Set<string>();
+
+/**
+ * Simple non-cryptographic djb2 content hash for DOM-scan deduplication.
+ * Not a security boundary — real dedup is in executionGuard (callId/contentSignature).
+ */
+function djb2Hash(text: string): string {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 33) ^ text.charCodeAt(i);
+  }
+  return String(hash >>> 0);
+}
 
 /** Default ACK timeout (ms) — how long to wait for model to echo nonce. */
 const ACK_TIMEOUT_MS = 30_000;
@@ -134,6 +148,8 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   // Reset handoff stream tracking
   lastHandoffStreamId = null;
   lastModelAckEvent = null;
+  // Clear DOM message dedup set on re-init (GPT P0-1)
+  domScannedHashes.clear();
 
   // Dispose previous ackTracker if any (clears pending timeouts)
   if (ackTrackerInstance) {
@@ -348,8 +364,21 @@ function extractJsonlFencedBlocks(text: string): string[] {
  * No-op if bridge is not initialized.
  */
 export function scanDomMessage(text: string): void {
+  // No-op on empty text
+  if (!text) return;
+
+  // 0. Content-hash dedup (P0-1 GPT review: prevent double-execution on same DOM content)
+  // Note: ACK scanning still uses full text since ACK tags can appear anywhere.
+  //       Dedup here prevents redundant jsonl block re-processing.
+  const hash = djb2Hash(text);
+  const alreadyScanned = domScannedHashes.has(hash);
+
   // 1. ACK scanning — full text (ACK tags can appear anywhere in the message)
+  //    Run regardless of dedup (ACK confirmation is idempotent and necessary)
   ackTrackerInstance?.scanText(text);
+
+  if (alreadyScanned) return;
+  domScannedHashes.add(hash);
 
   // 2. Function call detection — fenced ```jsonl blocks only (P0-2 canonicalization)
   const blocks = extractJsonlFencedBlocks(text);

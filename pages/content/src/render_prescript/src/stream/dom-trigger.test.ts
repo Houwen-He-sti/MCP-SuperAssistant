@@ -234,3 +234,96 @@ Some text in between.
         assert.strictEqual(domToolInvocationEvents.length, 0, 'Empty block should not trigger');
     });
 });
+
+// ============================================================================
+// T-DOM-06: Content-hash dedup prevents double event dispatch on same DOM text
+// (GPT P0-1 — content hash dedup added to scanDomMessage)
+// ============================================================================
+describe('T-DOM-06: scanDomMessage content-hash dedup', () => {
+    const callId06 = 'dom-dedup-t06-001';
+    const JSONL_TEXT = [
+        '```jsonl',
+        `{"type":"function_call_start","name":"echo","call_id":"${callId06}"}`,
+        `{"type":"function_call_end","call_id":"${callId06}"}`,
+        '```',
+    ].join('\n');
+
+    it('same text scanned twice → only one dom-tool-invocation event', () => {
+        initStreamToolBridge({ enabled: false });
+        resetEvents();
+
+        scanDomMessage(JSONL_TEXT);
+        scanDomMessage(JSONL_TEXT); // Duplicate — should be deduped by content hash
+
+        assert.strictEqual(
+            domToolInvocationEvents.length,
+            1,
+            `Dedup: same content scanned twice should dispatch exactly 1 event, got ${domToolInvocationEvents.length}`,
+        );
+    });
+
+    it('different content after same text → new event dispatched', () => {
+        initStreamToolBridge({ enabled: false });
+        resetEvents();
+
+        const otherCallId = 'dom-dedup-t06-002';
+        const OTHER_JSONL = [
+            '```jsonl',
+            `{"type":"function_call_start","name":"echo","call_id":"${otherCallId}"}`,
+            `{"type":"function_call_end","call_id":"${otherCallId}"}`,
+            '```',
+        ].join('\n');
+
+        scanDomMessage(JSONL_TEXT);
+        scanDomMessage(OTHER_JSONL); // Different content — NOT deduped
+
+        assert.strictEqual(
+            domToolInvocationEvents.length,
+            2,
+            `Two different texts should each dispatch 1 event, got ${domToolInvocationEvents.length}`,
+        );
+    });
+
+    it('partial text (no JSONL) then full text (with JSONL) → exactly one event', () => {
+        initStreamToolBridge({ enabled: false });
+        resetEvents();
+
+        const partialText = 'I will help with that. Processing...'; // No JSONL block
+        scanDomMessage(partialText); // No event expected (no fenced block)
+        assert.strictEqual(domToolInvocationEvents.length, 0, 'Partial text: no event');
+
+        scanDomMessage(JSONL_TEXT); // Full text with JSONL block → 1 event
+        assert.strictEqual(
+            domToolInvocationEvents.length,
+            1,
+            `Full text with JSONL: exactly 1 event, got ${domToolInvocationEvents.length}`,
+        );
+
+        // Re-scan full text — should be deduped
+        scanDomMessage(JSONL_TEXT);
+        assert.strictEqual(
+            domToolInvocationEvents.length,
+            1,
+            `Re-scan of full text: still 1 event (deduped), got ${domToolInvocationEvents.length}`,
+        );
+    });
+
+    it('re-init via initStreamToolBridge() clears dedup — same text can trigger again', () => {
+        initStreamToolBridge({ enabled: false });
+        resetEvents();
+
+        scanDomMessage(JSONL_TEXT);
+        assert.strictEqual(domToolInvocationEvents.length, 1, 'First scan: 1 event');
+
+        // Re-initialize (simulates page navigation or re-mount)
+        initStreamToolBridge({ enabled: false });
+        resetEvents();
+
+        scanDomMessage(JSONL_TEXT); // After re-init, dedup is cleared
+        assert.strictEqual(
+            domToolInvocationEvents.length,
+            1,
+            'After re-init, same text can trigger again (dedup cleared)',
+        );
+    });
+});
