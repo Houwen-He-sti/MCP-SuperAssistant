@@ -3,7 +3,7 @@ import { useToolStore } from '../../stores/tool.store';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import { getEnabledToolDefinitions } from './notion.bridge-prompt';
+import { getEnabledToolDefinitions, choosePromptForFirstConversation } from './notion.bridge-prompt';
 
 /**
  * Notion AI Adapter — supports both:
@@ -172,9 +172,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
         this.context.logger.debug('Deactivating Notion AI adapter...');
 
         // Unsubscribe from tool store on deactivation
-        this.toolStoreUnsubscribe?.();
-        this.toolStoreUnsubscribe = null;
-        this.cachedBridgePrompt = null;
+        this.cleanupToolStoreSubscription();
 
         this.cleanupUIIntegration();
         this.cleanupDOMObservers();
@@ -187,6 +185,16 @@ export class NotionAdapter extends BaseAdapterPlugin {
             pluginName: this.name,
             timestamp: Date.now(),
         });
+    }
+
+    /**
+     * Release the Zustand tool store subscription and clear the bridge prompt cache.
+     * Called from both deactivate() and cleanup() to prevent listener leaks.
+     */
+    private cleanupToolStoreSubscription(): void {
+        this.toolStoreUnsubscribe?.();
+        this.toolStoreUnsubscribe = null;
+        this.cachedBridgePrompt = null;
     }
 
     /**
@@ -215,6 +223,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
             this.context?.logger.warn(
                 `[Slice1] Failed to build dynamic bridge prompt, using static fallback: ${err}`
             );
+        // P1-3 fix: release tool store subscription to prevent listener leak
+        this.cleanupToolStoreSubscription();
+
             this.cachedBridgePrompt = null;
         }
     }
@@ -326,15 +337,18 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
             // On native AI agent, inject bridge prompt on first conversation
             let contentToInsert = text;
-            if (this.isNativeAiAgent() && !this.bridgePromptInjected && this.conversationMessageCount === 0) {
-                // Only inject if input is empty (no user draft)
-                if (!originalContent.trim()) {
-                    this.context.logger.debug('First conversation detected, injecting bridge prompt');
-                    // Slice 1: use dynamic prompt if tools cached, fall back to static
-                    const promptToUse = this.cachedBridgePrompt ?? BRIDGE_PROMPT;
-                    contentToInsert = promptToUse + '\n\n' + text;
-                    this.bridgePromptInjected = true;
-                }
+            const promptForFirstConversation = choosePromptForFirstConversation(
+                this.cachedBridgePrompt,
+                BRIDGE_PROMPT,
+                this.isNativeAiAgent(),
+                this.bridgePromptInjected,
+                this.conversationMessageCount,
+                originalContent,
+            );
+            if (promptForFirstConversation !== null) {
+                this.context.logger.debug('First conversation detected, injecting bridge prompt');
+                contentToInsert = promptForFirstConversation + '\n\n' + text;
+                this.bridgePromptInjected = true;
             }
 
             // Select all existing content so new text replaces it

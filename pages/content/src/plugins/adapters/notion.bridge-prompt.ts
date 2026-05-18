@@ -8,6 +8,7 @@
  *   1. Call getEnabledToolDefinitions(availableTools, enabledToolNames) on activate().
  *   2. If result is non-empty, pass to buildBridgePromptFromTools() for the dynamic prompt.
  *   3. If result is empty (proxy not connected), fall back to static BRIDGE_PROMPT.
+ *   4. Call choosePromptForFirstConversation() in insertText() to decide which prompt to prepend.
  */
 
 import type { Tool } from '../../types/stores';
@@ -47,3 +48,40 @@ export function getEnabledToolDefinitions(
             schema: JSON.stringify(tool.input_schema ?? tool.schema ?? {}),
         }));
 }
+
+/**
+ * Decide which prompt to prepend for the first conversation in Notion AI.
+ *
+ * Returns the prompt string to prepend (either dynamic or static fallback),
+ * or `null` if the bridge prompt should NOT be injected for this call.
+ *
+ * Injection conditions (all must be true):
+ *  - isNativeAiAgent: we're on the native AI agent page
+ *  - NOT alreadyInjected: haven't injected in this conversation already
+ *  - messageCount === 0: this is the first message in the conversation
+ *  - existingContent is empty or whitespace-only (no user draft)
+ *
+ * @param cachedBridgePrompt  Dynamic prompt from tool store cache, or null if unavailable
+ * @param staticBridgePrompt  Static fallback (e.g. BRIDGE_PROMPT from module constant)
+ * @param isNativeAiAgent     Whether we're on the native Notion AI agent page
+ * @param alreadyInjected     Whether the bridge prompt has already been injected
+ * @param messageCount        Number of messages sent in the current conversation
+ * @param existingContent     Current text content of the input element
+ */
+export function choosePromptForFirstConversation(
+    cachedBridgePrompt: string | null,
+    staticBridgePrompt: string,
+    isNativeAiAgent: boolean,
+    alreadyInjected: boolean,
+    messageCount: number,
+    existingContent: string,
+): string | null {
+    if (!isNativeAiAgent) return null;
+    if (alreadyInjected) return null;
+    if (messageCount !== 0) return null;
+    if (existingContent.trim() !== '') return null;
+
+    // Use dynamic prompt if available, fall back to static
+    return cachedBridgePrompt ?? staticBridgePrompt;
+}
+
