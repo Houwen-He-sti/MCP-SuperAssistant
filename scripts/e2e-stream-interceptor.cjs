@@ -105,24 +105,19 @@ class CDPSession {
 // Helpers
 // ============================================================================
 
-// The Notion AI agent page URL (execCommand works here, unlike /chat pages)
-const NOTION_AGENT_URL = 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
+// The Notion AI chat page URL (current route after PR #49 deprecated /agent)
+const NOTION_CHAT_URL = process.env.NOTION_CHAT_URL || 'https://www.notion.so/chat';
+// Deprecated: NOTION_AGENT_URL alias kept for backward compat only
+const NOTION_AGENT_URL = NOTION_CHAT_URL;
 
 async function findNotionTab() {
   const resp = await fetch(CDP_URL);
   const tabs = await resp.json();
-  // Prefer an existing agent tab
-  const agentTab = tabs.find(t => t.url && t.url.includes('notion.so/agent'));
-  if (agentTab) return agentTab;
+  // Prefer an existing /chat tab with interceptor installed (current route; /agent was deprecated by PR #49)
+  const chatTabs = tabs.filter(t => t.url && t.url.includes('notion.so/chat') && !t.url.includes('_assets'));
 
-  // Otherwise find any Notion chat tab we can navigate to the agent page
-  const candidates = tabs.filter(t =>
-    t.url && t.url.includes('notion.so/chat')
-    && !t.url.includes('_assets')
-  );
-
-  // Check each candidate for interceptor install to find the right one
-  for (const tab of candidates) {
+  // Check each /chat candidate for interceptor install to find the best one
+  for (const tab of chatTabs) {
     try {
       const ws = new WebSocket(tab.webSocketDebuggerUrl);
       await new Promise((resolve, reject) => {
@@ -147,8 +142,8 @@ async function findNotionTab() {
     } catch { /* skip */ }
   }
 
-  // Fallback: return first candidate
-  return candidates[0] || null;
+  // Fallback: return first /chat tab (even without interceptor — verifyInterceptorInstalled() will check)
+  return chatTabs[0] || null;
 }
 
 function log(level, ...args) {
@@ -325,23 +320,45 @@ async function main() {
   await cdp.send('Runtime.enable');
   await cdp.send('Network.enable');
 
-  // Navigate to agent page if not already there (execCommand only works on /agent/ pages)
+  // Navigate to Notion AI chat page if not already there
   const currentUrl = await cdp.evaluate('window.location.href');
-  if (!currentUrl?.value?.includes('notion.so/agent')) {
-    log('info', 'Navigating to agent page...');
-    await cdp.send('Page.navigate', { url: NOTION_AGENT_URL });
-    // Wait for SPA to fully render
+  if (!currentUrl?.value?.includes('notion.so/chat')) {
+    log('info', 'Navigating to Notion AI chat page...');
+    await cdp.send('Page.navigate', { url: NOTION_CHAT_URL });
+    // Wait for SPA to fully render — check for input selector
     let ready = false;
     for (let i = 0; i < 15; i++) {
       await new Promise(res => setTimeout(res, 1000));
-      const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"提交 AI 消息\\"]")');
+      const check = await cdp.evaluate(
+        '!!document.querySelector("div[contenteditable=\\"true\\"]") || !!document.querySelector("[aria-label=\\"提交 AI 消息\\"]")');
       if (check?.value === true) { ready = true; break; }
     }
     if (!ready) {
-      log('fail', 'Agent page did not load within 15s');
+      log('fail', 'Notion AI chat page did not load within 15s');
       process.exit(2);
     }
-    log('info', 'Agent page loaded');
+    log('info', 'Notion AI chat page loaded');
+  }
+
+  // Preflight: log /chat selector status
+  const preflight = await cdp.evaluate(`
+    (function() {
+      const input = document.querySelector('div[contenteditable="true"]') ||
+                    document.querySelector('div[role="textbox"][contenteditable="true"]');
+      const submit = document.querySelector('[aria-label="\u63d0\u4ea4 AI \u6d88\u606f"]') ||
+                     document.querySelector('[aria-label="Submit AI message"]') ||
+                     document.querySelector('[data-testid="agent-send-message-button"]');
+      return JSON.stringify({
+        url: window.location.href.slice(0, 60),
+        inputSelectorMatched: !!input,
+        submitSelectorMatched: !!submit,
+        insertMethod: 'execCommand',
+        submitMethod: submit ? 'button click' : 'Enter fallback'
+      });
+    })()
+  `);
+  if (preflight?.value) {
+    log('info', '[/chat preflight] ' + preflight.value);
   }
 
   // Track network requests
@@ -402,21 +419,20 @@ async function main() {
     // Test 3: function_call detection (tool-triggering message)
     log('info', 'Testing function_call detection...');
 
-    // After the first message, Notion may SPA-navigate to /chat where execCommand fails.
-    // Re-navigate to agent page to ensure a fresh input context.
+    // After the first message, re-navigate to /chat if needed
     const url3 = await cdp.evaluate('window.location.href');
-    if (!url3?.value?.includes('notion.so/agent')) {
-      log('info', '  Re-navigating to agent page...');
-      await cdp.send('Page.navigate', { url: NOTION_AGENT_URL });
+    if (!url3?.value?.includes('notion.so/chat')) {
+      log('info', '  Re-navigating to Notion AI chat page...');
+      await cdp.send('Page.navigate', { url: NOTION_CHAT_URL });
       let ready3 = false;
       for (let i = 0; i < 15; i++) {
         await new Promise(res => setTimeout(res, 1000));
-        const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"提交 AI 消息\\"]")');
+        const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"\u63d0\u4ea4 AI \u6d88\u606f\\"]")') ;
         if (check?.value === true) { ready3 = true; break; }
       }
       if (!ready3) {
-        log('warn', '  Agent page did not reload — skipping function_call test');
-        assert('function_call detected', false, 'could not navigate back to agent page');
+        log('warn', '  Chat page did not reload — skipping function_call test');
+        assert('function_call detected', false, 'could not navigate back to Notion AI chat page');
         throw new Error('skip-remaining');
       }
     }
@@ -428,7 +444,31 @@ async function main() {
     const toolTypes = toolEvents.map(e => e.type);
 
     assert('function_call detected', toolTypes.includes('function_call'),
-      toolTypes.length > 0 ? `events: ${toolTypes.join(',')}` : 'no events captured');
+      to!toolTypes.includes('function_call') && toolTypes.length === 0) {
+      // Bounded parser failure diagnostics (P1-4)
+      // Privacy: metadata only, no raw content
+      const diag = await cdp.evaluate(`
+        (function() {
+          const interceptor = window.__MCP_SA_NOTION_STREAM_INTERCEPTOR_INSTALLED_V1__;
+          const streamStats = window.__mcpSaStreamStats || {};
+          return JSON.stringify({
+            interceptorInstalled: !!interceptor,
+            requestCount: streamStats.requestCount || 0,
+            contentTypesSeen: streamStats.contentTypes || [],
+            eventTypesEmitted: streamStats.eventTypes || [],
+            streamStartSeen: (streamStats.eventTypes || []).includes('stream_start'),
+            streamEndSeen: (streamStats.eventTypes || []).includes('stream_end'),
+            scannerPatchLinesSeen: streamStats.patchLineCount || 0,
+            functionCallStartSeen: streamStats.functionCallStartSeen || false,
+          });
+        })()
+      `);
+      if (diag?.value) {
+        log('warn', '[parser diagnostics] ' + diag.value);
+      }
+    }
+
+    if (olTypes.length > 0 ? `events: ${toolTypes.join(',')}` : 'no events captured');
 
     if (toolTypes.includes('function_call')) {
       const fcEvent = toolEvents.find(e => e.type === 'function_call');
@@ -441,21 +481,20 @@ async function main() {
     if (testCutoff) {
       log('info', 'Testing stream_cutoff (requireStructuredIdentity=false)...');
 
-      // After function_call test, Notion may SPA-navigate to /chat.
-      // Re-navigate to agent page for fresh input context.
+      // After function_call test, re-navigate to /chat if needed
       const url4 = await cdp.evaluate('window.location.href');
-      if (!url4?.value?.includes('notion.so/agent')) {
-        log('info', '  Re-navigating to agent page...');
-        await cdp.send('Page.navigate', { url: NOTION_AGENT_URL });
+      if (!url4?.value?.includes('notion.so/chat')) {
+        log('info', '  Re-navigating to Notion AI chat page...');
+        await cdp.send('Page.navigate', { url: NOTION_CHAT_URL });
         let ready4 = false;
         for (let i = 0; i < 15; i++) {
           await new Promise(res => setTimeout(res, 1000));
-          const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"提交 AI 消息\\"]")');
+          const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"\u63d0\u4ea4 AI \u6d88\u606f\\"]")') ;
           if (check?.value === true) { ready4 = true; break; }
         }
         if (!ready4) {
-          log('warn', '  Agent page did not reload — skipping cutoff test');
-          assert('stream_cutoff triggered (relaxed)', false, 'could not navigate back to agent page');
+          log('warn', '  Chat page did not reload — skipping cutoff test');
+          assert('stream_cutoff triggered (relaxed)', false, 'could not navigate back to Notion AI chat page');
           throw new Error('skip-remaining');
         }
       }
@@ -497,18 +536,18 @@ async function main() {
       log('info', 'Testing stream_cutoff (requireStructuredIdentity=true, strict)...');
 
       const url5 = await cdp.evaluate('window.location.href');
-      if (!url5?.value?.includes('notion.so/agent')) {
-        log('info', '  Re-navigating to agent page...');
-        await cdp.send('Page.navigate', { url: NOTION_AGENT_URL });
+      if (!url5?.value?.includes('notion.so/chat')) {
+        log('info', '  Re-navigating to Notion AI chat page...');
+        await cdp.send('Page.navigate', { url: NOTION_CHAT_URL });
         let ready5 = false;
         for (let i = 0; i < 15; i++) {
           await new Promise(res => setTimeout(res, 1000));
-          const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"提交 AI 消息\\"]")');
+          const check = await cdp.evaluate('!!document.querySelector("[aria-label=\\"\u63d0\u4ea4 AI \u6d88\u606f\\"]")') ;
           if (check?.value === true) { ready5 = true; break; }
         }
         if (!ready5) {
-          log('warn', '  Agent page did not reload — skipping strict cutoff test');
-          assert('stream_cutoff triggered (strict)', false, 'could not navigate back to agent page');
+          log('warn', '  Chat page did not reload — skipping strict cutoff test');
+          assert('stream_cutoff triggered (strict)', false, 'could not navigate back to Notion AI chat page');
           throw new Error('skip-remaining');
         }
       }

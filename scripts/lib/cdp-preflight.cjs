@@ -20,7 +20,10 @@ const http = require('http');
 const WebSocket = require('ws');
 
 const CDP_PORT = process.env.CDP_PORT || 9222;
-const AGENT_URL = process.env.NOTION_AGENT_URL || 'https://www.notion.so/agent/359cae42116c806fb9c4009257f4c5d1?wfv=chat';
+// NOTION_AGENT_URL env var kept as deprecated alias for backward compat
+const NOTION_CHAT_URL = process.env.NOTION_CHAT_URL || process.env.NOTION_AGENT_URL || 'https://www.notion.so/chat';
+// Deprecated: use NOTION_CHAT_URL. AGENT_URL kept for any existing callers.
+const AGENT_URL = NOTION_CHAT_URL; // deprecated alias
 
 // ─── CDP helpers ────────────────────────────────────────────────────────────
 
@@ -107,7 +110,7 @@ async function resolveExtensionId(expectedName = 'MCP SuperAssistant') {
 // SPA apps may have visually identical pages on different routes
 // that trigger different API endpoints. Always navigate explicitly.
 //
-async function ensureAgentPage(agentUrl = AGENT_URL) {
+async function ensureAgentPage(agentUrl = NOTION_CHAT_URL) {
     const targets = await getTargets();
     let notionTab = targets.find(t => t.type === 'page' && t.url?.includes('notion.so'));
 
@@ -115,8 +118,8 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         throw new Error('No Notion tab found in Chrome. Open Notion first.');
     }
 
-    // Check if already on agent page
-    if (notionTab.url.includes('/agent/')) {
+    // Check if already on Notion AI chat/capable page
+    if (notionTab.url.includes('/chat')) {
         return {
             tab: notionTab,
             navigated: false,
@@ -124,8 +127,8 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
         };
     }
 
-    // Navigate to agent page
-    console.log(`⚠️  Tab on ${notionTab.url.slice(0, 60)} — navigating to /agent/ ...`);
+    // Navigate to Notion AI chat page
+    console.log(`⚠️  Tab on ${notionTab.url.slice(0, 60)} — navigating to Notion AI chat page...`);
     const ws = new WebSocket(notionTab.webSocketDebuggerUrl);
     await new Promise(r => ws.on('open', r));
     ws.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url: agentUrl } }));
@@ -139,7 +142,7 @@ async function ensureAgentPage(agentUrl = AGENT_URL) {
     if (!notionTab) {
         throw new Error('Notion tab lost after navigation');
     }
-    if (!notionTab.url.includes('/agent/')) {
+    if (!notionTab.url.includes('/chat')) {
         throw new Error(`Navigation failed: still on ${notionTab.url}`);
     }
 
@@ -160,7 +163,7 @@ async function preflight(opts = {}) {
     const ext = await resolveExtensionId(extName);
     console.log(`✅ Extension: ${ext.name} (${ext.extensionId})`);
 
-    console.log('🔍 Preflight: ensuring agent page...');
+    console.log('🔍 Preflight: ensuring Notion AI chat page...');
     const page = await ensureAgentPage(agentUrl);
     console.log(`✅ Page: ${page.url.slice(0, 80)}${page.navigated ? ' (navigated)' : ''}`);
 
@@ -173,4 +176,4 @@ async function preflight(opts = {}) {
     };
 }
 
-module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, AGENT_URL };
+module.exports = { resolveExtensionId, ensureAgentPage, preflight, getTargets, sleep, CDP_PORT, NOTION_CHAT_URL, AGENT_URL /* deprecated alias */ };
