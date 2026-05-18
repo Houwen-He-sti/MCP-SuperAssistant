@@ -1,7 +1,9 @@
+import { assembleInstructions, assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
+import { useToolStore } from '../../stores/tool.store';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
+import { getEnabledToolDefinitions, choosePromptForFirstConversation } from './notion.bridge-prompt';
 
 /**
  * Notion AI Adapter — supports both:
@@ -18,8 +20,9 @@ import { assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../compo
  */
 const BRIDGE_PROMPT = wrapWithSystemPromptTag(assembleNotionBridgePrompt());
 
-import { isLegacyPath, isNativeAiRoute, isSupportedPath } from './notion.routes.js';
-import { waitForSubmitButtonAndClick, isNotionSubmitButtonReady } from './notion/submit-readiness.js';import { createNotionSubmitContext } from './notion/submit-context';
+import { isNativeAiRoute, isSupportedPath } from './notion.routes.js';
+import { createNotionSubmitContext } from './notion/submit-context';
+import { waitForSubmitButtonAndClick } from './notion/submit-readiness.js';
 export class NotionAdapter extends BaseAdapterPlugin {
     readonly name = 'NotionAdapter';
     readonly version = '1.1.0';
@@ -73,17 +76,16 @@ export class NotionAdapter extends BaseAdapterPlugin {
     private conversationMessageCount: number = 0;
     private messageObserver: MutationObserver | null = null;
 
+    // Dynamic bridge prompt cache (Slice 1: populated from tool store on activate)
+    private cachedBridgePrompt: string | null = null;
+    private toolStoreUnsubscribe: (() => void) | null = null;
+
     /**
      * Route gating: activate on Notion AI pages.
-     * Supports both:
-     * 1. Native Notion AI agent (face icon) on any Notion page
-     * 2. Legacy /ai, /chat, /agent paths (fallback)
+     * Uses DOM-based detection per PR #49 decision — no legacy path checks.
      */
     isSupported(): boolean {
         const path = window.location.pathname;
-
-        // Legacy /ai panel paths are always supported
-        if (isLegacyPath(path)) return true;
 
         // Native Notion AI agent: detect by presence of AI chat input on any Notion page
         const nativeInput = document.querySelector(this.selectors.NATIVE_CHAT_INPUT);
@@ -133,6 +135,14 @@ export class NotionAdapter extends BaseAdapterPlugin {
         this.bridgePromptInjected = false;
         this.conversationMessageCount = 0;
 
+        // Cache bridge prompt from tool store on activation (Slice 1 dynamic injection)
+        this.refreshBridgePromptCache();
+        // Subscribe to tool store changes to keep cache fresh
+        this.toolStoreUnsubscribe?.();
+        this.toolStoreUnsubscribe = useToolStore.subscribe(() => {
+            this.refreshBridgePromptCache();
+        });
+
         if (this.isSupported()) {
             this.wasOnAiPage = true;
             this.setupDOMObservers();
@@ -161,6 +171,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
         await super.deactivate();
         this.context.logger.debug('Deactivating Notion AI adapter...');
 
+        // Unsubscribe from tool store on deactivation
+        this.cleanupToolStoreSubscription();
+
         this.cleanupUIIntegration();
         this.cleanupDOMObservers();
 
@@ -174,9 +187,51 @@ export class NotionAdapter extends BaseAdapterPlugin {
         });
     }
 
+    /**
+     * Release the Zustand tool store subscription and clear the bridge prompt cache.
+     * Called from both deactivate() and cleanup() to prevent listener leaks.
+     */
+    private cleanupToolStoreSubscription(): void {
+        this.toolStoreUnsubscribe?.();
+        this.toolStoreUnsubscribe = null;
+        this.cachedBridgePrompt = null;
+    }
+
+    /**
+     * Rebuild the dynamic bridge prompt from the current tool store state.
+     * Called on activate() and whenever the tool store changes.
+     *
+     * Slice 1: if enabled tools are available, builds dynamic prompt via assembleInstructions.
+     * Falls back to null (caller uses static BRIDGE_PROMPT) when store is empty or errors.
+     */
+    private refreshBridgePromptCache(): void {
+        try {
+            const { availableTools, enabledTools } = useToolStore.getState();
+            const toolDefs = getEnabledToolDefinitions(availableTools, enabledTools);
+            if (toolDefs.length === 0) {
+                this.cachedBridgePrompt = null; // trigger fallback to static BRIDGE_PROMPT
+                return;
+            }
+            this.cachedBridgePrompt = wrapWithSystemPromptTag(
+                assembleInstructions({ platform: 'notion', tools: toolDefs })
+            );
+            this.context?.logger.debug(
+                `[Slice1] Dynamic bridge prompt cached (${toolDefs.length} tools).`
+            );
+        } catch (err) {
+            // Fail-safe: on any error, fall back to static prompt.
+            // Do NOT unsubscribe here — transient errors should not stop listening for store updates.
+            this.context?.logger.warn(
+                `[Slice1] Failed to build dynamic bridge prompt, using static fallback: ${err}`
+            );
+            this.cachedBridgePrompt = null;
+        }
+    }
+
     async cleanup(): Promise<void> {
         await super.cleanup();
         this.context.logger.debug('Cleaning up Notion AI adapter...');
+        this.cleanupToolStoreSubscription();
 
         if (this.urlCheckInterval) {
             clearInterval(this.urlCheckInterval);
@@ -281,13 +336,18 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
             // On native AI agent, inject bridge prompt on first conversation
             let contentToInsert = text;
-            if (this.isNativeAiAgent() && !this.bridgePromptInjected && this.conversationMessageCount === 0) {
-                // Only inject if input is empty (no user draft)
-                if (!originalContent.trim()) {
-                    this.context.logger.debug('First conversation detected, injecting bridge prompt');
-                    contentToInsert = BRIDGE_PROMPT + '\n\n' + text;
-                    this.bridgePromptInjected = true;
-                }
+            const promptForFirstConversation = choosePromptForFirstConversation(
+                this.cachedBridgePrompt,
+                BRIDGE_PROMPT,
+                this.isNativeAiAgent(),
+                this.bridgePromptInjected,
+                this.conversationMessageCount,
+                originalContent,
+            );
+            if (promptForFirstConversation !== null) {
+                this.context.logger.debug('First conversation detected, injecting bridge prompt');
+                contentToInsert = promptForFirstConversation + '\n\n' + text;
+                this.bridgePromptInjected = true;
             }
 
             // Select all existing content so new text replaces it
@@ -348,7 +408,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
      * Required by streamToolBridge fail-closed logic to check for user drafts.
      */
     getInputContent(): string | null {
-        const selectors = this.selectors.CHAT_INPUT.split(', ');
+        const selectors = [
+            ...this.selectors.NATIVE_CHAT_INPUT.split(', '),
+            ...this.selectors.CHAT_INPUT.split(', '),
+        ];
         for (const sel of selectors) {
             const el = document.querySelector(sel.trim()) as HTMLElement;
             if (el) return el.textContent || '';
