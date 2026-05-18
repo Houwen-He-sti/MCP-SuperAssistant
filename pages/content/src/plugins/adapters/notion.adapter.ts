@@ -219,13 +219,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
                 `[Slice1] Dynamic bridge prompt cached (${toolDefs.length} tools).`
             );
         } catch (err) {
-            // Fail-safe: on any error, fall back to static prompt
+            // Fail-safe: on any error, fall back to static prompt.
+            // Do NOT unsubscribe here — transient errors should not stop listening for store updates.
             this.context?.logger.warn(
                 `[Slice1] Failed to build dynamic bridge prompt, using static fallback: ${err}`
             );
-        // P1-3 fix: release tool store subscription to prevent listener leak
-        this.cleanupToolStoreSubscription();
-
             this.cachedBridgePrompt = null;
         }
     }
@@ -233,6 +231,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
     async cleanup(): Promise<void> {
         await super.cleanup();
         this.context.logger.debug('Cleaning up Notion AI adapter...');
+        this.cleanupToolStoreSubscription();
 
         if (this.urlCheckInterval) {
             clearInterval(this.urlCheckInterval);
