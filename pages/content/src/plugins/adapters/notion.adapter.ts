@@ -3,12 +3,12 @@ import { useToolStore } from '../../stores/tool.store';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
-import { getEnabledToolDefinitions, choosePromptForFirstConversation } from './notion.bridge-prompt';
 import { NOTION_CHAT_CONTENT_SELECTOR } from './notion.adapter.selectors';
+import { choosePromptForFirstConversation, getEnabledToolDefinitions } from './notion.bridge-prompt';
 // TODO(formatter-extraction): direct coupling to render_prescript — follow-up PR to extract to shared module
+import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { formatFunctionResult } from '../../render_prescript/src/stream/functionResultFormatter.ts';
 import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
-import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 
 /**
  * Notion AI Adapter — supports both:
@@ -156,14 +156,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
             this.setupDOMObservers();
             this.setupUIIntegration();
 
-            // Setup message observer for native AI agent to track conversation count
-            if (this.isNativeAiAgent()) {
-                this.setupMessageObserver();
-            }
-
             // BH-4: start ToolCallLoop if __BH_RUNTIME_BRIDGE_ENABLED__ flag is set (opt-in, default off)
             // Returns null when flag is absent/false or mcpClient unavailable (fail-closed).
-            // When non-null: ToolCallLoop is active — DOM trigger path should be skipped.
+            // Must be called BEFORE setupMessageObserver so the return value gates the DOM scan path.
             this.bhBridgeDisposable = startNotionRuntimeBridgeIfEnabled(
                 window as unknown as WindowLike,
                 {
@@ -173,6 +168,13 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     formatFunctionResult,
                 },
             );
+
+            // Setup message observer for native AI agent.
+            // Skipped when BH ToolCallLoop is active to prevent dual-execution of tool call scanning.
+            // (window.mcpNotionDomScan.scan() would conflict with ToolCallLoop's .layout-content observer)
+            if (this.isNativeAiAgent() && !this.bhBridgeDisposable) {
+                this.setupMessageObserver();
+            }
         } else {
             this.context.logger.debug('Not on supported page, skipping DOM/UI setup');
         }
