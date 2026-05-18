@@ -190,15 +190,24 @@ async function installEventCapture(cdp) {
       }
     };
     window.addEventListener('message', window.__mcpSaEventListener);
+
+    // Signal bridge-ready to interceptorMain so it flushes pending events and
+    // keeps dispatching. Without this, interceptorMain queues events instead of
+    // posting them (bridgeReady guard in emit()).
+    window.postMessage({ channel: 'mcp-superassistant.stream.bridge-ready' }, window.location.origin);
   `);
 }
 
 async function sendNotionMessage(cdp, message) {
-  // Focus and clear the input
+  // Focus and clear the Notion AI chat input (role=textbox, not page body editor)
   const focusResult = await cdp.evaluate(`
     (function() {
-      const input = document.querySelector('div[contenteditable="true"]');
-      if (!input) return 'ERROR: no input element found';
+      // MUST use role=textbox to target AI input, not generic contenteditable (page body)
+      const input = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+        .find(el => el.getAttribute('role') === 'textbox') ||
+        document.querySelector('div[contenteditable="true"][role="textbox"]');
+      if (!input) return 'ERROR: no role=textbox AI input found';
+      input.click();
       input.focus();
       // Clear existing content via selection
       const sel = window.getSelection();
@@ -216,12 +225,13 @@ async function sendNotionMessage(cdp, message) {
   // Insert text via execCommand (triggers React's synthetic events)
   const typeResult = await cdp.evaluate(`
     (function() {
-      const input = document.querySelector('div[contenteditable="true"]');
+      const input = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+        .find(el => el.getAttribute('role') === 'textbox');
       if (!input) return 'ERROR: input lost focus';
       input.focus();
       document.execCommand('insertText', false, ${JSON.stringify(message)});
       // Dispatch input event to ensure React picks it up
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText' }));
       return 'typed:' + input.textContent.substring(0, 30);
     })()
   `);
@@ -238,7 +248,7 @@ async function sendNotionMessage(cdp, message) {
       (function() {
         const btn = document.querySelector('[aria-label="提交 AI 消息"]') ||
                     document.querySelector('[aria-label="Submit AI message"]');
-        if (!btn) return 'ERROR: submit button not found';
+        if (!btn) return 'NOTFOUND';
         if (btn.getAttribute('aria-disabled') === 'true') return 'DISABLED';
         btn.click();
         return 'OK';
@@ -246,13 +256,14 @@ async function sendNotionMessage(cdp, message) {
     `);
 
     if (submitResult?.value === 'OK') return;
+    if (submitResult?.value === 'NOTFOUND') break; // fall through to Enter key
     if (submitResult?.value?.startsWith('ERROR')) throw new Error(submitResult.value);
 
     // If disabled, wait and retry
     await new Promise(res => setTimeout(res, 500));
   }
 
-  // Final attempt: force dispatch Enter key on input
+  // Final attempt: Enter key (works on the focused AI input)
   await cdp.send('Input.dispatchKeyEvent', {
     type: 'keyDown', key: 'Enter', code: 'Enter',
     windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
@@ -343,14 +354,16 @@ async function main() {
   // Preflight: log /chat selector status
   const preflight = await cdp.evaluate(`
     (function() {
-      const input = document.querySelector('div[contenteditable="true"]') ||
-                    document.querySelector('div[role="textbox"][contenteditable="true"]');
-      const submit = document.querySelector('[aria-label="\u63d0\u4ea4 AI \u6d88\u606f"]') ||
-                     document.querySelector('[aria-label="Submit AI message"]') ||
-                     document.querySelector('[data-testid="agent-send-message-button"]');
+      // IMPORTANT: must select role=textbox to target AI input, not page body editor
+      const input = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+        .find(el => el.getAttribute('role') === 'textbox');
+      const submit = document.querySelector('[aria-label="\\u63d0\\u4ea4 AI \\u6d88\\u606f"]') ||
+                     document.querySelector('[aria-label="Submit AI message"]');
       return JSON.stringify({
         url: window.location.href.slice(0, 60),
         inputSelectorMatched: !!input,
+        inputRole: input ? input.getAttribute('role') : 'N/A',
+        inputPlaceholder: input ? input.getAttribute('placeholder') : 'N/A',
         submitSelectorMatched: !!submit,
         insertMethod: 'execCommand',
         submitMethod: submit ? 'button click' : 'Enter fallback'
