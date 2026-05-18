@@ -251,6 +251,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
         this.wasOnAiPage = false;
         this.bridgePromptInjected = false;
         this.conversationMessageCount = 0;
+
+        // Release tool store subscription (Slice 1)
+        this.toolStoreUnsubscribe?.();
+        this.toolStoreUnsubscribe = null;
+        this.cachedBridgePrompt = null;
     }
 
     // ── Core capabilities ──────────────────────────────────────────────
