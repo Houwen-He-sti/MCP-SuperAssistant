@@ -4,6 +4,7 @@ import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
 import { getEnabledToolDefinitions, choosePromptForFirstConversation } from './notion.bridge-prompt';
+import { NOTION_CHAT_CONTENT_SELECTOR } from './notion.adapter.selectors';
 
 /**
  * Notion AI Adapter — supports both:
@@ -43,7 +44,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
         // broader aria-label fallbacks removed to prevent false positives on regular pages)
         NATIVE_SUBMIT_BUTTON: '[data-testid="agent-send-message-button"]',
         // Chat content area for native agent
-        NATIVE_CHAT_CONTENT: '.notion-ai-chat-content, [data-testid="ai-chat-content"], .notion-app-inner',
+        NATIVE_CHAT_CONTENT: NOTION_CHAT_CONTENT_SELECTOR,
 
         // === Legacy /ai panel selectors (fallback) ===
         CHAT_INPUT:
@@ -570,6 +571,11 @@ export class NotionAdapter extends BaseAdapterPlugin {
                             if (el.textContent && el.textContent.trim().length > 10) {
                                 this.conversationMessageCount++;
                                 this.context.logger.debug(`Message detected, count: ${this.conversationMessageCount}`);
+                                // DOM trigger: scan message for JSONL function calls and ACK nonces
+                                const text = el.textContent ?? '';
+                                const domScanner = (window as unknown as Record<string, unknown>).mcpNotionDomScan as
+                                    | { scan?: (t: string) => void } | undefined;
+                                domScanner?.scan?.(text);
                                 break;
                             }
                         }

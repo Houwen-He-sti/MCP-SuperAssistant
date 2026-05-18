@@ -8,6 +8,7 @@
 import { executionGuardStore, reserveExecution } from '../mcpexecute/executionGuard';
 import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/storage';
 import { createAckTracker, type AckTracker } from './ackTracker';
+import { extractIdentityFromJsonlBlock } from './functionCallScanner';
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
 import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
 import {
@@ -236,6 +237,20 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   } else {
     unsubscribeTextScan = onStreamEventIsolated(textScanHandler);
   }
+
+  // Set up window.mcpNotionDomScan bridge for DOM-triggered tool scanning.
+  // notion.adapter.ts calls window.mcpNotionDomScan.scan(text) for each new Notion AI message.
+  // P1-1: ownership contract includes version, scan, teardown.
+  if (typeof window !== 'undefined') {
+    const domScanner: McpNotionDomScanner = {
+      version: '1',
+      scan: scanDomMessage,
+      teardown(): void {
+        delete (window as unknown as Record<string, unknown>).mcpNotionDomScan;
+      },
+    };
+    (window as unknown as Record<string, unknown>).mcpNotionDomScan = domScanner;
+  }
 }
 
 /**
@@ -281,4 +296,81 @@ export function getStreamToolBridgeInfo(): {
     ackPendingCount: ackTrackerInstance?.getPendingCount() ?? 0,
     lastModelAckEvent: lastModelAckEvent ? { ...lastModelAckEvent } : null,
   };
+}
+
+// ============================================================================
+// DOM Trigger — window.mcpNotionDomScan bridge
+// ============================================================================
+
+/**
+ * Window bridge interface for DOM-triggered tool scanning.
+ *
+ * Set on window after initStreamToolBridge() to allow notion.adapter.ts
+ * (content-script world) to call scan() for each new Notion AI message.
+ *
+ * P1-1 (GPT review): ownership contract — includes version, scan, teardown.
+ */
+export interface McpNotionDomScanner {
+  version: string;
+  scan(text: string): void;
+  teardown(): void;
+}
+
+/**
+ * Extract content from fenced ```jsonl code blocks in markdown text.
+ *
+ * P0-2 (GPT review): DOM text ≠ raw NDJSON stream.
+ * Only scan content inside fenced ```jsonl blocks, not raw textContent.
+ *
+ * @param text - Full DOM element text content
+ * @returns Array of block contents (without the fences)
+ */
+function extractJsonlFencedBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  const fencePattern = /```jsonl\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  while ((match = fencePattern.exec(text)) !== null) {
+    if (match[1]) blocks.push(match[1]);
+  }
+  return blocks;
+}
+
+/**
+ * Scan a DOM message element's text for:
+ * 1. ACK nonces via ackTracker.scanText() — uses full text (ACK tags can appear anywhere)
+ * 2. JSONL function_call blocks inside fenced ```jsonl blocks → dispatch ToolInvocationEvent
+ *
+ * Called from notion.adapter.ts setupMessageObserver() on each new Notion AI message.
+ *
+ * P1-2 (GPT review): Uses CustomEvent 'mcp-superassistant:dom-tool-invocation'
+ * (NOT synthetic StreamEvent — this is a transport-agnostic semantic trigger).
+ *
+ * No-op if bridge is not initialized.
+ */
+export function scanDomMessage(text: string): void {
+  // 1. ACK scanning — full text (ACK tags can appear anywhere in the message)
+  ackTrackerInstance?.scanText(text);
+
+  // 2. Function call detection — fenced ```jsonl blocks only (P0-2 canonicalization)
+  const blocks = extractJsonlFencedBlocks(text);
+  for (const block of blocks) {
+    const identity = extractIdentityFromJsonlBlock(block);
+    if (identity?.name) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', {
+          detail: identity,
+        }));
+      }
+    }
+  }
+}
+
+/**
+ * Test-only accessor for the current ackTracker instance.
+ * Allows tests to register pending nonces before calling scanDomMessage().
+ *
+ * @internal — do not use in production code paths
+ */
+export function _getAckTrackerForTest(): AckTracker | null {
+  return ackTrackerInstance;
 }
