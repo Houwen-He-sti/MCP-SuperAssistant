@@ -28,6 +28,8 @@ import {
     runtimeError,
     type RuntimeResult,
 } from '../../../../../../../mcp-runtime/src/bridge/runtime-result.ts';
+import type { AssistantMessageCallback } from '../../../../../../../mcp-runtime/src/adapters/provider-adapter.ts';
+import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 
 // ---------------------------------------------------------------------------
 // Selectors (copied from NotionAdapter.selectors — do NOT import adapter class
@@ -38,6 +40,26 @@ const NATIVE_CHAT_INPUT_SEL =
     'div[role="textbox"][contenteditable="true"], div[contenteditable="true"][data-placeholder*="Ask"], div[contenteditable="true"][data-placeholder*="Message"]';
 
 const NATIVE_SUBMIT_BUTTON_SEL = '[data-testid="agent-send-message-button"]';
+
+/**
+ * STREAMING TRUTH CONTRACT (BH-3):
+ *   Authoritative signal (only): [data-testid="stop-button"] presence (BH-1 CDP probe evidence).
+ *   Rejected signals: CSS animations, typing indicator, mutation rate, markdown render count.
+ *
+ *   streaming=true  → "Notion reports active generation" (stop-button visible)
+ *   streaming=false → "Primary streaming signal absent"
+ *
+ *   REVALIDATION REQUIRED: Based on current BH-1/BH-3 observation evidence.
+ *   Must be revalidated if Notion runtime changes. NOT a permanent invariant.
+ */
+const NATIVE_STOP_BUTTON_SEL = '[data-testid="stop-button"]';
+
+/**
+ * OBSERVER TARGET CONTRACT (BH-3):
+ *   MutationObserver root: .layout-content (BH-1 CDP probe evidence).
+ *   REVALIDATION REQUIRED if Notion restructures chat layout.
+ */
+const NATIVE_CHAT_CONTENT_SEL = '.layout-content';
 
 // ---------------------------------------------------------------------------
 // Adapter delegate interface (structural, avoids importing NotionAdapter class)
@@ -61,6 +83,17 @@ export interface NotionAdapterBridgeHostOptions {
      * GPT P1: do NOT use globalThis.document as default (undefined in Node.js test runtime).
      */
     document: Document;
+    /**
+     * Injectable MutationObserver class for test isolation.
+     * Pass `MutationObserver` (the global) in production.
+     * Same rationale as `document`: not available in Node.js test runtime.
+     *
+     * OBSERVER LIFECYCLE CONTRACT (BH-3):
+     *   Each observeAssistantMessages() call creates one independent observer.
+     *   Concurrent observers: NOT SUPPORTED (BH-3 primitive; BH-4+ coordinator scope).
+     *   SPA navigation / reattach: OUT OF SCOPE for BH-3.
+     */
+    MutationObserver: typeof MutationObserver;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,10 +103,12 @@ export interface NotionAdapterBridgeHostOptions {
 export class NotionAdapterBridgeHost implements NotionProviderHost {
     private readonly adapter: NotionAdapterDelegate;
     private readonly doc: Document;
+    private readonly MutationObserverCtor: typeof MutationObserver;
 
-    constructor({ adapter, document: doc }: NotionAdapterBridgeHostOptions) {
+    constructor({ adapter, document: doc, MutationObserver: MOCtor }: NotionAdapterBridgeHostOptions) {
         this.adapter = adapter;
         this.doc = doc;
+        this.MutationObserverCtor = MOCtor;
     }
 
     // ------------------------------------------------------------------
@@ -126,16 +161,46 @@ export class NotionAdapterBridgeHost implements NotionProviderHost {
     }
 
     // ------------------------------------------------------------------
-    // isStreaming — DEFERRED BH-3
+    // isStreaming — BH-3
     // Evidence: BH-1 CDP probe confirms [data-testid="stop-button"] selector.
+    // See NATIVE_STOP_BUTTON_SEL contract comment above.
     // ------------------------------------------------------------------
 
-    // isStreaming(): boolean { ... }   // BH-3
+    isStreaming(): boolean {
+        return this.doc.querySelector(NATIVE_STOP_BUTTON_SEL) !== null;
+    }
 
     // ------------------------------------------------------------------
-    // observeAssistantMessages — DEFERRED BH-3
+    // observeAssistantMessages — BH-3
     // Evidence: BH-1 CDP probe confirms .layout-content MutationObserver target.
+    // See NATIVE_CHAT_CONTENT_SEL contract comment above.
+    //
+    // OBSERVER LIFECYCLE:
+    //   [CREATE] new MutationObserver on .layout-content
+    //   [ACTIVE] fires callback for each new content node (empty nodes skipped)
+    //   [DISPOSE] caller calls disposable.dispose() → observer.disconnect()
     // ------------------------------------------------------------------
 
-    // observeAssistantMessages(callback: AssistantMessageCallback): Disposable { ... }  // BH-3
+    observeAssistantMessages(callback: AssistantMessageCallback): Disposable {
+        const container = this.doc.querySelector(NATIVE_CHAT_CONTENT_SEL);
+        if (!container) {
+            throw new Error(
+                'observeAssistantMessages: .layout-content container not found — cannot observe assistant messages',
+            );
+        }
+        const seen = new WeakSet<object>();
+        const observer = new this.MutationObserverCtor((records) => {
+            for (const record of records) {
+                for (const node of Array.from(record.addedNodes)) {
+                    if (seen.has(node as object)) continue;
+                    seen.add(node as object);
+                    const content = (node as { textContent?: string | null }).textContent ?? '';
+                    if (!content.trim()) continue;
+                    void callback({ content, isComplete: true, timestamp: Date.now() });
+                }
+            }
+        });
+        observer.observe(container as unknown as Node, { childList: true, subtree: true });
+        return { dispose: () => observer.disconnect() };
+    }
 }
