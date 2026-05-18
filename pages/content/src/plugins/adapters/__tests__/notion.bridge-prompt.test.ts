@@ -1,8 +1,8 @@
 /**
- * Tests for notion.bridge-prompt — getEnabledToolDefinitions()
+ * Tests for notion.bridge-prompt — getEnabledToolDefinitions() + choosePromptForFirstConversation()
  *
- * Slice 1 TDD: verify the Tool[] → ToolDefinition[] mapping used in
- * dynamic bridge prompt injection.
+ * Slice 1 TDD: verify the Tool[] → ToolDefinition[] mapping and the first-conversation
+ * prompt choice logic (dynamic vs fallback, guard conditions).
  *
  * Run:
  *   node --test --experimental-strip-types \
@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { getEnabledToolDefinitions } from '../notion.bridge-prompt.ts';
+import { getEnabledToolDefinitions, choosePromptForFirstConversation } from '../notion.bridge-prompt.ts';
 
 // Minimal Tool shape matching stores.ts
 interface Tool {
@@ -107,5 +107,47 @@ describe('getEnabledToolDefinitions()', () => {
         ];
         const result = getEnabledToolDefinitions(tools, new Set(['echo']));
         assert.equal(result[0].description, 'Echo a message');
+    });
+});
+
+const STATIC_PROMPT = '<mcp-system-prompt>static</mcp-system-prompt>';
+const DYNAMIC_PROMPT = '<mcp-system-prompt>dynamic-with-real-tools</mcp-system-prompt>';
+
+describe('choosePromptForFirstConversation()', () => {
+    // --- Guard: inject conditions ---
+    it('returns null when not on native AI agent page', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, false, false, 0, '');
+        assert.equal(result, null);
+    });
+
+    it('returns null when bridge prompt already injected', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, true, true, 0, '');
+        assert.equal(result, null);
+    });
+
+    it('returns null when messageCount > 0 (not first conversation)', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, true, false, 1, '');
+        assert.equal(result, null);
+    });
+
+    it('returns null when input has existing user draft content', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, true, false, 0, 'User typed something');
+        assert.equal(result, null);
+    });
+
+    it('returns prompt when input is whitespace-only (treated as empty)', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, true, false, 0, '   \n\t  ');
+        assert.ok(result !== null);
+    });
+
+    // --- Dynamic vs static fallback ---
+    it('returns dynamic prompt when cache is non-null', () => {
+        const result = choosePromptForFirstConversation(DYNAMIC_PROMPT, STATIC_PROMPT, true, false, 0, '');
+        assert.equal(result, DYNAMIC_PROMPT);
+    });
+
+    it('returns static fallback when cache is null (proxy unavailable)', () => {
+        const result = choosePromptForFirstConversation(null, STATIC_PROMPT, true, false, 0, '');
+        assert.equal(result, STATIC_PROMPT);
     });
 });
