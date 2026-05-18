@@ -187,7 +187,7 @@ describe('T-BH-07: boundary scan', () => {
         const __dirname = dirname(fileURLToPath(import.meta.url));
         const indexPath = resolve(
             __dirname,
-            '../../../../../../../../../AppData/Local/Temp/vscode-dir-shared-context-post121/mcp-runtime/src/index.ts',
+            '../../../../../../../mcp-runtime/src/index.ts',
         );
         const contents = readFileSync(indexPath, 'utf-8');
         assert.ok(

@@ -22,12 +22,12 @@
 import type {
     NotionProviderHost,
     NotionSubmitButtonState,
-} from '../../../../../../../../../AppData/Local/Temp/vscode-dir-shared-context-post121/mcp-runtime/src/adapters/notion-provider-adapter.ts';
+} from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
 import {
     runtimeOk,
     runtimeError,
     type RuntimeResult,
-} from '../../../../../../../../../AppData/Local/Temp/vscode-dir-shared-context-post121/mcp-runtime/src/bridge/runtime-result.ts';
+} from '../../../../../../../mcp-runtime/src/bridge/runtime-result.ts';
 
 // ---------------------------------------------------------------------------
 // Selectors (copied from NotionAdapter.selectors — do NOT import adapter class
