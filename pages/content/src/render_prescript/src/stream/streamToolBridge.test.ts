@@ -2019,4 +2019,33 @@ describe('streamToolBridge', () => {
     assert.ok(!events.some(e => e.errorCode === 'CIRCUIT_BREAKER_OPEN'));
   });
 
+  // ---------------------------------------------------------------------------
+  // T-DOM gate: dom_tool_invocation must pass the type gate (Option B)
+  // RED before gate fix, GREEN after.
+  // ---------------------------------------------------------------------------
+  test('71. dom_tool_invocation event — passes gate, callTool is invoked', async () => {
+    const mockClient = createMockMcpClient({ callToolResult: 'ok' });
+    const mockStorage = createMockStorage();
+    let guardCounter = 0;
+    const mockGuard: ExecutionGuardLike = {
+      reserveExecution: () => `key-${++guardCounter}`,
+      executionGuardStore: { markSucceeded: () => {}, markFailed: () => {} },
+    };
+
+    const handler = createStreamToolHandler({
+      config: { enabled: true, autoInsert: false, autoSubmit: false, toolTimeoutMs: 30000 },
+      mcpClient: () => mockClient,
+      guard: mockGuard,
+      adapter: () => null,
+      storage: mockStorage,
+      onEvent: () => {},
+    });
+
+    await handler({ type: 'dom_tool_invocation', streamId: 'dom-stream-71', identity: { name: 'echo', callId: 'c-dom-71', arguments: '{}' } });
+
+    assert.strictEqual(mockClient._calls.length, 1, 'callTool must be invoked for dom_tool_invocation');
+    assert.strictEqual(mockClient._calls[0].name, 'echo');
+  });
+
 });
+

@@ -286,8 +286,10 @@ export function createStreamToolHandler(deps: StreamToolBridgeDeps) {
   }
 
   return async function handleStreamEvent(event: StreamEvent) {
-    // Step 0: Filter — only handle stream_cutoff
-    if (!event || event.type !== 'stream_cutoff') return;
+    // Step 0: Filter — accept stream_cutoff and dom_tool_invocation (Option B)
+    // C-dom-5: dom_tool_invocation MUST NOT be conflated with stream_cutoff.
+    // Both use the same pipeline but carry distinct type tokens.
+    if (!event || (event.type !== 'stream_cutoff' && event.type !== 'dom_tool_invocation')) return;
 
     const streamId = event.streamId || 'unknown';
     const identity = event.identity;

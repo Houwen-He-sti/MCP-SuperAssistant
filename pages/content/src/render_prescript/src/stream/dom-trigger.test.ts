@@ -72,6 +72,56 @@ import {
     scanDomMessage,
     _getAckTrackerForTest,
 } from './streamToolBridgeInit.ts';
+import { executionGuardStore } from '../mcpexecute/executionGuard.ts';
+
+// ============================================================================
+// Module-level interceptors for T-DOM-07/08/09: DOM execution path tests
+// Must be set up AFTER the existing mocks (addEventListener = () => {}).
+// Intercepts 'mcp-superassistant:dom-tool-invocation' listener registrations
+// and routes dispatchEvent calls to them for integration testing.
+// ============================================================================
+const _registeredDomTriggerListeners: Array<(e: Event) => void> = [];
+let _removedDomTriggerListenerCount = 0;
+
+{
+    const _prevAdd: ((type: string, handler: any) => void) | undefined = (globalThis as any).addEventListener;
+    const _prevRemove: ((type: string, handler: any) => void) | undefined = (globalThis as any).removeEventListener;
+    const _prevDispatch: ((e: Event) => boolean) | undefined = (globalThis as any).dispatchEvent;
+
+    (globalThis as any).addEventListener = (type: string, handler: any): void => {
+        if (type === 'mcp-superassistant:dom-tool-invocation') {
+            _registeredDomTriggerListeners.push(handler);
+            return;
+        }
+        _prevAdd?.(type, handler);
+    };
+
+    (globalThis as any).removeEventListener = (type: string, handler: any): void => {
+        if (type === 'mcp-superassistant:dom-tool-invocation') {
+            _removedDomTriggerListenerCount++;
+            const idx = _registeredDomTriggerListeners.indexOf(handler);
+            if (idx >= 0) _registeredDomTriggerListeners.splice(idx, 1);
+            return;
+        }
+        _prevRemove?.(type, handler);
+    };
+
+    (globalThis as any).dispatchEvent = (event: Event): boolean => {
+        if ((event as CustomEvent).type === 'mcp-superassistant:dom-tool-invocation') {
+            // Call registered DOM trigger listeners (for T-DOM-07/08/09 integration)
+            for (const listener of [..._registeredDomTriggerListeners]) {
+                listener(event);
+            }
+        }
+        return _prevDispatch ? _prevDispatch(event) : true;
+    };
+}
+
+// Tool calls captured for T-DOM-07/08 execution assertions
+const _domExecToolCalls: Array<{ name: string; params: Record<string, unknown> }> = [];
+// Save originals for restore
+const _savedCallTool = (globalThis as any).mcpClient.callTool;
+const _savedIsReady = (globalThis as any).mcpClient.isReady;
 
 // --- Helper: reset captured events ---
 function resetEvents(): void {
@@ -327,3 +377,104 @@ describe('T-DOM-06: scanDomMessage content-hash dedup', () => {
         );
     });
 });
+
+// ============================================================================
+// T-DOM-07: enabled:true + DOM event → mcpClient.callTool called
+// RED before gate fix (streamToolBridge.ts) + listener fix (streamToolBridgeInit.ts)
+// GREEN after both fixes: dom_tool_invocation passes gate + listener routes to bridgeHandler
+// ============================================================================
+describe('T-DOM-07: enabled:true + DOM event → callTool called', () => {
+    beforeEach(() => {
+        _registeredDomTriggerListeners.length = 0;
+        _removedDomTriggerListenerCount = 0;
+        _domExecToolCalls.length = 0;
+        executionGuardStore.clear();
+        (globalThis as any).mcpClient.isReady = () => true;
+        (globalThis as any).mcpClient.callTool = async (name: string, params: Record<string, unknown>): Promise<unknown> => {
+            _domExecToolCalls.push({ name, params });
+            return { content: [{ type: 'text', text: '{}' }] };
+        };
+    });
+
+    it('enabled:true → DOM event → mcpClient.callTool is invoked', async () => {
+        initStreamToolBridge({ enabled: true });
+
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', {
+            detail: { name: 'search_web', callId: 't-dom-07-call-001', arguments: '{"query":"test"}' },
+        }));
+
+        // Wait for async execution via bridgeHandler
+        await new Promise<void>(resolve => setTimeout(resolve, 50));
+
+        assert.ok(
+            _domExecToolCalls.length > 0,
+            `Expected callTool to be called, but was not. Fix: extend gate in streamToolBridge.ts + add DOM listener in streamToolBridgeInit.ts`,
+        );
+        assert.strictEqual(_domExecToolCalls[0].name, 'search_web');
+    });
+});
+
+// ============================================================================
+// T-DOM-08: enabled:false + DOM event → callTool NOT called (guard respected)
+// Passes both before and after fix — verifies the enabled gate in the listener.
+// ============================================================================
+describe('T-DOM-08: enabled:false + DOM event → callTool NOT called', () => {
+    beforeEach(() => {
+        _registeredDomTriggerListeners.length = 0;
+        _domExecToolCalls.length = 0;
+        executionGuardStore.clear();
+        (globalThis as any).mcpClient.isReady = () => true;
+        (globalThis as any).mcpClient.callTool = async (name: string, params: Record<string, unknown>): Promise<unknown> => {
+            _domExecToolCalls.push({ name, params });
+            return { content: [{ type: 'text', text: '{}' }] };
+        };
+    });
+
+    it('enabled:false → DOM event → callTool is NOT invoked', async () => {
+        initStreamToolBridge({ enabled: false });
+
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', {
+            detail: { name: 'search_web', callId: 't-dom-08-call-001', arguments: '{"query":"test"}' },
+        }));
+
+        await new Promise<void>(resolve => setTimeout(resolve, 50));
+
+        assert.strictEqual(
+            _domExecToolCalls.length,
+            0,
+            'Expected callTool NOT to be called when enabled:false',
+        );
+    });
+});
+
+// ============================================================================
+// T-DOM-09: repeated initStreamToolBridge() → previous listener removed (no duplicate)
+// RED before cleanup fix (no unsubscribeDomTrigger var in streamToolBridgeInit.ts)
+// GREEN after fix: second init removes first listener → removeEventListener called once
+// ============================================================================
+describe('T-DOM-09: repeated init → DOM listener cleanup (no duplicate)', () => {
+    it('second initStreamToolBridge() removes previous DOM trigger listener', () => {
+        // First init establishes clean state (may clean up carryover from previous tests)
+        initStreamToolBridge({ enabled: true });
+        const countAfterFirst = _registeredDomTriggerListeners.length;
+
+        // Reset counter AFTER first init so we measure ONLY the second init's cleanup
+        _removedDomTriggerListenerCount = 0;
+
+        initStreamToolBridge({ enabled: true });    // 2nd: must remove previous listener
+
+        assert.strictEqual(
+            _removedDomTriggerListenerCount,
+            1,
+            `Expected removeEventListener called once on re-init (cleanup), got ${_removedDomTriggerListenerCount}. ` +
+            'Fix: add unsubscribeDomTrigger module var + cleanup in initStreamToolBridge() preamble',
+        );
+        assert.strictEqual(
+            _registeredDomTriggerListeners.length,
+            countAfterFirst,
+            `Expected same number of active listeners as after first init (${countAfterFirst}), got ${_registeredDomTriggerListeners.length}`,
+        );
+        assert.strictEqual(countAfterFirst, 1, 'First init should register exactly 1 listener');
+    });
+});
+
