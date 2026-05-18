@@ -65,6 +65,7 @@ let messageHandlers: Array<(e: any) => void> = [];
         messageHandlers.push(handler);
     }
 };
+(globalThis as any).removeEventListener = () => { };
 (globalThis as any).postMessage = () => { };
 
 // --- Import real modules ---

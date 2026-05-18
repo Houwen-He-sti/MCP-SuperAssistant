@@ -17,6 +17,7 @@ import {
   type AdapterLike,
   type AdapterStatus,
   type BridgeEvent,
+  type FunctionCallIdentityLike,
   type McpClientLike,
   type StreamToolBridgeConfig,
 } from './streamToolBridge';
@@ -53,6 +54,7 @@ let currentConfig: StreamToolBridgeInitConfig = { ...DEFAULT_CONFIG };
 let bridgeHandler: ((event: unknown) => Promise<void>) | null = null;
 let unsubscribe: (() => void) | null = null;
 let unsubscribeTextScan: (() => void) | null = null;
+let unsubscribeDomTrigger: (() => void) | null = null;
 let ackTrackerInstance: AckTracker | null = null;
 /** StreamId of the last bridge handoff — text scan skips this stream (GPT P1-4). */
 let lastHandoffStreamId: string | null = null;
@@ -143,6 +145,12 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   if (unsubscribeTextScan) {
     unsubscribeTextScan();
     unsubscribeTextScan = null;
+  }
+
+  // Unsubscribe previous DOM trigger listener if any (prevents duplicate listeners on re-init)
+  if (unsubscribeDomTrigger) {
+    unsubscribeDomTrigger();
+    unsubscribeDomTrigger = null;
   }
 
   // Reset handoff stream tracking
@@ -266,6 +274,24 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
       },
     };
     (window as unknown as Record<string, unknown>).mcpNotionDomScan = domScanner;
+  }
+
+  // Subscribe to DOM-triggered tool invocations.
+  // notion.adapter.ts (and other adapters) dispatch 'mcp-superassistant:dom-tool-invocation'
+  // CustomEvents with a FunctionCallIdentityLike detail when a tool call is detected in DOM text.
+  // The listener translates the event into a dom_tool_invocation StreamEvent for bridgeHandler.
+  // C-dom-5: uses type 'dom_tool_invocation' — never 'stream_cutoff'.
+  if (typeof window !== 'undefined') {
+    const domTriggerListener = (e: Event): void => {
+      if (!bridgeHandler || !currentConfig.enabled) return;
+      const detail = (e as CustomEvent<FunctionCallIdentityLike>).detail;
+      if (!detail?.name) return;
+      const streamId = `dom-trigger:${detail.callId ?? String(Date.now())}`;
+      void bridgeHandler({ type: 'dom_tool_invocation', streamId, identity: detail });
+    };
+    window.addEventListener('mcp-superassistant:dom-tool-invocation', domTriggerListener);
+    unsubscribeDomTrigger = () =>
+      window.removeEventListener('mcp-superassistant:dom-tool-invocation', domTriggerListener);
   }
 }
 
