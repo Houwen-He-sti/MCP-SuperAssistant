@@ -18,8 +18,7 @@ import {
   type BridgeEvent,
   type McpClientLike,
   type StreamToolBridgeConfig,
-} from './streamToolBridge';
-import { normalizeToUiEvent } from './toolLoopUiEvents';
+} from './streamToolBridge';import { extractIdentityFromJsonlBlock } from './functionCallScanner';import { normalizeToUiEvent } from './toolLoopUiEvents';
 import type { StreamEvent } from './types';
 
 /**
@@ -57,6 +56,31 @@ let ackTrackerInstance: AckTracker | null = null;
 let lastHandoffStreamId: string | null = null;
 /** Last model ACK event for diagnostic observability (GPT P1-2/P1-7). */
 let lastModelAckEvent: import('./ackTracker').ModelAckEvent | null = null;
+/** Deduplication set for DOM-scanned message content hashes (P0-1). */
+const domScannedHashes = new Set<string>();
+
+/**
+ * Extract content from ```jsonl fenced code blocks in markdown text.
+ * Returns array of raw block strings (one per block).
+ */
+function extractJsonlFencedContent(text: string): string[] {
+  const blocks: string[] = [];
+  const regex = /```jsonl\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push(match[1]);
+  }
+  return blocks;
+}
+
+/** Simple content hash for deduplication (djb2). */
+function simpleHash(text: string): string {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 33) ^ text.charCodeAt(i);
+  }
+  return String(hash >>> 0);
+}
 
 /** Default ACK timeout (ms) — how long to wait for model to echo nonce. */
 const ACK_TIMEOUT_MS = 30_000;
@@ -133,6 +157,8 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   // Reset handoff stream tracking
   lastHandoffStreamId = null;
   lastModelAckEvent = null;
+  // Clear DOM dedup set on re-init
+  domScannedHashes.clear();
 
   // Dispose previous ackTracker if any (clears pending timeouts)
   if (ackTrackerInstance) {
@@ -236,6 +262,59 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   } else {
     unsubscribeTextScan = onStreamEventIsolated(textScanHandler);
   }
+
+  // --- DOM cross-bundle bridge (notion.adapter.ts → streamToolBridgeInit) ---
+  // Exposed as window.mcpNotionDomScan for content-script → render_prescript communication.
+  // notion.adapter.ts calls scan() from MutationObserver on each new AI message element.
+  const domScan = {
+    version: '1.0.0',
+    /**
+     * Scan a DOM message's text content for:
+     * 1. ACK nonces (ackTracker.scanText)
+     * 2. ```jsonl fenced blocks with function_call_start → trigger tool execution
+     */
+    scan(text: string): void {
+      if (!text) return;
+
+      // Deduplicate by content hash (P0-1)
+      const hash = simpleHash(text);
+      if (domScannedHashes.has(hash)) return;
+      domScannedHashes.add(hash);
+
+      // 1. ACK nonce scanning (Gate 5c/5d)
+      ackTrackerInstance?.scanText(text);
+
+      // 2. JSONL fenced block extraction + tool execution (P0-2 / T-DOM-03)
+      if (!bridgeHandler || !currentConfig.enabled) return;
+
+      const blocks = extractJsonlFencedContent(text);
+      for (const block of blocks) {
+        const identity = extractIdentityFromJsonlBlock(block);
+        if (!identity) continue;
+
+        // Emit synthetic stream_cutoff event through the bridge handler.
+        // handleStreamEvent (streamToolBridge.ts) only processes stream_cutoff events;
+        // function_call events are filtered out at Step 0.
+        const syntheticEvent: import('./types').StreamCutoffEvent = {
+          type: 'stream_cutoff',
+          streamId: `dom-scan-${Date.now()}`,
+          cutoffChunkIndex: 0,
+          elapsedMs: 0,
+          identity,
+          reason: 'function_call_detected',
+          forwardedTriggerChunk: false,
+          mode: 'cancel',
+        };
+        void bridgeHandler(syntheticEvent);
+      }
+    },
+    teardown(): void {
+      delete (window as Record<string, unknown>).mcpNotionDomScan;
+      domScannedHashes.clear();
+    },
+  };
+
+  (window as Record<string, unknown>).mcpNotionDomScan = domScan;
 }
 
 /**
