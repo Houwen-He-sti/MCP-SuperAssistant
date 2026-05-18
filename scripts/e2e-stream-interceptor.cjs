@@ -444,7 +444,9 @@ async function main() {
     const toolTypes = toolEvents.map(e => e.type);
 
     assert('function_call detected', toolTypes.includes('function_call'),
-      to!toolTypes.includes('function_call') && toolTypes.length === 0) {
+      toolTypes.length > 0 ? `events: ${toolTypes.join(',')}` : 'no events captured');
+
+    if (!toolTypes.includes('function_call') && toolTypes.length === 0) {
       // Bounded parser failure diagnostics (P1-4)
       // Privacy: metadata only, no raw content
       const diag = await cdp.evaluate(`
@@ -467,8 +469,6 @@ async function main() {
         log('warn', '[parser diagnostics] ' + diag.value);
       }
     }
-
-    if (olTypes.length > 0 ? `events: ${toolTypes.join(',')}` : 'no events captured');
 
     if (toolTypes.includes('function_call')) {
       const fcEvent = toolEvents.find(e => e.type === 'function_call');
