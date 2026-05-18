@@ -5,6 +5,10 @@ import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
 import { getEnabledToolDefinitions, choosePromptForFirstConversation } from './notion.bridge-prompt';
 import { NOTION_CHAT_CONTENT_SELECTOR } from './notion.adapter.selectors';
+// TODO(formatter-extraction): direct coupling to render_prescript — follow-up PR to extract to shared module
+import { formatFunctionResult } from '../../render_prescript/src/stream/functionResultFormatter.ts';
+import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
+import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 
 /**
  * Notion AI Adapter — supports both:
@@ -81,6 +85,9 @@ export class NotionAdapter extends BaseAdapterPlugin {
     private cachedBridgePrompt: string | null = null;
     private toolStoreUnsubscribe: (() => void) | null = null;
 
+    // BH-4: ToolCallLoop disposable (null when lane gate is disabled — default off)
+    private bhBridgeDisposable: Disposable | null = null;
+
     /**
      * Route gating: activate on Notion AI pages.
      * Uses DOM-based detection per PR #49 decision — no legacy path checks.
@@ -153,6 +160,19 @@ export class NotionAdapter extends BaseAdapterPlugin {
             if (this.isNativeAiAgent()) {
                 this.setupMessageObserver();
             }
+
+            // BH-4: start ToolCallLoop if __BH_RUNTIME_BRIDGE_ENABLED__ flag is set (opt-in, default off)
+            // Returns null when flag is absent/false or mcpClient unavailable (fail-closed).
+            // When non-null: ToolCallLoop is active — DOM trigger path should be skipped.
+            this.bhBridgeDisposable = startNotionRuntimeBridgeIfEnabled(
+                window as unknown as WindowLike,
+                {
+                    adapter: { insertText: (t) => this.insertText(t), submitForm: () => this.submitForm() },
+                    document,
+                    MutationObserver,
+                    formatFunctionResult,
+                },
+            );
         } else {
             this.context.logger.debug('Not on supported page, skipping DOM/UI setup');
         }
@@ -174,6 +194,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
 
         // Unsubscribe from tool store on deactivation
         this.cleanupToolStoreSubscription();
+
+        // BH-4: stop ToolCallLoop if it was started
+        await this.bhBridgeDisposable?.dispose();
+        this.bhBridgeDisposable = null;
 
         this.cleanupUIIntegration();
         this.cleanupDOMObservers();
@@ -233,6 +257,10 @@ export class NotionAdapter extends BaseAdapterPlugin {
         await super.cleanup();
         this.context.logger.debug('Cleaning up Notion AI adapter...');
         this.cleanupToolStoreSubscription();
+
+        // BH-4: stop ToolCallLoop if it was started
+        await this.bhBridgeDisposable?.dispose();
+        this.bhBridgeDisposable = null;
 
         if (this.urlCheckInterval) {
             clearInterval(this.urlCheckInterval);
