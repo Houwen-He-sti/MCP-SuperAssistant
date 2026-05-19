@@ -780,7 +780,6 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     assert.ok(!insertedTexts[1].includes('call-c1'), 'c2 insert must NOT reference call-c1');
     assert.ok(insertedTexts[1].includes('error'), 'c2 insert must indicate error status');
     // validationMessage must be present for LLM self-correction (P1 from GPT review)
-    const c2Data = JSON.parse(insertedTexts[1].match(/"result":\s*({[^}]+})/)?.[1] ?? '{}') as { validationMessage?: string };
     const c2Json = insertedTexts[1];
     assert.ok(
       c2Json.includes('validationMessage') || c2Json.includes('arg_validation_failed'),
