@@ -10,7 +10,11 @@ import { generateContentSignature, storeExecutedFunction } from '../mcpexecute/s
 import { createAckTracker, type AckTracker } from './ackTracker';
 import { extractIdentityFromJsonlBlock } from './functionCallScanner';
 import { onStreamEvent as onStreamEventIsolated } from './interceptor';
-import { installMainWorldStreamBridge, onStreamEvent as onStreamEventBridge, sendConfigToMainWorld } from './interceptorBridge';
+import {
+  installMainWorldStreamBridge,
+  onStreamEvent as onStreamEventBridge,
+  sendConfigToMainWorld,
+} from './interceptorBridge';
 import {
   createStreamToolHandler,
   getAdapterDiagnostic,
@@ -43,10 +47,10 @@ function isNotionHost(): boolean {
 
 // --- Default config ---
 const DEFAULT_CONFIG: StreamToolBridgeInitConfig = {
-  enabled: false,           // MCP tool execution — disabled until Gate 3
-  cutoffEnabled: false,     // Disabled: cutoff path doesn't handle consumer abandonment (SPA nav)
+  enabled: false, // MCP tool execution — disabled until Gate 3
+  cutoffEnabled: false, // Disabled: cutoff path doesn't handle consumer abandonment (SPA nav)
   autoInsert: true,
-  autoSubmit: false,        // safety: human confirms before sending function_result
+  autoSubmit: false, // safety: human confirms before sending function_result
   toolTimeoutMs: 30_000,
 };
 
@@ -115,10 +119,12 @@ function resolveCurrentAdapter(): AdapterLike | null {
  */
 function resolveMcpClient(): McpClientLike | null {
   const win = window as Record<string, unknown>;
-  const client = win.mcpClient as {
-    callTool?: (name: string, params: Record<string, unknown>) => Promise<unknown>;
-    isReady?: () => boolean;
-  } | undefined;
+  const client = win.mcpClient as
+    | {
+        callTool?: (name: string, params: Record<string, unknown>) => Promise<unknown>;
+        isReady?: () => boolean;
+      }
+    | undefined;
 
   if (client && typeof client.callTool === 'function' && typeof client.isReady === 'function') {
     return client as McpClientLike;
@@ -168,7 +174,7 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
   // Create ACK tracker for cross-turn nonce tracking (Gate 5c.1)
   ackTrackerInstance = createAckTracker({
     timeoutMs: ACK_TIMEOUT_MS,
-    onEvent: (event) => {
+    onEvent: event => {
       const level = event.type === 'model_ack_timeout' ? 'warn' : 'debug';
       console[level]('[AckTracker]', event.type, event.nonce, event.functionName);
 
@@ -177,9 +183,17 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
 
       // Dispatch CustomEvent for E2E observability (GPT P1-2)
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('mcp-superassistant:model-ack', {
-          detail: { type: event.type, nonce: event.nonce, callId: event.callId, functionName: event.functionName, latencyMs: event.latencyMs },
-        }));
+        window.dispatchEvent(
+          new CustomEvent('mcp-superassistant:model-ack', {
+            detail: {
+              type: event.type,
+              nonce: event.nonce,
+              callId: event.callId,
+              functionName: event.functionName,
+              latencyMs: event.latencyMs,
+            },
+          }),
+        );
 
         // Gate 6B: Also dispatch normalized UI event for content script consumption
         const uiEvent = normalizeToUiEvent(event);
@@ -236,8 +250,8 @@ export function initStreamToolBridge(config?: Partial<StreamToolBridgeInitConfig
       enabled: currentConfig.cutoffEnabled,
       mode: undefined, // cutoff mode managed by bridge config, not tool bridge
       requireStructuredIdentity: false, // Gate 5d: Notion NDJSON patches never produce standard function_call JSON,
-                                        // so MAIN world cutoff must fire without structured identity.
-                                        // Downstream handler still validates identity independently.
+      // so MAIN world cutoff must fire without structured identity.
+      // Downstream handler still validates identity independently.
       emitChunkText: true,
     });
     unsubscribe = onStreamEventBridge(bridgeHandler);
@@ -412,9 +426,11 @@ export function scanDomMessage(text: string): void {
     const identity = extractIdentityFromJsonlBlock(block);
     if (identity?.name) {
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', {
-          detail: identity,
-        }));
+        window.dispatchEvent(
+          new CustomEvent('mcp-superassistant:dom-tool-invocation', {
+            detail: identity,
+          }),
+        );
       }
     }
   }
