@@ -700,9 +700,12 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     assert.ok(insertedTexts[0].includes('error'), 'insertText content must indicate error status');
   });
 
-  it('T-LOOP-L-03: N=2 callId symmetry — two rejections (tool_not_found, args_invalid) each inject error ToolResult with correct distinct callIds', async () => {
+  it('T-LOOP-L-03: N=2 same-message callId symmetry — c1 success insert + c2 args_invalid rejection, no cross-contamination', async () => {
     // L9+L10 protocol: N=2 integration variant.
-    // Real path through createToolCallLoop with registry + rejectionHandler.
+    // Same fenced JSONL block contains two calls:
+    //   c1: echo { message: "ok" } → validateArgs passes → hostBindings.onToolCallDetect → insertText (success)
+    //   c2: echo {} (missing required 'message') → validateArgs fails → rejectionHandler → insertText (error)
+    // Asserts: insertText called twice, callIds do not cross-contaminate, c2 contains validationMessage.
     const { createToolCallLoop } = await import('../../../../../../../mcp-runtime/src/core/tool-call-loop.ts');
     const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
     const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
@@ -710,40 +713,78 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     const { CfWorkerSchemaValidatorAdapter } = await import('../notion/cfworker-schema-validator-adapter.ts');
 
     const { adapter, insertedTexts, fire } = makeControllableAdapter();
-    const registry = new InMemoryToolRegistry();
+
+    // Correct: schemaValidator injected via constructor (same as real bridge wiring)
+    const schemaValidator = new CfWorkerSchemaValidatorAdapter(new CfWorkerJsonSchemaValidator());
+    const registry = new InMemoryToolRegistry({ schemaValidator });
     const schema = { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] };
-    // 'echo' is registered with real schema validator so args_invalid can be triggered
-    registry.populate(
-      [{ name: 'echo', inputSchema: schema }],
-      new CfWorkerSchemaValidatorAdapter({ getValidator: (s) => new CfWorkerJsonSchemaValidator(s as Record<string, unknown>) }),
-    );
+    registry.populate([{ name: 'echo', inputSchema: schema }]);
 
     const formatter = (opts: { callId: string; name: string; status: 'success' | 'error'; result: unknown }) =>
       `<tool_result callId="${opts.callId}" status="${opts.status}">${JSON.stringify(opts.result)}</tool_result>`;
 
+    // hostBindings for c1 (succeeds validation, onToolCallDetect called with c1)
+    const detectCallIds: string[] = [];
+    const hostBindings = {
+      onToolCallDetect: async (payload: { callId: string }) => {
+        detectCallIds.push(payload.callId);
+        return {
+          callId: payload.callId,
+          formattedResponse: `<tool_result callId="${payload.callId}" status="success">${JSON.stringify({ ok: true })}</tool_result>`,
+          success: true as const,
+        };
+      },
+      onAdapterError: (_e: unknown) => {},
+    };
+
     const loop = createToolCallLoop({
       adapter: adapter as Parameters<typeof createToolCallLoop>[0]['adapter'],
-      hostBindings: makeHostBindings() as Parameters<typeof createToolCallLoop>[0]['hostBindings'],
+      hostBindings: hostBindings as Parameters<typeof createToolCallLoop>[0]['hostBindings'],
       toolRegistry: registry,
       rejectionHandler: new NotionRejectionHandler(formatter),
     });
 
     const disposable = loop.start();
 
-    // N=1: unknown tool → tool_not_found
-    fire(makeToolCallJsonl('call-y1', 'unknown_tool'));
-    // N=2: known tool but missing required arg → args_invalid
-    fire(makeToolCallJsonl('call-y2', 'echo', {})); // missing 'message' field
+    // Same fenced JSONL message: two calls in sequence
+    // c1: echo with valid args (message present) → passes validation → success insert
+    // c2: echo with missing args → fails validation → rejection insert
+    const lines = [
+      JSON.stringify({ type: 'function_call_start', name: 'echo', call_id: 'call-c1' }),
+      JSON.stringify({ type: 'parameter', key: 'message', value: 'ok' }),
+      JSON.stringify({ type: 'function_call_end', call_id: 'call-c1' }),
+      JSON.stringify({ type: 'function_call_start', name: 'echo', call_id: 'call-c2' }),
+      // No parameter → missing required 'message' → args_invalid
+      JSON.stringify({ type: 'function_call_end', call_id: 'call-c2' }),
+    ].join('\n');
+    const message = '```jsonl\n' + lines + '\n```';
+
+    fire(message);
 
     await new Promise(resolve => setTimeout(resolve, 50));
 
     disposable.dispose();
 
-    assert.equal(insertedTexts.length, 2, 'insertText must be called once per rejection (N=2)');
-    assert.ok(insertedTexts[0].includes('call-y1'), 'First insertText must reference call-y1');
-    assert.ok(!insertedTexts[0].includes('call-y2'), 'First insertText must NOT reference call-y2');
-    assert.ok(insertedTexts[1].includes('call-y2'), 'Second insertText must reference call-y2');
-    assert.ok(!insertedTexts[1].includes('call-y1'), 'Second insertText must NOT reference call-y1');
-    assert.ok(insertedTexts[1].includes('error'), 'Second insertText must indicate error status');
+    // hostBindings must only be called for c1 (c2 is rejected pre-flight)
+    assert.deepEqual(detectCallIds, ['call-c1'], 'onToolCallDetect must only be called for c1 (c2 rejected pre-flight)');
+
+    assert.equal(insertedTexts.length, 2, 'insertText must be called exactly twice (c1 success + c2 rejection)');
+
+    // c1: success insert — must reference call-c1, not call-c2
+    assert.ok(insertedTexts[0].includes('call-c1'), 'c1 insert must reference call-c1');
+    assert.ok(!insertedTexts[0].includes('call-c2'), 'c1 insert must NOT reference call-c2');
+    assert.ok(insertedTexts[0].includes('success'), 'c1 insert must indicate success');
+
+    // c2: rejection insert — must reference call-c2, not call-c1, and include validationMessage
+    assert.ok(insertedTexts[1].includes('call-c2'), 'c2 insert must reference call-c2');
+    assert.ok(!insertedTexts[1].includes('call-c1'), 'c2 insert must NOT reference call-c1');
+    assert.ok(insertedTexts[1].includes('error'), 'c2 insert must indicate error status');
+    // validationMessage must be present for LLM self-correction (P1 from GPT review)
+    const c2Data = JSON.parse(insertedTexts[1].match(/"result":\s*({[^}]+})/)?.[1] ?? '{}') as { validationMessage?: string };
+    const c2Json = insertedTexts[1];
+    assert.ok(
+      c2Json.includes('validationMessage') || c2Json.includes('arg_validation_failed'),
+      'c2 insert must contain validationMessage or validationCode for LLM self-correction',
+    );
   });
 });
