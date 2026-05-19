@@ -9,6 +9,7 @@ import { choosePromptForFirstConversation, getEnabledToolDefinitions } from './n
 import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { formatFunctionResult } from '../../../../../../mcp-runtime/src/core/function-result-formatter.ts';
 import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
+import { enableStreamBridgeOnWindow } from './notion.bridge-enable';
 
 /**
  * Notion AI Adapter — supports both:
@@ -174,6 +175,14 @@ export class NotionAdapter extends BaseAdapterPlugin {
             // (window.mcpNotionDomScan.scan() would conflict with ToolCallLoop's .layout-content observer)
             if (this.isNativeAiAgent() && !this.bhBridgeDisposable) {
                 this.setupMessageObserver();
+            }
+
+            // Enable stream bridge (render_prescript configureStreamToolBridge) for
+            // supported Notion AI pages when the BH-4 ToolCallLoop is NOT active.
+            // When bhBridgeDisposable !== null (BH-4 flag enabled), skip to prevent
+            // dual MCP execution (ToolCallLoop + streamToolBridge would both fire).
+            if (!this.bhBridgeDisposable) {
+                enableStreamBridgeOnWindow(window);
             }
         } else {
             this.context.logger.debug('Not on supported page, skipping DOM/UI setup');
