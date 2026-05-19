@@ -24,6 +24,9 @@
 import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { createNotionProviderAdapter } from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
 import { createToolCallLoop } from '../../../../../../../mcp-runtime/src/core/tool-call-loop.ts';
+import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
+import type { SchemaValidatorPort } from '../../../../../../../mcp-runtime/src/core/schema-validator.ts';
+import type { RuntimeResult } from '../../../../../../../mcp-runtime/src/bridge/runtime-result.ts';
 import { NotionAdapterBridgeHost } from './notion-adapter-bridge-host.ts';
 import { createNotionHostBindings, type NotionMcpClientLike } from './notion-host-bindings.ts';
 
@@ -49,6 +52,8 @@ export interface NotionRuntimeBridgeDeps {
         result: unknown;
     }) => string;
     logger?: Pick<Console, 'error' | 'warn'>;
+    /** Slice I: optional InMemoryToolRegistry for pre-flight tool validation. */
+    toolRegistry?: InMemoryToolRegistry;
 }
 
 export interface NotionRuntimeBridge {
@@ -60,6 +65,35 @@ export interface WindowLike {
     __BH_RUNTIME_BRIDGE_ENABLED__?: boolean;
     mcpClient?: unknown;
 }
+
+// ---------------------------------------------------------------------------
+// ObservationOnlySchemaValidator
+//
+// SLICE I ONLY — Observation bridge for first-consumer wiring evidence.
+// NOT FOR PRODUCTION / BH FLAG ENABLE.
+// Always returns runtimeOk(); logs schema bypass for evidence capture.
+// Must be replaced by a concrete CSP-safe validator before BH path activation (Slice J).
+// ---------------------------------------------------------------------------
+
+class ObservationOnlySchemaValidator implements SchemaValidatorPort {
+    private readonly logger?: Pick<Console, 'warn'>;
+    constructor(logger?: Pick<Console, 'warn'>) {
+        this.logger = logger;
+    }
+    validate(schema: Record<string, unknown>, args: unknown): RuntimeResult {
+        this.logger?.warn('[Slice I ObservationOnlySchemaValidator] schema validation bypassed', {
+            schemaKeys: Object.keys(schema),
+            argsType: typeof args,
+        });
+        return { ok: true };
+    }
+}
+
+/** Optional test seam: invoked with the created registry for evidence capture in tests. */
+export type NotionRuntimeBridgeLaneGateDeps = Omit<NotionRuntimeBridgeDeps, 'mcpClient'> & {
+    /** Slice I test seam — called with the created InMemoryToolRegistry (if any). */
+    onRegistryCreated?: (registry: InMemoryToolRegistry) => void;
+};
 
 // ---------------------------------------------------------------------------
 // Controller (lifecycle guard)
@@ -82,13 +116,17 @@ class NotionRuntimeBridgeController implements NotionRuntimeBridge {
             document: this.deps.document,
             MutationObserver: this.deps.MutationObserver,
         });
-        const providerAdapter = createNotionProviderAdapter({ host: bridgeHost });
+        const providerAdapter = createNotionProviderAdapter({ host: bridgeHost, observationMode: 'host-split' });
         const hostBindings = createNotionHostBindings({
             mcpClient: this.deps.mcpClient,
             formatFunctionResult: this.deps.formatFunctionResult,
             logger: this.deps.logger,
         });
-        const loop = createToolCallLoop({ adapter: providerAdapter, hostBindings });
+        const loop = createToolCallLoop({
+            adapter: providerAdapter,
+            hostBindings,
+            toolRegistry: this.deps.toolRegistry,
+        });
         const inner = loop.start();
 
         let disposed = false;
@@ -125,7 +163,7 @@ export function createNotionRuntimeBridge(deps: NotionRuntimeBridgeDeps): Notion
 
 export function startNotionRuntimeBridgeIfEnabled(
     windowLike: WindowLike,
-    deps: Omit<NotionRuntimeBridgeDeps, 'mcpClient'>,
+    deps: NotionRuntimeBridgeLaneGateDeps,
 ): Disposable | null {
     // Check feature flag
     if (windowLike.__BH_RUNTIME_BRIDGE_ENABLED__ !== true) {
@@ -139,9 +177,29 @@ export function startNotionRuntimeBridgeIfEnabled(
         return null;
     }
 
+    const mcpClient = rawMcpClient as NotionMcpClientLike;
+
+    // Slice I: Wire InMemoryToolRegistry if mcpClient supports getAvailableTools
+    let toolRegistry: InMemoryToolRegistry | undefined;
+    if (typeof mcpClient.getAvailableTools === 'function') {
+        const schemaValidator = new ObservationOnlySchemaValidator(deps.logger);
+        toolRegistry = new InMemoryToolRegistry({ schemaValidator });
+        deps.onRegistryCreated?.(toolRegistry);
+        // Async post-init populate — registry is empty until this resolves.
+        // Early tool calls will return tool_not_found (accepted race — Slice J blocker).
+        mcpClient.getAvailableTools().then(tools => {
+            toolRegistry!.populate(tools);
+        }).catch(err => {
+            deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools failed — registry remains empty', err);
+        });
+    } else {
+        deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools not available — skip registry wiring');
+    }
+
     const bridge = createNotionRuntimeBridge({
         ...deps,
-        mcpClient: rawMcpClient as NotionMcpClientLike,
+        mcpClient,
+        toolRegistry,
     });
     return bridge.start();
 }
