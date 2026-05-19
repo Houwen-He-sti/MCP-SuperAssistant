@@ -21,14 +21,15 @@
  * BH-4 TDD: T-BH-19..T-BH-lane-3
  */
 
-import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
-import { createNotionProviderAdapter } from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
-import { createToolCallLoop } from '../../../../../../../mcp-runtime/src/core/tool-call-loop.ts';
-import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
-import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
+import { createNotionProviderAdapter } from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
+import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
+import { createToolCallLoop } from '../../../../../../../mcp-runtime/src/core/tool-call-loop.ts';
+import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
+import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
 import { NotionAdapterBridgeHost } from './notion-adapter-bridge-host.ts';
 import { createNotionHostBindings, type NotionMcpClientLike } from './notion-host-bindings.ts';
+import { NotionRejectionHandler } from './notion-rejection-handler.ts';
 import { normalizeToolDescriptors } from './notion-tool-shape-adapter.ts';
 
 // ---------------------------------------------------------------------------
@@ -37,40 +38,40 @@ import { normalizeToolDescriptors } from './notion-tool-shape-adapter.ts';
 
 /** Minimal delegate needed from NotionAdapter (Layer 1). */
 export interface NotionAdapterDelegate {
-    insertText(text: string): Promise<boolean>;
-    submitForm(): Promise<boolean>;
+  insertText(text: string): Promise<boolean>;
+  submitForm(): Promise<boolean>;
 }
 
 export interface NotionRuntimeBridgeDeps {
-    adapter: NotionAdapterDelegate;
-    mcpClient: NotionMcpClientLike;
-    document: Document;
-    MutationObserver: typeof MutationObserver;
-    formatFunctionResult: (opts: {
-        callId: string;
-        name: string;
-        status: 'success' | 'error';
-        result: unknown;
-    }) => string;
-    logger?: Pick<Console, 'error' | 'warn'>;
-    /** Slice I: optional InMemoryToolRegistry for pre-flight tool validation. */
-    toolRegistry?: InMemoryToolRegistry;
+  adapter: NotionAdapterDelegate;
+  mcpClient: NotionMcpClientLike;
+  document: Document;
+  MutationObserver: typeof MutationObserver;
+  formatFunctionResult: (opts: {
+    callId: string;
+    name: string;
+    status: 'success' | 'error';
+    result: unknown;
+  }) => string;
+  logger?: Pick<Console, 'error' | 'warn'>;
+  /** Slice I: optional InMemoryToolRegistry for pre-flight tool validation. */
+  toolRegistry?: InMemoryToolRegistry;
 }
 
 export interface NotionRuntimeBridge {
-    start(): Disposable;
+  start(): Disposable;
 }
 
 /** Window-like object used by the lane gate helper (testable without real window). */
 export interface WindowLike {
-    __BH_RUNTIME_BRIDGE_ENABLED__?: boolean;
-    mcpClient?: unknown;
+  __BH_RUNTIME_BRIDGE_ENABLED__?: boolean;
+  mcpClient?: unknown;
 }
 
 /** Optional test seam: invoked with the created registry for evidence capture in tests. */
 export type NotionRuntimeBridgeLaneGateDeps = Omit<NotionRuntimeBridgeDeps, 'mcpClient'> & {
-    /** Slice I test seam — called with the created InMemoryToolRegistry (if any). */
-    onRegistryCreated?: (registry: InMemoryToolRegistry) => void;
+  /** Slice I test seam — called with the created InMemoryToolRegistry (if any). */
+  onRegistryCreated?: (registry: InMemoryToolRegistry) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -78,46 +79,48 @@ export type NotionRuntimeBridgeLaneGateDeps = Omit<NotionRuntimeBridgeDeps, 'mcp
 // ---------------------------------------------------------------------------
 
 class NotionRuntimeBridgeController implements NotionRuntimeBridge {
-    private readonly deps: NotionRuntimeBridgeDeps;
-    private disposable: Disposable | null = null;
+  private readonly deps: NotionRuntimeBridgeDeps;
+  private disposable: Disposable | null = null;
 
-    constructor(deps: NotionRuntimeBridgeDeps) {
-        this.deps = deps;
-    }
+  constructor(deps: NotionRuntimeBridgeDeps) {
+    this.deps = deps;
+  }
 
-    start(): Disposable {
-        // lifecycle guard: return existing disposable if already started
-        if (this.disposable) return this.disposable;
+  start(): Disposable {
+    // lifecycle guard: return existing disposable if already started
+    if (this.disposable) return this.disposable;
 
-        const bridgeHost = new NotionAdapterBridgeHost({
-            adapter: this.deps.adapter,
-            document: this.deps.document,
-            MutationObserver: this.deps.MutationObserver,
-        });
-        const providerAdapter = createNotionProviderAdapter({ host: bridgeHost, observationMode: 'host-split' });
-        const hostBindings = createNotionHostBindings({
-            mcpClient: this.deps.mcpClient,
-            formatFunctionResult: this.deps.formatFunctionResult,
-            logger: this.deps.logger,
-        });
-        const loop = createToolCallLoop({
-            adapter: providerAdapter,
-            hostBindings,
-            toolRegistry: this.deps.toolRegistry,
-        });
-        const inner = loop.start();
+    const bridgeHost = new NotionAdapterBridgeHost({
+      adapter: this.deps.adapter,
+      document: this.deps.document,
+      MutationObserver: this.deps.MutationObserver,
+    });
+    const providerAdapter = createNotionProviderAdapter({ host: bridgeHost, observationMode: 'host-split' });
+    const hostBindings = createNotionHostBindings({
+      mcpClient: this.deps.mcpClient,
+      formatFunctionResult: this.deps.formatFunctionResult,
+      logger: this.deps.logger,
+    });
+    const rejectionHandler = new NotionRejectionHandler(this.deps.formatFunctionResult);
+    const loop = createToolCallLoop({
+      adapter: providerAdapter,
+      hostBindings,
+      toolRegistry: this.deps.toolRegistry,
+      rejectionHandler,
+    });
+    const inner = loop.start();
 
-        let disposed = false;
-        this.disposable = {
-            dispose: async () => {
-                if (disposed) return; // safe double-dispose
-                disposed = true;
-                await inner.dispose();
-                this.disposable = null;
-            },
-        };
-        return this.disposable;
-    }
+    let disposed = false;
+    this.disposable = {
+      dispose: async () => {
+        if (disposed) return; // safe double-dispose
+        disposed = true;
+        await inner.dispose();
+        this.disposable = null;
+      },
+    };
+    return this.disposable;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +128,7 @@ class NotionRuntimeBridgeController implements NotionRuntimeBridge {
 // ---------------------------------------------------------------------------
 
 export function createNotionRuntimeBridge(deps: NotionRuntimeBridgeDeps): NotionRuntimeBridge {
-    return new NotionRuntimeBridgeController(deps);
+  return new NotionRuntimeBridgeController(deps);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,44 +143,47 @@ export function createNotionRuntimeBridge(deps: NotionRuntimeBridgeDeps): Notion
 // ---------------------------------------------------------------------------
 
 export function startNotionRuntimeBridgeIfEnabled(
-    windowLike: WindowLike,
-    deps: NotionRuntimeBridgeLaneGateDeps,
+  windowLike: WindowLike,
+  deps: NotionRuntimeBridgeLaneGateDeps,
 ): Disposable | null {
-    // Check feature flag
-    if (windowLike.__BH_RUNTIME_BRIDGE_ENABLED__ !== true) {
-        return null;
-    }
+  // Check feature flag
+  if (windowLike.__BH_RUNTIME_BRIDGE_ENABLED__ !== true) {
+    return null;
+  }
 
-    // Validate mcpClient (fail-closed if absent or malformed)
-    const rawMcpClient = windowLike.mcpClient;
-    if (!rawMcpClient || typeof (rawMcpClient as Record<string, unknown>).callTool !== 'function') {
-        deps.logger?.warn?.('[NotionRuntimeBridge] mcpClient not available — BH path disabled');
-        return null;
-    }
+  // Validate mcpClient (fail-closed if absent or malformed)
+  const rawMcpClient = windowLike.mcpClient;
+  if (!rawMcpClient || typeof (rawMcpClient as Record<string, unknown>).callTool !== 'function') {
+    deps.logger?.warn?.('[NotionRuntimeBridge] mcpClient not available — BH path disabled');
+    return null;
+  }
 
-    const mcpClient = rawMcpClient as NotionMcpClientLike;
+  const mcpClient = rawMcpClient as NotionMcpClientLike;
 
-    // Slice I: Wire InMemoryToolRegistry if mcpClient supports getAvailableTools
-    let toolRegistry: InMemoryToolRegistry | undefined;
-    if (typeof mcpClient.getAvailableTools === 'function') {
-        const schemaValidator = new CfWorkerSchemaValidatorAdapter(new CfWorkerJsonSchemaValidator());
-        toolRegistry = new InMemoryToolRegistry({ schemaValidator });
-        deps.onRegistryCreated?.(toolRegistry);
-        // Async post-init populate — registry is empty until this resolves.
-        // Early tool calls will return tool_not_found (accepted race — Slice J blocker).
-        mcpClient.getAvailableTools().then(tools => {
-            toolRegistry!.populate(normalizeToolDescriptors(tools));
-        }).catch(err => {
-            deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools failed — registry remains empty', err);
-        });
-    } else {
-        deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools not available — skip registry wiring');
-    }
+  // Slice I: Wire InMemoryToolRegistry if mcpClient supports getAvailableTools
+  let toolRegistry: InMemoryToolRegistry | undefined;
+  if (typeof mcpClient.getAvailableTools === 'function') {
+    const schemaValidator = new CfWorkerSchemaValidatorAdapter(new CfWorkerJsonSchemaValidator());
+    toolRegistry = new InMemoryToolRegistry({ schemaValidator });
+    deps.onRegistryCreated?.(toolRegistry);
+    // Async post-init populate — registry is empty until this resolves.
+    // Early tool calls will return tool_not_found (accepted race — Slice J blocker).
+    mcpClient
+      .getAvailableTools()
+      .then(tools => {
+        toolRegistry!.populate(normalizeToolDescriptors(tools));
+      })
+      .catch(err => {
+        deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools failed — registry remains empty', err);
+      });
+  } else {
+    deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools not available — skip registry wiring');
+  }
 
-    const bridge = createNotionRuntimeBridge({
-        ...deps,
-        mcpClient,
-        toolRegistry,
-    });
-    return bridge.start();
+  const bridge = createNotionRuntimeBridge({
+    ...deps,
+    mcpClient,
+    toolRegistry,
+  });
+  return bridge.start();
 }
