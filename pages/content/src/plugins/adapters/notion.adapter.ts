@@ -154,13 +154,13 @@ export class NotionAdapter extends BaseAdapterPlugin {
         this.setupMessageObserver();
       }
 
-      // Enable stream bridge on any native AI route.
-      // Separated from isNativeAiAgent() because the submit button may not yet
-      // be in the DOM during initial activation; the bridge must be ready before
-      // Notion AI sends the first response.
-      if (isNativeAiRoute(window.location.pathname)) {
-        enableStreamBridgeOnWindow(window);
-      }
+      // Enable stream bridge for all supported Notion AI pages.
+      // Called unconditionally within isSupported() block — no isNativeAiRoute()
+      // guard because that function always returns true (pre-existing design: it is
+      // only a URL hint, not a definitive gate). isSupported() is the real gate.
+      // Separated from isNativeAiAgent() to avoid timing issues: the submit button
+      // may not yet be in the DOM when activate() first runs.
+      enableStreamBridgeOnWindow(window);
     } else {
       this.context.logger.debug('Not on supported page, skipping DOM/UI setup');
     }

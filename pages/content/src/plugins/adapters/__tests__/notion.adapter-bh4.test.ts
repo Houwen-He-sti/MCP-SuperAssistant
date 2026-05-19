@@ -9,6 +9,18 @@
  * `enableStreamBridgeOnWindow(win)` so it can be unit-tested without
  * instantiating the full adapter class.
  *
+ * Integration note (P1 deferred — T-BH-4-INTEG):
+ *   Testing the `activate()` call site directly would require mocking the full
+ *   PluginContext, DOM APIs, eventBus, and React-hook store state used by
+ *   NotionAdapter. That test infrastructure does not yet exist in this test
+ *   harness. The activate() wiring is instead covered by two complementary
+ *   evidence sources:
+ *     (1) Source inspection: `activate()` unconditionally calls
+ *         `enableStreamBridgeOnWindow(window)` inside the `isSupported()` block.
+ *     (2) Smoke test: L3 PASS — proxy log confirms `committee-bridge.echo`
+ *         was called end-to-end (see docs/evidence/l3-smoke-test-notion-local-review-2026-05-19.md).
+ *   A full activate() integration test is tracked as a follow-up item.
+ *
  * Run:
  *   node --test --experimental-strip-types \
  *     src/plugins/adapters/__tests__/notion.adapter-bh4.test.ts
