@@ -670,6 +670,8 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     const { createToolCallLoop } = await import('../../../../../../../mcp-runtime/src/core/tool-call-loop.ts');
     const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
     const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
+    const { BridgeJsonlParser } = await import('../../../../../../../mcp-runtime/src/core/tool-call-parser.ts');
+    const { assertParsedCalls } = await import('../../../../../../../mcp-runtime/tests/helpers/parse-assertions.ts');
 
     const { adapter, insertedTexts, fire } = makeControllableAdapter();
     const registry = new InMemoryToolRegistry();
@@ -688,7 +690,10 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     const disposable = loop.start();
 
     // Fire a tool call for an unknown tool
-    fire(makeToolCallJsonl('call-x1', 'unknown_tool'));
+    // T-LOOP-L-02 preflight: assert bare JSONL guard — confirms message is fenced and parsed correctly
+    const _msgL02 = makeToolCallJsonl('call-x1', 'unknown_tool');
+    assertParsedCalls(new BridgeJsonlParser().parse(_msgL02), 1, 'T-LOOP-L-02');
+    fire(_msgL02);
 
     // Wait for async handler to complete
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -711,6 +716,8 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
     const { CfWorkerJsonSchemaValidator } = await import('@modelcontextprotocol/sdk/validation/cfworker');
     const { CfWorkerSchemaValidatorAdapter } = await import('../notion/cfworker-schema-validator-adapter.ts');
+    const { BridgeJsonlParser } = await import('../../../../../../../mcp-runtime/src/core/tool-call-parser.ts');
+    const { assertParsedCalls } = await import('../../../../../../../mcp-runtime/tests/helpers/parse-assertions.ts');
 
     const { adapter, insertedTexts, fire } = makeControllableAdapter();
 
@@ -759,6 +766,8 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     ].join('\n');
     const message = '```jsonl\n' + lines + '\n```';
 
+    // T-LOOP-L-03 preflight: assert bare JSONL guard — confirms message is fenced and contains 2 calls
+    assertParsedCalls(new BridgeJsonlParser().parse(message), 2, 'T-LOOP-L-03 same-message N=2');
     fire(message);
 
     await new Promise(resolve => setTimeout(resolve, 50));
