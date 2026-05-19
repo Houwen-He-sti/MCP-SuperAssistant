@@ -371,9 +371,10 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
     });
 
     it('T-LOOP-I-01b: after async populate resolves, registry.listTools() returns descriptors', async () => {
+        // Slice J1: fixtures use McpClientToolShape (snake_case) to reflect real McpClient output
         const tools = [
             { name: 'echo', description: 'echo tool' },
-            { name: 'search', description: 'search tool', inputSchema: { type: 'object', properties: {} } },
+            { name: 'search', description: 'search tool', input_schema: { type: 'object', properties: {} } },
         ];
         let capturedRegistry: InMemoryToolRegistry | undefined;
         const windowLike = {
@@ -417,17 +418,21 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
     });
 
     it('T-LOOP-I-02: validateArgs on known tool with schemaValidator returns ok (ObservationOnly bypasses schema)', async () => {
+        // Slice J1: fixture uses McpClientToolShape (snake_case input_schema)
+        // normalizeToolDescriptors converts input_schema → inputSchema before populate
         const tools = [
-            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
+            { name: 'echo', input_schema: { type: 'object', properties: { message: { type: 'string' } } } },
         ];
         const registry = new InMemoryToolRegistry({
             schemaValidator: {
                 validate: (_schema, _args) => ({ ok: true }),
             },
         });
-        registry.populate(tools as Parameters<typeof registry.populate>[0]);
+        // Simulate what notion-runtime-bridge.ts does: normalize before populate
+        const { normalizeToolDescriptors } = await import('../notion/notion-tool-shape-adapter.ts');
+        registry.populate(normalizeToolDescriptors(tools));
         const result = registry.validateArgs('echo', { message: 'test' });
-        assert.equal(result.ok, true, 'Known tool with inputSchema + ObservationOnly validator must return ok');
+        assert.equal(result.ok, true, 'Known tool with inputSchema + schemaValidator must return ok');
     });
 
     it('T-LOOP-I-03: validateArgs on unknown tool returns tool_not_found', async () => {
@@ -441,10 +446,11 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
     it('T-LOOP-I-07: ObservationOnlySchemaValidator logs bypass when wired via startNotionRuntimeBridgeIfEnabled (integration)', async () => {
         // This test verifies the actual ObservationOnlySchemaValidator from notion-runtime-bridge.ts
         // is wired into the registry and logs bypass when validateArgs is called on a schema-bearing tool.
+        // Slice J1: fixture uses McpClientToolShape (snake_case input_schema) reflecting real McpClient shape
         const warnings: string[] = [];
         let capturedRegistry: InMemoryToolRegistry | undefined;
         const tools = [
-            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
+            { name: 'echo', input_schema: { type: 'object', properties: { message: { type: 'string' } } } },
         ];
         const windowLike = {
             __BH_RUNTIME_BRIDGE_ENABLED__: true,
@@ -490,4 +496,50 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
         assert.equal((result as { ok: false; code: string }).code, 'tool_not_found',
             'Before populate resolves, all tools are unknown (accepted race — Slice J blocker)');
     });
+
+    it('T-LOOP-J1-01: after populate with snake_case input_schema, registry.describeTool returns inputSchema (not undefined)', async () => {
+        // Slice J1: verifies normalizeToolDescriptors is called before populate in the real bridge wiring.
+        // Given: McpClient returns snake_case input_schema
+        // Expected: registry.describeTool returns descriptor with camelCase inputSchema populated
+        let capturedRegistry: InMemoryToolRegistry | undefined;
+        const tools = [
+            {
+                name: 'echo',
+                description: 'echo tool',
+                input_schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] },
+            },
+        ];
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => tools,
+            },
+        };
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, {
+            ...makeBridgeDeps(),
+            onRegistryCreated: (r: InMemoryToolRegistry) => { capturedRegistry = r; },
+        });
+        assert.notEqual(result, null, 'Bridge must start');
+
+        // Wait for async populate to resolve
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        assert.notEqual(capturedRegistry, undefined, 'Registry must be created');
+        const descriptor = await capturedRegistry!.describeTool('echo');
+        assert.notEqual(descriptor, undefined, 'Tool must be found in registry');
+        assert.notEqual(
+            descriptor!.inputSchema,
+            undefined,
+            'inputSchema MUST NOT be undefined after normalize — shape adapter must convert input_schema → inputSchema'
+        );
+        assert.deepEqual(
+            descriptor!.inputSchema,
+            { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] },
+            'inputSchema must exactly match the original input_schema value'
+        );
+
+        await result!.dispose();
+    });
+
 });
