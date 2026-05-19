@@ -478,3 +478,49 @@ describe('T-DOM-09: repeated init → DOM listener cleanup (no duplicate)', () =
     });
 });
 
+// ============================================================================
+// T-DOM-10 (P1-3 GPT 5.5 review): same callId dispatched twice → callTool once
+// Regression: MutationObserver double-fire with same callId must not double-execute.
+// Guard: executionGuardStore.reserve() blocks second execution with same key.
+// ============================================================================
+describe('T-DOM-10: same callId twice → callTool exactly once (dedup regression)', () => {
+    beforeEach(() => {
+        _registeredDomTriggerListeners.length = 0;
+        _domExecToolCalls.length = 0;
+        executionGuardStore.clear();
+        (globalThis as any).mcpClient.isReady = () => true;
+        (globalThis as any).mcpClient.callTool = async (
+            name: string,
+            params: Record<string, unknown>,
+        ): Promise<unknown> => {
+            _domExecToolCalls.push({ name, params });
+            return { content: [{ type: 'text', text: 'echo-result' }] };
+        };
+    });
+
+    it('same dom_tool_invocation callId dispatched twice → mcpClient.callTool called exactly once', async () => {
+        initStreamToolBridge({ enabled: true });
+
+        const detail = {
+            name: 'committee-bridge.echo',
+            callId: 't-dom-10-dedup-001',
+            arguments: '{"message":"dedup-test"}',
+        };
+
+        // Dispatch twice with identical callId (simulates MutationObserver double-fire)
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', { detail }));
+        window.dispatchEvent(new CustomEvent('mcp-superassistant:dom-tool-invocation', { detail }));
+
+        // Wait for both async handlers to complete
+        await new Promise<void>(resolve => setTimeout(resolve, 120));
+
+        assert.strictEqual(
+            _domExecToolCalls.length,
+            1,
+            `Expected callTool called ONCE despite 2 dispatches with same callId. ` +
+                `Got ${_domExecToolCalls.length}. Fix: executionGuardStore.reserve() must block second call.`,
+        );
+        assert.strictEqual(_domExecToolCalls[0].name, 'committee-bridge.echo');
+    });
+});
+
