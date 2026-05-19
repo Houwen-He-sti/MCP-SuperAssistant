@@ -558,12 +558,12 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
     await result!.dispose();
   });
 
-  it('T-LOOP-L-01: NotionRejectionHandler N=2 callId symmetry — second rejection does not cross-contaminate first', async () => {
+  it('T-LOOP-L-01: NotionRejectionHandler N=2 callId symmetry — handler isolation (N=2 second-position identity)', async () => {
     // Slice L: Verify NotionRejectionHandler callId identity is correct for N=2 scenario.
     // L9+L10 protocol: each error path at second position must preserve its own identity.
     //
-    // This test exercises the handler in isolation (not via full ToolCallLoop DOM path —
-    // that is E2E scope beyond Slice L). It confirms N=2 callId symmetry directly.
+    // This test exercises the handler in isolation (handler-level, not via full ToolCallLoop path).
+    // T-LOOP-L-02 and T-LOOP-L-03 cover the real validateArgs→handler→insertText integration path.
     const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
     const formatterCalls: Array<{ callId: string; name: string; status: string; result: unknown }> = [];
 
@@ -604,5 +604,146 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
     assert.equal(formatterCalls[1].callId, 'call-c2', 'second formatter call must use c2');
     const r2 = formatterCalls[1].result as { code: string; validationMessage: string };
     assert.ok(r2.validationMessage.length > 0, 'N=2: validationMessage must be present for LLM self-correction');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice L — ToolCallLoop integration: validateArgs reject → NotionRejectionHandler → insertText
+// ---------------------------------------------------------------------------
+// These tests prove the real path:
+//   validateArgs() reject → loop.handleRejection() → NotionRejectionHandler → adapter.insertText(error ToolResult)
+// They use createToolCallLoop directly with a controllable in-process adapter (no DOM/MO).
+// The controllable adapter captures insertText() calls so we can assert on the injected content.
+// ---------------------------------------------------------------------------
+
+describe('Slice L — rejection path integration (validateArgs→handler→insertText)', () => {
+  // Inline controllable ProviderAdapter compatible with createToolCallLoop
+  function makeControllableAdapter() {
+    const insertedTexts: string[] = [];
+    let _callback: ((msg: { content: string; isComplete: boolean; timestamp: number }) => void | Promise<void>) | null = null;
+
+    const adapter = {
+      id: 'notion-test',
+      isSupported: () => true,
+      insertText: async (text: string): Promise<{ ok: true }> => {
+        insertedTexts.push(text);
+        return { ok: true };
+      },
+      submit: async (): Promise<{ ok: true }> => ({ ok: true }),
+      isStreaming: () => false,
+      observeAssistantMessages: (cb: (msg: { content: string; isComplete: boolean; timestamp: number }) => void | Promise<void>) => {
+        _callback = cb;
+        return { dispose: () => { _callback = null; } };
+      },
+    };
+
+    function fire(content: string) {
+      if (_callback) void _callback({ content, isComplete: true, timestamp: Date.now() });
+    }
+
+    return { adapter, insertedTexts, fire };
+  }
+
+  // Minimal HostBindings: onToolCallDetect will NOT be reached for rejected calls
+  function makeHostBindings() {
+    return {
+      onToolCallDetect: async () => ({ callId: 'unreachable', formattedResponse: '', success: false }),
+      onAdapterError: (_e: unknown) => {},
+    };
+  }
+
+  // JSONL helper: produce a complete function_call message wrapped in ```jsonl fence
+  function makeToolCallJsonl(callId: string, toolName: string, args: Record<string, unknown> = {}): string {
+    const lines: string[] = [];
+    lines.push(JSON.stringify({ type: 'function_call_start', name: toolName, call_id: callId }));
+    // Use key-value parameter format (parser expects 'key' not 'name')
+    for (const [k, v] of Object.entries(args)) {
+      lines.push(JSON.stringify({ type: 'parameter', key: k, value: v }));
+    }
+    lines.push(JSON.stringify({ type: 'function_call_end', call_id: callId }));
+    return '```jsonl\n' + lines.join('\n') + '\n```';
+  }
+
+  it('T-LOOP-L-02: tool_not_found → rejectionHandler → insertText called with error ToolResult containing callId', async () => {
+    // Real path: unknown tool → validateArgs() returns tool_not_found
+    //            → NotionRejectionHandler.onToolCallReject() → adapter.insertText(error)
+    const { createToolCallLoop } = await import('../../../../../../../mcp-runtime/src/core/tool-call-loop.ts');
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+    const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
+
+    const { adapter, insertedTexts, fire } = makeControllableAdapter();
+    const registry = new InMemoryToolRegistry();
+    registry.populate([{ name: 'echo' }]); // 'unknown_tool' is NOT in registry
+
+    const formatter = (opts: { callId: string; name: string; status: 'success' | 'error'; result: unknown }) =>
+      `<tool_result callId="${opts.callId}" status="${opts.status}">${JSON.stringify(opts.result)}</tool_result>`;
+
+    const loop = createToolCallLoop({
+      adapter: adapter as Parameters<typeof createToolCallLoop>[0]['adapter'],
+      hostBindings: makeHostBindings() as Parameters<typeof createToolCallLoop>[0]['hostBindings'],
+      toolRegistry: registry,
+      rejectionHandler: new NotionRejectionHandler(formatter),
+    });
+
+    const disposable = loop.start();
+
+    // Fire a tool call for an unknown tool
+    fire(makeToolCallJsonl('call-x1', 'unknown_tool'));
+
+    // Wait for async handler to complete
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    disposable.dispose();
+
+    assert.equal(insertedTexts.length, 1, 'insertText must be called exactly once for the rejection');
+    assert.ok(insertedTexts[0].includes('call-x1'), 'insertText content must reference the callId call-x1');
+    assert.ok(insertedTexts[0].includes('error'), 'insertText content must indicate error status');
+  });
+
+  it('T-LOOP-L-03: N=2 callId symmetry — two rejections (tool_not_found, args_invalid) each inject error ToolResult with correct distinct callIds', async () => {
+    // L9+L10 protocol: N=2 integration variant.
+    // Real path through createToolCallLoop with registry + rejectionHandler.
+    const { createToolCallLoop } = await import('../../../../../../../mcp-runtime/src/core/tool-call-loop.ts');
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+    const { NotionRejectionHandler } = await import('../notion/notion-rejection-handler.ts');
+    const { CfWorkerJsonSchemaValidator } = await import('@modelcontextprotocol/sdk/validation/cfworker');
+    const { CfWorkerSchemaValidatorAdapter } = await import('../notion/cfworker-schema-validator-adapter.ts');
+
+    const { adapter, insertedTexts, fire } = makeControllableAdapter();
+    const registry = new InMemoryToolRegistry();
+    const schema = { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] };
+    // 'echo' is registered with real schema validator so args_invalid can be triggered
+    registry.populate(
+      [{ name: 'echo', inputSchema: schema }],
+      new CfWorkerSchemaValidatorAdapter({ getValidator: (s) => new CfWorkerJsonSchemaValidator(s as Record<string, unknown>) }),
+    );
+
+    const formatter = (opts: { callId: string; name: string; status: 'success' | 'error'; result: unknown }) =>
+      `<tool_result callId="${opts.callId}" status="${opts.status}">${JSON.stringify(opts.result)}</tool_result>`;
+
+    const loop = createToolCallLoop({
+      adapter: adapter as Parameters<typeof createToolCallLoop>[0]['adapter'],
+      hostBindings: makeHostBindings() as Parameters<typeof createToolCallLoop>[0]['hostBindings'],
+      toolRegistry: registry,
+      rejectionHandler: new NotionRejectionHandler(formatter),
+    });
+
+    const disposable = loop.start();
+
+    // N=1: unknown tool → tool_not_found
+    fire(makeToolCallJsonl('call-y1', 'unknown_tool'));
+    // N=2: known tool but missing required arg → args_invalid
+    fire(makeToolCallJsonl('call-y2', 'echo', {})); // missing 'message' field
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    disposable.dispose();
+
+    assert.equal(insertedTexts.length, 2, 'insertText must be called once per rejection (N=2)');
+    assert.ok(insertedTexts[0].includes('call-y1'), 'First insertText must reference call-y1');
+    assert.ok(!insertedTexts[0].includes('call-y2'), 'First insertText must NOT reference call-y2');
+    assert.ok(insertedTexts[1].includes('call-y2'), 'Second insertText must reference call-y2');
+    assert.ok(!insertedTexts[1].includes('call-y1'), 'Second insertText must NOT reference call-y1');
+    assert.ok(insertedTexts[1].includes('error'), 'Second insertText must indicate error status');
   });
 });
