@@ -96,6 +96,38 @@ describe('notion.adapter.ts source contract', () => {
       'enableStreamBridgeOnWindow(window) must appear inside or after the isSupported() guard',
     );
   });
+
+  it('T-BH-4-05: enableStreamBridgeOnWindow(window) is guarded by !bhBridgeDisposable and called after startNotionRuntimeBridgeIfEnabled', () => {
+    const adapterSrc = readFileSync(
+      resolve(__dir, '../notion.adapter.ts'),
+      'utf-8',
+    );
+
+    // Locate the activate() method body
+    const activateIdx = adapterSrc.indexOf('async activate()');
+    assert.ok(activateIdx !== -1, 'activate() must exist');
+    const activateBody = adapterSrc.slice(activateIdx, activateIdx + 4000);
+
+    // startNotionRuntimeBridgeIfEnabled must precede enableStreamBridgeOnWindow
+    const bh4CallIdx = activateBody.indexOf('startNotionRuntimeBridgeIfEnabled(');
+    const bridgeCallIdx = activateBody.indexOf('enableStreamBridgeOnWindow(window)');
+    assert.ok(bh4CallIdx !== -1, 'startNotionRuntimeBridgeIfEnabled must be called in activate()');
+    assert.ok(bridgeCallIdx !== -1, 'enableStreamBridgeOnWindow(window) must be called in activate()');
+    assert.ok(
+      bh4CallIdx < bridgeCallIdx,
+      'startNotionRuntimeBridgeIfEnabled must precede enableStreamBridgeOnWindow — BH-4 bridge assignment must be done before stream bridge enable gate check',
+    );
+
+    // The stream bridge call must be wrapped in if (!this.bhBridgeDisposable)
+    // Check that the guard appears between bh4CallIdx and bridgeCallIdx
+    const guardPattern = 'if (!this.bhBridgeDisposable)';
+    const guardIdx = activateBody.indexOf(guardPattern, bh4CallIdx);
+    assert.ok(guardIdx !== -1, 'bhBridgeDisposable guard must exist after BH-4 bridge assignment');
+    assert.ok(
+      guardIdx < bridgeCallIdx,
+      'enableStreamBridgeOnWindow(window) must appear inside the !bhBridgeDisposable guard',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
