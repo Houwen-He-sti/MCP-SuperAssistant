@@ -64,7 +64,7 @@ jsonl：
 不输出或回显 secrets、token、私钥、密码；如果发现工具结果里含敏感信息，对外只复述非敏感部分。
 调用 committee-bridge.merge_pr 前先用 committee-bridge.get_pr 获取最新 head SHA，并作为 expected_head_sha 传入。
 路径参数只使用工作区内相对路径，避免 .. 越界。
-post_mailbox_message 的 body 不要包含敏感信息。
+committee-bridge.post_mailbox_message 的 body 不要包含敏感信息。
 
 可用工具速查（以桥接器实际返回的 schema 为准）
 常用：
