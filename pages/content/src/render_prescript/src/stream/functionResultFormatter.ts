@@ -78,7 +78,12 @@ export function formatFunctionResult(opts: FormatResultOptions): string {
   // Escaping ]]> expands to 16 chars; truncating after escaping can cut the
   // expansion in half and leave malformed XML inside the CDATA block.
   if (body.length > MAX_BODY_LENGTH) {
-    body = body.slice(0, MAX_BODY_LENGTH) + '\n[truncated]';
+    let limit = MAX_BODY_LENGTH;
+    // Avoid splitting a UTF-16 surrogate pair (e.g., emoji).
+    if (body.charCodeAt(limit - 1) >= 0xD800 && body.charCodeAt(limit - 1) <= 0xDBFF) {
+      limit -= 1;
+    }
+    body = body.slice(0, limit) + '\n[truncated]';
   }
 
   // Escape CDATA-breaking sequences after truncation.

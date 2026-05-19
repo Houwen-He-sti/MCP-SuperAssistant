@@ -5,7 +5,7 @@ import type { AdapterCapability, PluginContext } from '../plugin-types';
 import { BaseAdapterPlugin } from './base.adapter';
 import { NOTION_CHAT_CONTENT_SELECTOR } from './notion.adapter.selectors';
 import { choosePromptForFirstConversation, getEnabledToolDefinitions } from './notion.bridge-prompt';
-// TODO(formatter-extraction): direct coupling to render_prescript — resolved in formatter-extraction-bh-path PR
+// Architecture: BH path uses mcp-runtime formatter; render_prescript copy retained for streamToolBridge.ts
 import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { formatFunctionResult } from '../../../../../../mcp-runtime/src/core/function-result-formatter.ts';
 import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
