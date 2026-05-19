@@ -21,6 +21,7 @@ import type {
     ErrorPayload,
 } from '../../../../../../../mcp-runtime/src/bridge/host-bindings.ts';
 import type { ToolCallPayload } from '../../../../../../../mcp-runtime/src/core/tool-call-parser.ts';
+import type { McpClientToolShape } from './notion-tool-shape-adapter.ts';
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -31,10 +32,11 @@ export interface NotionMcpClientLike {
     /** Optional — if absent, callTool is called unconditionally (it will throw if not connected). */
     isReady?: () => boolean;
     /**
-     * Optional — Slice I: returns available tool descriptors for InMemoryToolRegistry population.
+     * Optional — Slice I: returns available tool descriptors in McpClient native shape (snake_case).
+     * Caller (notion-runtime-bridge.ts) must run normalizeToolDescriptors() before populate().
      * If absent, registry wiring is skipped (warn logged, loop started without toolRegistry).
      */
-    getAvailableTools?: () => Promise<Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>>;
+    getAvailableTools?: () => Promise<McpClientToolShape[]>;
 }
 
 export interface NotionHostBindingsDeps {

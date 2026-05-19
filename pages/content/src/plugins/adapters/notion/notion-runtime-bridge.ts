@@ -29,6 +29,7 @@ import type { SchemaValidatorPort } from '../../../../../../../mcp-runtime/src/c
 import type { RuntimeResult } from '../../../../../../../mcp-runtime/src/bridge/runtime-result.ts';
 import { NotionAdapterBridgeHost } from './notion-adapter-bridge-host.ts';
 import { createNotionHostBindings, type NotionMcpClientLike } from './notion-host-bindings.ts';
+import { normalizeToolDescriptors } from './notion-tool-shape-adapter.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -188,7 +189,7 @@ export function startNotionRuntimeBridgeIfEnabled(
         // Async post-init populate — registry is empty until this resolves.
         // Early tool calls will return tool_not_found (accepted race — Slice J blocker).
         mcpClient.getAvailableTools().then(tools => {
-            toolRegistry!.populate(tools);
+            toolRegistry!.populate(normalizeToolDescriptors(tools));
         }).catch(err => {
             deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools failed — registry remains empty', err);
         });
