@@ -330,6 +330,7 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
 
     it('T-LOOP-I-06: BH flag ON + mcpClient without getAvailableTools → warn logged, loop started WITHOUT toolRegistry', async () => {
         const warnings: string[] = [];
+        let registryCreated = false;
         const windowLike = {
             __BH_RUNTIME_BRIDGE_ENABLED__: true,
             mcpClient: {
@@ -344,11 +345,13 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
                 warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
                 error: (_msg: string, ..._rest: unknown[]) => {},
             },
+            onRegistryCreated: () => { registryCreated = true; },
         };
         const result = startNotionRuntimeBridgeIfEnabled(windowLike, deps);
         assert.notEqual(result, null, 'Loop must be started even without getAvailableTools');
         const warnLogged = warnings.some(w => w.includes('getAvailableTools'));
         assert.equal(warnLogged, true, 'Must warn when getAvailableTools is absent');
+        assert.equal(registryCreated, false, 'onRegistryCreated must NOT be called when getAvailableTools is absent');
         await result!.dispose();
     });
 
@@ -435,21 +438,47 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
         assert.equal((result as { ok: false; code: string }).code, 'tool_not_found');
     });
 
-    it('T-LOOP-I-07: ObservationOnlySchemaValidator logs bypass when tool with inputSchema is validated', () => {
-        const bypassLog: Array<{ schemaKeys: string[]; argsType: string }> = [];
-        const observationOnlyValidator = {
-            validate: (schema: Record<string, unknown>, args: unknown): { ok: true } => {
-                bypassLog.push({ schemaKeys: Object.keys(schema), argsType: typeof args });
-                return { ok: true };
+    it('T-LOOP-I-07: ObservationOnlySchemaValidator logs bypass when wired via startNotionRuntimeBridgeIfEnabled (integration)', async () => {
+        // This test verifies the actual ObservationOnlySchemaValidator from notion-runtime-bridge.ts
+        // is wired into the registry and logs bypass when validateArgs is called on a schema-bearing tool.
+        const warnings: string[] = [];
+        let capturedRegistry: InMemoryToolRegistry | undefined;
+        const tools = [
+            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
+        ];
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => tools,
             },
         };
-        const registry = new InMemoryToolRegistry({ schemaValidator: observationOnlyValidator });
-        registry.populate([
-            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
-        ] as Parameters<typeof registry.populate>[0]);
-        registry.validateArgs('echo', { message: 'hi' });
-        assert.equal(bypassLog.length, 1, 'Bypass must be logged once');
-        assert.ok(bypassLog[0].schemaKeys.includes('type') || bypassLog[0].schemaKeys.includes('properties'), 'Schema keys must be captured');
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, {
+            ...makeBridgeDeps(),
+            logger: {
+                warn: (msg: string, ...rest: unknown[]) => warnings.push(
+                    [msg, ...rest.map(r => typeof r === 'object' ? JSON.stringify(r) : String(r))].join(' ')
+                ),
+                error: (_msg: string, ..._rest: unknown[]) => {},
+            },
+            onRegistryCreated: (r: InMemoryToolRegistry) => { capturedRegistry = r; },
+        });
+        assert.notEqual(result, null);
+
+        // Wait for async populate
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        assert.notEqual(capturedRegistry, undefined, 'Registry must be created and exposed via onRegistryCreated');
+
+        // Trigger validateArgs on schema-bearing tool — ObservationOnlySchemaValidator must log bypass
+        capturedRegistry!.validateArgs('echo', { message: 'hi' });
+
+        const bypassLogged = warnings.some(w =>
+            w.includes('ObservationOnlySchemaValidator') || w.includes('schema validation bypassed')
+        );
+        assert.equal(bypassLogged, true, 'Actual ObservationOnlySchemaValidator wired via bridge must log bypass');
+
+        await result!.dispose();
     });
 
     it('T-LOOP-I-08: during async populate pending window, validateArgs returns tool_not_found (accepted race)', () => {

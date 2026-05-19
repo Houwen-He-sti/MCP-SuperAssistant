@@ -99,9 +99,23 @@ class ObservationOnlySchemaValidator implements SchemaValidatorPort {
 
 ---
 
-## 4. ToolDescriptor Shape (Live Evidence — TODO)
+## 4. ToolDescriptor Shape (Live Evidence — Deferred to Slice J)
 
-**Status: Pending — requires BH flag to be enabled and a real Notion AI session with MCP proxy running.**
+**Status: Slice J blocker — requires BH flag to be manually enabled and a real Notion AI session with MCP proxy running.**
+
+This evidence CANNOT be captured in Slice I because:
+1. BH flag is OFF by default (no production traffic through registry)
+2. `getAvailableTools()` is a new interface — no existing MCP proxy implementation known to return it
+3. Slice I's scope is the wiring architecture, not live tool catalog verification
+
+**Acceptance criteria downgrade:** Evidence-01 in the plan was over-scoped for Slice I. Live tool shape capture is formally deferred to Slice J with these explicit blockers:
+
+### Slice J Prerequisites (from Slice I evidence)
+1. Implement `getAvailableTools()` on the MCP proxy / window.mcpClient binding  
+2. Capture: tool names, `inputSchema` presence ratio, schema complexity (object/nested/array/$ref)
+3. Verify `ObservationOnlySchemaValidator` bypass logs are produced at runtime
+4. Replace `ObservationOnlySchemaValidator` with concrete CSP-safe validator
+5. Then enable `__BH_RUNTIME_BRIDGE_ENABLED__`
 
 Shape expected from MCP proxy tools/list:
 ```ts
@@ -111,17 +125,6 @@ type ToolDescriptor = {
     inputSchema?: Record<string, unknown>;  // JSON Schema
 }
 ```
-
-Known Notion MCP tools (from committee-bridge-mcp schema):
-- `committee-bridge.echo` — has `inputSchema` with `message` property
-- Additional tools depend on MCP server configuration
-
-**Action required:** When BH flag is manually enabled for testing, capture:
-1. Full `getAvailableTools()` output shape
-2. `inputSchema` presence ratio (how many tools have schemas)
-3. Schema complexity (object/nested/array/$ref patterns)
-
-This evidence is needed before Slice J (BH flag activation).
 
 ---
 
