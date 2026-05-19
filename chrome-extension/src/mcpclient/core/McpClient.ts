@@ -13,6 +13,7 @@ import type { TransportType, ITransportPlugin, PluginConfig } from '../types/plu
 import type { Primitive, NormalizedTool, PrimitivesResponse } from '../types/primitives.js';
 import type { AllEvents } from '../types/events.js';
 import { createLogger } from '@extension/shared/lib/logger';
+import { createExtensionClientOptions } from './jsonSchemaValidator.js';
 import { analyticsService } from '../../../utils/analytics-service.js';
 
 
@@ -186,7 +187,7 @@ export class McpClient extends EventEmitter<AllEvents> {
           name: `mcp-client-${type}`,
           version: '1.0.0',
         },
-        { capabilities: {} },
+        createExtensionClientOptions(),
       );
 
       // Set up logging notification handler
