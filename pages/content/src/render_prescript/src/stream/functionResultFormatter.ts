@@ -74,13 +74,15 @@ export function formatFunctionResult(opts: FormatResultOptions): string {
 
   let body = serializeResult(result);
 
-  // Escape CDATA-breaking sequences
-  body = escapeCdata(body);
-
-  // Truncate if too large
+  // Truncate first (before CDATA escaping) to avoid slicing mid-escape-sequence.
+  // Escaping ]]> expands to 16 chars; truncating after escaping can cut the
+  // expansion in half and leave malformed XML inside the CDATA block.
   if (body.length > MAX_BODY_LENGTH) {
     body = body.slice(0, MAX_BODY_LENGTH) + '\n[truncated]';
   }
+
+  // Escape CDATA-breaking sequences after truncation.
+  body = escapeCdata(body);
 
   if (status === 'error') {
     return formatError(callId, name, body);
