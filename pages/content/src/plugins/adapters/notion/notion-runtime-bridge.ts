@@ -25,8 +25,8 @@ import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/
 import { createNotionProviderAdapter } from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
 import { createToolCallLoop } from '../../../../../../../mcp-runtime/src/core/tool-call-loop.ts';
 import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
-import type { SchemaValidatorPort } from '../../../../../../../mcp-runtime/src/core/schema-validator.ts';
-import type { RuntimeResult } from '../../../../../../../mcp-runtime/src/bridge/runtime-result.ts';
+import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
 import { NotionAdapterBridgeHost } from './notion-adapter-bridge-host.ts';
 import { createNotionHostBindings, type NotionMcpClientLike } from './notion-host-bindings.ts';
 import { normalizeToolDescriptors } from './notion-tool-shape-adapter.ts';
@@ -65,29 +65,6 @@ export interface NotionRuntimeBridge {
 export interface WindowLike {
     __BH_RUNTIME_BRIDGE_ENABLED__?: boolean;
     mcpClient?: unknown;
-}
-
-// ---------------------------------------------------------------------------
-// ObservationOnlySchemaValidator
-//
-// SLICE I ONLY — Observation bridge for first-consumer wiring evidence.
-// NOT FOR PRODUCTION / BH FLAG ENABLE.
-// Always returns runtimeOk(); logs schema bypass for evidence capture.
-// Must be replaced by a concrete CSP-safe validator before BH path activation (Slice J).
-// ---------------------------------------------------------------------------
-
-class ObservationOnlySchemaValidator implements SchemaValidatorPort {
-    private readonly logger?: Pick<Console, 'warn'>;
-    constructor(logger?: Pick<Console, 'warn'>) {
-        this.logger = logger;
-    }
-    validate(schema: Record<string, unknown>, args: unknown): RuntimeResult {
-        this.logger?.warn('[Slice I ObservationOnlySchemaValidator] schema validation bypassed', {
-            schemaKeys: Object.keys(schema),
-            argsType: typeof args,
-        });
-        return { ok: true };
-    }
 }
 
 /** Optional test seam: invoked with the created registry for evidence capture in tests. */
@@ -183,7 +160,7 @@ export function startNotionRuntimeBridgeIfEnabled(
     // Slice I: Wire InMemoryToolRegistry if mcpClient supports getAvailableTools
     let toolRegistry: InMemoryToolRegistry | undefined;
     if (typeof mcpClient.getAvailableTools === 'function') {
-        const schemaValidator = new ObservationOnlySchemaValidator(deps.logger);
+        const schemaValidator = new CfWorkerSchemaValidatorAdapter(new CfWorkerJsonSchemaValidator());
         toolRegistry = new InMemoryToolRegistry({ schemaValidator });
         deps.onRegistryCreated?.(toolRegistry);
         // Async post-init populate — registry is empty until this resolves.

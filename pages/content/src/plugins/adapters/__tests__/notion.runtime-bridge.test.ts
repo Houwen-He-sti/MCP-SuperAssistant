@@ -443,14 +443,14 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
         assert.equal((result as { ok: false; code: string }).code, 'tool_not_found');
     });
 
-    it('T-LOOP-I-07: ObservationOnlySchemaValidator logs bypass when wired via startNotionRuntimeBridgeIfEnabled (integration)', async () => {
-        // This test verifies the actual ObservationOnlySchemaValidator from notion-runtime-bridge.ts
-        // is wired into the registry and logs bypass when validateArgs is called on a schema-bearing tool.
-        // Slice J1: fixture uses McpClientToolShape (snake_case input_schema) reflecting real McpClient shape
-        const warnings: string[] = [];
+    it('T-LOOP-I-07: CfWorkerSchemaValidatorAdapter wired via startNotionRuntimeBridgeIfEnabled performs real validation (Slice K)', async () => {
+        // Slice K: ObservationOnlySchemaValidator replaced by CfWorkerSchemaValidatorAdapter.
+        // This test verifies the adapter is correctly wired into the registry
+        // and that real schema validation is performed (not a bypass).
+        // input_schema (snake_case) used here so normalizeToolDescriptors (Slice J1) populates inputSchema in registry.
         let capturedRegistry: InMemoryToolRegistry | undefined;
         const tools = [
-            { name: 'echo', input_schema: { type: 'object', properties: { message: { type: 'string' } } } },
+            { name: 'echo', input_schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } },
         ];
         const windowLike = {
             __BH_RUNTIME_BRIDGE_ENABLED__: true,
@@ -461,12 +461,6 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
         };
         const result = startNotionRuntimeBridgeIfEnabled(windowLike, {
             ...makeBridgeDeps(),
-            logger: {
-                warn: (msg: string, ...rest: unknown[]) => warnings.push(
-                    [msg, ...rest.map(r => typeof r === 'object' ? JSON.stringify(r) : String(r))].join(' ')
-                ),
-                error: (_msg: string, ..._rest: unknown[]) => {},
-            },
             onRegistryCreated: (r: InMemoryToolRegistry) => { capturedRegistry = r; },
         });
         assert.notEqual(result, null);
@@ -476,13 +470,18 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
 
         assert.notEqual(capturedRegistry, undefined, 'Registry must be created and exposed via onRegistryCreated');
 
-        // Trigger validateArgs on schema-bearing tool — ObservationOnlySchemaValidator must log bypass
-        capturedRegistry!.validateArgs('echo', { message: 'hi' });
+        // Slice K: real validation — valid args must pass
+        const validResult = capturedRegistry!.validateArgs('echo', { message: 'hello' });
+        assert.equal(validResult.ok, true, 'CfWorkerSchemaValidatorAdapter must pass valid args');
 
-        const bypassLogged = warnings.some(w =>
-            w.includes('ObservationOnlySchemaValidator') || w.includes('schema validation bypassed')
+        // Slice K: real validation — invalid args must fail (not bypass like ObservationOnly)
+        const invalidResult = capturedRegistry!.validateArgs('echo', {});
+        assert.equal(invalidResult.ok, false, 'CfWorkerSchemaValidatorAdapter must reject invalid args');
+        assert.equal(
+            (invalidResult as { ok: false; code: string }).code,
+            'arg_validation_failed',
+            'Error code must be arg_validation_failed',
         );
-        assert.equal(bypassLogged, true, 'Actual ObservationOnlySchemaValidator wired via bridge must log bypass');
 
         await result!.dispose();
     });
