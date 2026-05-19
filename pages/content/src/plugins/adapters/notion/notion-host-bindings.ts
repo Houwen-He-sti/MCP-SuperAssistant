@@ -30,6 +30,11 @@ export interface NotionMcpClientLike {
     callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
     /** Optional — if absent, callTool is called unconditionally (it will throw if not connected). */
     isReady?: () => boolean;
+    /**
+     * Optional — Slice I: returns available tool descriptors for InMemoryToolRegistry population.
+     * If absent, registry wiring is skipped (warn logged, loop started without toolRegistry).
+     */
+    getAvailableTools?: () => Promise<Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>>;
 }
 
 export interface NotionHostBindingsDeps {

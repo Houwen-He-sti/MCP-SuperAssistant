@@ -291,3 +291,174 @@ describe('T-BH-lane-3: flag absent → null return signals DOM trigger should re
         assert.equal(result, null, 'Bridge must fail-closed when mcpClient is unavailable');
     });
 });
+
+// ---------------------------------------------------------------------------
+// Slice I — InMemoryToolRegistry first-consumer wiring
+//
+// T-LOOP-I-01a..T-LOOP-I-08
+//
+// Tests that startNotionRuntimeBridgeIfEnabled wires InMemoryToolRegistry
+// (with ObservationOnlySchemaValidator) into createToolCallLoop when
+// mcpClient has getAvailableTools(). Async post-init populate pattern.
+//
+// Run:
+//   node --test --experimental-strip-types \
+//     src/plugins/adapters/__tests__/notion.runtime-bridge.test.ts
+// (from MCP-SuperAssistant/pages/content/)
+// ---------------------------------------------------------------------------
+
+import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
+
+describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
+
+    it('T-LOOP-I-05: BH flag OFF → returns null, getAvailableTools NOT called', () => {
+        let getAvailableToolsCalled = false;
+        const windowLike = {
+            // __BH_RUNTIME_BRIDGE_ENABLED__ absent (OFF)
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => {
+                    getAvailableToolsCalled = true;
+                    return [];
+                },
+            },
+        };
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, makeBridgeDeps());
+        assert.equal(result, null, 'Flag OFF must return null');
+        assert.equal(getAvailableToolsCalled, false, 'getAvailableTools must NOT be called when flag is OFF');
+    });
+
+    it('T-LOOP-I-06: BH flag ON + mcpClient without getAvailableTools → warn logged, loop started WITHOUT toolRegistry', async () => {
+        const warnings: string[] = [];
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                callTool: async (_name: string, _args: Record<string, unknown>) => ({ ok: true }),
+                isReady: () => true,
+                // getAvailableTools intentionally absent
+            },
+        };
+        const deps = {
+            ...makeBridgeDeps(),
+            logger: {
+                warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
+                error: (_msg: string, ..._rest: unknown[]) => {},
+            },
+        };
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, deps);
+        assert.notEqual(result, null, 'Loop must be started even without getAvailableTools');
+        const warnLogged = warnings.some(w => w.includes('getAvailableTools'));
+        assert.equal(warnLogged, true, 'Must warn when getAvailableTools is absent');
+        await result!.dispose();
+    });
+
+    it('T-LOOP-I-01a: BH flag ON + mcpClient with getAvailableTools → loop started (not null)', async () => {
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => [
+                    { name: 'echo', description: 'echo tool' },
+                ],
+            },
+        };
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, makeBridgeDeps());
+        assert.notEqual(result, null, 'Loop must be started when flag ON + mcpClient present');
+        await result!.dispose();
+    });
+
+    it('T-LOOP-I-01b: after async populate resolves, registry.listTools() returns descriptors', async () => {
+        const tools = [
+            { name: 'echo', description: 'echo tool' },
+            { name: 'search', description: 'search tool', inputSchema: { type: 'object', properties: {} } },
+        ];
+        let capturedRegistry: InMemoryToolRegistry | undefined;
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => tools,
+            },
+        };
+        // To capture the registry, startNotionRuntimeBridgeIfEnabled must expose it.
+        // This test will FAIL until the implementation creates + populates the registry.
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, {
+            ...makeBridgeDeps(),
+            onRegistryCreated: (r: InMemoryToolRegistry) => { capturedRegistry = r; },
+        } as Parameters<typeof startNotionRuntimeBridgeIfEnabled>[1] & { onRegistryCreated?: (r: InMemoryToolRegistry) => void });
+
+        assert.notEqual(result, null);
+
+        // Wait for async populate to resolve
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        assert.notEqual(capturedRegistry, undefined, 'Registry must be created by implementation');
+        const listed = await capturedRegistry!.listTools();
+        assert.deepEqual(listed.map(t => t.name).sort(), ['echo', 'search']);
+
+        await result!.dispose();
+    });
+
+    it('T-LOOP-I-04: empty list from getAvailableTools() → no crash', async () => {
+        const windowLike = {
+            __BH_RUNTIME_BRIDGE_ENABLED__: true,
+            mcpClient: {
+                ...makeMockMcpClient(),
+                getAvailableTools: async () => [],
+            },
+        };
+        const result = startNotionRuntimeBridgeIfEnabled(windowLike, makeBridgeDeps());
+        assert.notEqual(result, null, 'Empty tool list must not crash bridge startup');
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await result!.dispose();
+    });
+
+    it('T-LOOP-I-02: validateArgs on known tool with schemaValidator returns ok (ObservationOnly bypasses schema)', async () => {
+        const tools = [
+            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
+        ];
+        const registry = new InMemoryToolRegistry({
+            schemaValidator: {
+                validate: (_schema, _args) => ({ ok: true }),
+            },
+        });
+        registry.populate(tools as Parameters<typeof registry.populate>[0]);
+        const result = registry.validateArgs('echo', { message: 'test' });
+        assert.equal(result.ok, true, 'Known tool with inputSchema + ObservationOnly validator must return ok');
+    });
+
+    it('T-LOOP-I-03: validateArgs on unknown tool returns tool_not_found', async () => {
+        const registry = new InMemoryToolRegistry();
+        registry.populate([{ name: 'echo' }]);
+        const result = registry.validateArgs('unknown_tool', {});
+        assert.equal(result.ok, false);
+        assert.equal((result as { ok: false; code: string }).code, 'tool_not_found');
+    });
+
+    it('T-LOOP-I-07: ObservationOnlySchemaValidator logs bypass when tool with inputSchema is validated', () => {
+        const bypassLog: Array<{ schemaKeys: string[]; argsType: string }> = [];
+        const observationOnlyValidator = {
+            validate: (schema: Record<string, unknown>, args: unknown): { ok: true } => {
+                bypassLog.push({ schemaKeys: Object.keys(schema), argsType: typeof args });
+                return { ok: true };
+            },
+        };
+        const registry = new InMemoryToolRegistry({ schemaValidator: observationOnlyValidator });
+        registry.populate([
+            { name: 'echo', inputSchema: { type: 'object', properties: { message: { type: 'string' } } } },
+        ] as Parameters<typeof registry.populate>[0]);
+        registry.validateArgs('echo', { message: 'hi' });
+        assert.equal(bypassLog.length, 1, 'Bypass must be logged once');
+        assert.ok(bypassLog[0].schemaKeys.includes('type') || bypassLog[0].schemaKeys.includes('properties'), 'Schema keys must be captured');
+    });
+
+    it('T-LOOP-I-08: during async populate pending window, validateArgs returns tool_not_found (accepted race)', () => {
+        // Registry is empty before async populate resolves
+        const registry = new InMemoryToolRegistry();
+        // Do NOT call populate() — simulates pre-populate state
+        const result = registry.validateArgs('echo', { message: 'test' });
+        assert.equal(result.ok, false);
+        assert.equal((result as { ok: false; code: string }).code, 'tool_not_found',
+            'Before populate resolves, all tools are unknown (accepted race — Slice J blocker)');
+    });
+});
