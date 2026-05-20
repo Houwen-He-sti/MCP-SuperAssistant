@@ -1,5 +1,5 @@
 /**
- * E2E BH Bridge Smoke Test — scripts/e2e-bh-bridge-smoke.cjs
+ * E2E BH Bridge Smoke Test — scripts/e2e-bh-bri​dge-smoke.cjs
  *
  * Slice T: E2E smoke verification for BH ToolCallLoop Bridge
  *
@@ -11,13 +11,22 @@
  *   FC-5 (exit 6): ACTIVATION_TIMEOUT — BH bridge start() not detected within timeout
  *   exit 0: PASS — all checks passed, ToolCallLoop active log detected
  *
- * Usage:
- *   node scripts/e2e-bh-bridge-smoke.cjs [--activation-timeout-ms=8000] [--idempotent]
+ * Probe strategy (reload-driven, default):
+ *   1. Connect to Notion tab → enable Runtime domain (start listening FIRST)
+ *   2. Reload page (Page.reload) so bridge emits fresh activation log
+ *   3. Wait for [Notion Bridge] ToolCallLoop active in consoleAPICalled
+ *   4. After log received (or timeout), probe ext/mcp state to classify failure
  *
- * Idempotency:
- *   When --idempotent flag is set, runs probe twice and compares result class.
- *   PASS only if both runs produce the same result class.
- *   Does NOT change page state (read-only CDP probe).
+ * This avoids the race condition where bridge activated BEFORE the listener was attached.
+ *
+ * Usage:
+ *   node scripts/e2e-bh-bridge-smoke.cjs [--activation-timeout-ms=8000] [--idempotent] [--wait-only]
+ *
+ * Flags:
+ *   --wait-only          Skip Page.reload; just wait for the next native activation log.
+ *                        Use this if you start the script BEFORE loading the Notion tab.
+ *   --activation-timeout-ms=N  Override wait timeout (default 8000ms; reload path uses N+3000ms)
+ *   --idempotent         Run probe twice and compare result class (non-destructive).
  *
  * Run:
  *   node scripts/e2e-bh-bridge-smoke.cjs
@@ -40,6 +49,9 @@ const ACTIVATION_TIMEOUT_MS = (() => {
   return arg ? parseInt(arg.split('=')[1], 10) : 8000;
 })();
 const IDEMPOTENT = args.includes('--idempotent');
+// --wait-only: skip Page.reload; just wait for next organic activation log.
+// Use when you start the script BEFORE the page is loaded.
+const WAIT_ONLY = args.includes('--wait-only');
 
 // ---------------------------------------------------------------------------
 // Failure class definitions
@@ -96,6 +108,25 @@ function cdpEval(wsUrl, expression, timeoutMs = 5000) {
 }
 
 /**
+ * Send a CDP command and wait for its result (fire-and-forget variant with short timeout).
+ * Opens and closes its own WS connection.
+ */
+function cdpCommand(wsUrl, method, params = {}, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const timer = setTimeout(() => { ws.close(); resolve({ timedOut: true }); }, timeoutMs);
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ id: 99, method, params }));
+    });
+    ws.on('message', d => {
+      const msg = JSON.parse(d);
+      if (msg.id === 99) { clearTimeout(timer); ws.close(); resolve(msg); }
+    });
+    ws.on('error', e => { clearTimeout(timer); reject(e); });
+  });
+}
+
+/**
  * Listen for Runtime.consoleAPICalled events containing the activation message.
  * Returns when the message is found or timeout is reached.
  */
@@ -133,7 +164,7 @@ function waitForActivationLog(wsUrl, pattern, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
-// Probe function (single run)
+// Probe function (single run) — reload-driven by default
 // ---------------------------------------------------------------------------
 
 async function runProbe() {
@@ -166,10 +197,40 @@ async function runProbe() {
 
   const wsUrl = notionTab.webSocketDebuggerUrl;
 
-  // FC-3 + FC-4: Check extension presence and mcpClient
-  let probeResult;
+  // Reload-driven strategy:
+  //   1. Start listening for runtime console events FIRST (before any reload)
+  //   2. Optionally reload the page to trigger a fresh bridge activation
+  //   3. Wait for the activation log
+  //   4. After result, probe ext/mcp state to classify failure if needed
+  //
+  // This prevents the race condition where bridge already activated before listener attached.
+
+  // Reload path uses extra time budget to account for page load + extension inject.
+  const listenTimeoutMs = WAIT_ONLY ? ACTIVATION_TIMEOUT_MS : ACTIVATION_TIMEOUT_MS + 6000;
+
+  // Start listener (opens its own WS connection, begins Runtime.enable immediately)
+  const activationPromise = waitForActivationLog(wsUrl, 'ToolCallLoop active', listenTimeoutMs);
+
+  if (!WAIT_ONLY) {
+    // Give the listener WS a brief moment to connect and send Runtime.enable
+    await new Promise(r => setTimeout(r, 200));
+    try {
+      await cdpCommand(wsUrl, 'Page.reload', { ignoreCache: true }, 5000);
+      result.details.reloaded = true;
+    } catch (e) {
+      result.details.reloadError = e.message;
+      // Non-fatal: listener is still running, fall through to wait
+    }
+  }
+
+  // Wait for activation log (or timeout)
+  const activationResult = await activationPromise;
+  result.details.activationLog = activationResult;
+
+  // Probe ext/mcp state (needed for failure classification and FC-4 check)
+  let probeData = {};
   try {
-    probeResult = await cdpEval(wsUrl, `(function() {
+    const probeResult = await cdpEval(wsUrl, `(function() {
       return JSON.stringify({
         extLoaded: !!(window.__MCP_SA_LOADED__ || window.__mcpSuperAssistantLoaded__ || document.querySelector('[data-mcp]')),
         mcpClientType: typeof window.mcpClient,
@@ -177,48 +238,45 @@ async function runProbe() {
         mcpHasGetTools: !!(window.mcpClient && typeof window.mcpClient.getAvailableTools === 'function'),
       });
     })()`);
-  } catch (e) {
-    result.fc = FC.CDP_UNAVAILABLE;
-    result.details.error = `CDP eval failed: ${e.message}`;
-    return result;
-  }
-
-  let probeData = {};
-  try {
     probeData = JSON.parse(probeResult.value ?? '{}');
-  } catch (_) { /* ignore */ }
+  } catch (e) {
+    result.details.probeError = `CDP eval failed: ${e.message}`;
+  }
   result.details.probeData = probeData;
 
-  if (!probeData.extLoaded) {
-    result.fc = FC.EXT_NOT_LOADED;
+  if (!activationResult.found) {
+    // Classify failure based on ext/mcp state
+    if (!probeData.extLoaded) {
+      result.fc = FC.EXT_NOT_LOADED;
+    } else if (!probeData.mcpHasCallTool) {
+      result.fc = FC.MCP_CLIENT_ABSENT;
+    } else {
+      result.fc = FC.ACTIVATION_TIMEOUT;
+    }
     return result;
   }
 
+  // Activation log found; check mcpClient health to catch FC-4 edge case
+  // (extLoaded:true but mcpClient absent/malformed is an explicit P1 failure)
   if (!probeData.mcpHasCallTool) {
     result.fc = FC.MCP_CLIENT_ABSENT;
     result.details.mcpClientType = probeData.mcpClientType;
     return result;
   }
 
-  // FC-5: Wait for activation log
-  const activationResult = await waitForActivationLog(wsUrl, 'ToolCallLoop active', ACTIVATION_TIMEOUT_MS);
-  if (!activationResult.found) {
-    result.fc = FC.ACTIVATION_TIMEOUT;
-    result.details.activationLog = activationResult;
-    return result;
-  }
-
-  result.details.activationLog = activationResult;
+  // All checks passed
   return result;
 }
+
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
+  const mode = WAIT_ONLY ? 'wait-only' : 'reload-driven';
   console.log('=== BH Bridge E2E Smoke Test ===');
-  console.log(`Config: activation-timeout=${ACTIVATION_TIMEOUT_MS}ms, idempotent=${IDEMPOTENT}\n`);
+  console.log(`Config: activation-timeout=${ACTIVATION_TIMEOUT_MS}ms, mode=${mode}, idempotent=${IDEMPOTENT}\n`);
 
   const run1 = await runProbe();
   console.log(`Run 1: ${run1.fc.label}`);
