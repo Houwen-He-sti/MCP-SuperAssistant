@@ -174,6 +174,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     document,
                     MutationObserver,
                     formatFunctionResult,
+                    logger: this.context.logger,
                     connectionState: new NotionConnectionState(
                         () => useConnectionStore.getState().status,
                         (cb) => {
