@@ -17,13 +17,14 @@
  * Imports createNotionRuntimeBridge from notion-bridge-controller.ts — no ESM cycle.
  */
 
-import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
-import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
-import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
+import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
+import type { ConnectionStatePort } from '../../../../../../../mcp-runtime/src/core/connection-state-port.ts';
+import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
+import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
+import { createNotionRuntimeBridge, type NotionRuntimeBridgeDeps } from './notion-bridge-controller.ts';
 import { type NotionMcpClientLike } from './notion-host-bindings.ts';
 import { NotionMcpToolCatalogSource } from './notion-mcp-tool-catalog-source.ts';
-import { createNotionRuntimeBridge, type NotionRuntimeBridgeDeps } from './notion-bridge-controller.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,6 +40,12 @@ export interface WindowLike {
 export type NotionRuntimeBridgeLaneGateDeps = Omit<NotionRuntimeBridgeDeps, 'mcpClient'> & {
     /** Slice I test seam — called with the created InMemoryToolRegistry (if any). */
     onRegistryCreated?: (registry: InMemoryToolRegistry) => void;
+    /**
+     * Slice N: optional ConnectionStatePort for the D6 guard.
+     * In production: caller (notion.adapter.ts) provides NotionConnectionState backed by useConnectionStore.
+     * In tests: omitted (legacy isReady? fallback remains active).
+     */
+    connectionState?: ConnectionStatePort;
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +93,8 @@ export function startNotionRuntimeBridgeIfEnabled(
         mcpClient,
         toolRegistry,
         toolCatalogSource,
+        // connectionState forwarded from deps (provided by notion.adapter.ts in production;
+        // absent in tests → legacy isReady? fallback)
     });
     return bridge.start();
 }

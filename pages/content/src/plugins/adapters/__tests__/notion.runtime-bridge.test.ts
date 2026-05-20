@@ -118,9 +118,9 @@ function makeBridgeDeps(opts?: { MutationObserver?: new (cb: MutationCallback) =
     MutationObserver:
       opts?.MutationObserver ??
       (class NoopMO {
-        constructor(_cb: MutationCallback) {}
-        observe(_t: Node) {}
-        disconnect() {}
+        constructor(_cb: MutationCallback) { }
+        observe(_t: Node) { }
+        disconnect() { }
         takeRecords(): MutationRecord[] {
           return [];
         }
@@ -348,7 +348,7 @@ describe('Slice I — InMemoryToolRegistry first-consumer wiring', () => {
       ...makeBridgeDeps(),
       logger: {
         warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
-        error: (_msg: string, ..._rest: unknown[]) => {},
+        error: (_msg: string, ..._rest: unknown[]) => { },
       },
       onRegistryCreated: () => {
         registryCreated = true;
@@ -648,7 +648,7 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
   function makeHostBindings() {
     return {
       onToolCallDetect: async () => ({ callId: 'unreachable', formattedResponse: '', success: false }),
-      onAdapterError: (_e: unknown) => {},
+      onAdapterError: (_e: unknown) => { },
     };
   }
 
@@ -741,7 +741,7 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
           success: true as const,
         };
       },
-      onAdapterError: (_e: unknown) => {},
+      onAdapterError: (_e: unknown) => { },
     };
 
     const loop = createToolCallLoop({
@@ -884,7 +884,7 @@ describe('Slice M — ToolCatalogSource controller wiring (T-M-04)', () => {
       ...makeBridgeDeps(),
       logger: {
         warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
-        error: (_msg: string, ..._rest: unknown[]) => {},
+        error: (_msg: string, ..._rest: unknown[]) => { },
       },
       toolCatalogSource: failSource,
       toolRegistry: registry,
@@ -945,5 +945,81 @@ describe('Slice M — lane gate ToolCatalogSource end-to-end (T-M-05)', () => {
     );
 
     await result!.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice N — ConnectionStatePort wiring (T-N-04..T-N-05)
+//
+// T-N-04: createNotionRuntimeBridge accepts connectionState in deps (wiring smoke test)
+// T-N-05: lifecycle guard Δ-028-B — populate NOT called when dispose() fires before getTools() resolves
+//
+// TDD: tests added before implementation. Run to confirm RED first.
+// Plan: plans/slice-n-connection-state-port-plan.md
+// ---------------------------------------------------------------------------
+
+describe('Slice N — ConnectionStatePort wiring (T-N-04)', () => {
+  it('T-N-04: createNotionRuntimeBridge accepts connectionState in deps, start() returns Disposable', async () => {
+    // Smoke test: NotionRuntimeBridgeDeps.connectionState is accepted without crash.
+    // Functional guard behavior covered by T-BH-17b / T-N-06 / T-N-06b (host-bindings level).
+    const connectionState = {
+      isConnected: () => true,
+    };
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      connectionState,
+    });
+
+    const disposable = bridge.start();
+
+    assert.ok(disposable !== null && disposable !== undefined, 'start() must return a Disposable');
+    assert.equal(typeof disposable.dispose, 'function', 'Disposable must have a dispose function');
+
+    await disposable.dispose();
+  });
+});
+
+describe('Slice N — lifecycle guard Δ-028-B (T-N-05)', () => {
+  it('T-N-05: populate NOT called when dispose() fires before getTools() resolves (Δ-028-B guard)', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    type ToolDescriptor = { name: string; description?: string; inputSchema?: Record<string, unknown> };
+
+    let resolveGetTools!: (tools: ToolDescriptor[]) => void;
+    const deferredGetTools = new Promise<ToolDescriptor[]>(resolve => {
+      resolveGetTools = resolve;
+    });
+
+    let populateCalled = false;
+    const registry = new InMemoryToolRegistry();
+    const originalPopulate = registry.populate.bind(registry);
+    registry.populate = (tools: ToolDescriptor[]) => {
+      populateCalled = true;
+      return originalPopulate(tools);
+    };
+
+    const mockSource = {
+      getTools: () => deferredGetTools,
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+    });
+
+    const disposable = bridge.start();
+
+    // Dispose BEFORE getTools promise resolves
+    await disposable.dispose();
+
+    // Now resolve getTools — with the Δ-028-B guard, populate() must NOT be called
+    resolveGetTools([{ name: 'tool_after_dispose' }]);
+
+    // Give async .then() time to run
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.equal(populateCalled, false,
+      'populate() must NOT be called after dispose() — lifecycle guard Δ-028-B missing or not working');
   });
 });

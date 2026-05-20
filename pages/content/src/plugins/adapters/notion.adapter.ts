@@ -9,6 +9,8 @@ import { choosePromptForFirstConversation, getEnabledToolDefinitions } from './n
 import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { formatFunctionResult } from '../../../../../../mcp-runtime/src/core/function-result-formatter.ts';
 import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
+import { NotionConnectionState } from './notion/notion-connection-state.ts';
+import { useConnectionStore } from '../../stores/connection.store';
 import { enableStreamBridgeOnWindow } from './notion.bridge-enable';
 
 /**
@@ -167,6 +169,7 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     document,
                     MutationObserver,
                     formatFunctionResult,
+                    connectionState: new NotionConnectionState(() => useConnectionStore.getState().status),
                 },
             );
 
