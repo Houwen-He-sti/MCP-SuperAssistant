@@ -16,6 +16,7 @@ import type { Disposable } from '../../../../../../../mcp-runtime/src/lifecycle/
 import { createNotionProviderAdapter } from '../../../../../../../mcp-runtime/src/adapters/notion-provider-adapter.ts';
 import { createToolCallLoop } from '../../../../../../../mcp-runtime/src/core/tool-call-loop.ts';
 import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts';
+import type { ToolCatalogSource } from '../../../../../../../mcp-runtime/src/core/tool-catalog-source.ts';
 import { NotionAdapterBridgeHost } from './notion-adapter-bridge-host.ts';
 import { createNotionHostBindings, type NotionMcpClientLike } from './notion-host-bindings.ts';
 import { NotionRejectionHandler } from './notion-rejection-handler.ts';
@@ -44,6 +45,8 @@ export interface NotionRuntimeBridgeDeps {
     logger?: Pick<Console, 'error' | 'warn'>;
     /** Slice I: optional InMemoryToolRegistry for pre-flight tool validation. */
     toolRegistry?: InMemoryToolRegistry;
+    /** Slice M: optional ToolCatalogSource — Controller.start() calls getTools() → populates registry. */
+    toolCatalogSource?: ToolCatalogSource;
 }
 
 export interface NotionRuntimeBridge {
@@ -85,6 +88,16 @@ class NotionRuntimeBridgeController implements NotionRuntimeBridge {
             rejectionHandler,
         });
         const inner = loop.start();
+
+        // Slice M: coordinate source → registry populate (fire-and-forget, Option Y+)
+        if (this.deps.toolCatalogSource && this.deps.toolRegistry) {
+            const registry = this.deps.toolRegistry;
+            this.deps.toolCatalogSource.getTools()
+                .then(tools => { registry.populate(tools); })
+                .catch(err => {
+                    this.deps.logger?.warn?.('[NotionBridgeController] getTools failed — registry remains empty', err);
+                });
+        }
 
         let disposed = false;
         this.disposable = {
