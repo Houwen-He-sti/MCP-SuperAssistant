@@ -1542,4 +1542,24 @@ describe('Slice T — bridge observability: logger.info on start() (T-T-01)', ()
       "notion-bridge-controller.ts logger type must include 'info' capability",
     );
   });
+
+  it('T-T-01e: activation signal uses direct console.info (CDP-visible regardless of logger level)', () => {
+    // The smoke script listens for Runtime.consoleAPICalled via CDP.
+    // If activation only went through the injected logger (which defaults to LogLevel.ERROR),
+    // console.info would never be called and the smoke probe would miss the signal.
+    // This test ensures notion-bridge-controller.ts contains a direct console.info call
+    // for the activation seam — not gated by the injected logger.
+    const controllerSrc = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../notion/notion-bridge-controller.ts',
+      ),
+      'utf-8',
+    );
+    assert.ok(
+      controllerSrc.includes("console.info('[Notion Bridge] ToolCallLoop active')"),
+      "notion-bridge-controller.ts must call console.info('[Notion Bridge] ToolCallLoop active') " +
+      "directly (not only via injected logger) so CDP Runtime.consoleAPICalled is always emitted",
+    );
+  });
 });
