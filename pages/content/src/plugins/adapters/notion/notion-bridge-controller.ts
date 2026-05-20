@@ -43,7 +43,7 @@ export interface NotionRuntimeBridgeDeps {
         status: 'success' | 'error';
         result: unknown;
     }) => string;
-    logger?: Pick<Console, 'error' | 'warn'>;
+    logger?: Pick<Console, 'error' | 'warn' | 'info'>;
     /** Slice I: optional InMemoryToolRegistry for pre-flight tool validation. */
     toolRegistry?: InMemoryToolRegistry;
     /** Slice M: optional ToolCatalogSource — Controller.start() calls getTools() → populates registry. */
@@ -92,6 +92,12 @@ class NotionRuntimeBridgeController implements NotionRuntimeBridge {
             rejectionHandler,
         });
         const inner = loop.start();
+
+        // Slice T: emit activation signal for E2E observability (CDP Runtime.consoleAPICalled)
+        // Use direct console.info for the signal so it is always CDP-visible regardless of
+        // the injected logger's log level. The injected logger call is kept for structured logging.
+        console.info('[Notion Bridge] ToolCallLoop active');
+        this.deps.logger?.info?.('[Notion Bridge] ToolCallLoop active');
 
         // Δ-028-B: declare disposed BEFORE fire-and-forget so the .then() closure can guard against
         // populate() being called after dispose() has already run.

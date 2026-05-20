@@ -1437,3 +1437,129 @@ describe('Slice R — source-contract: explicit BH enable object (T-R-01)', () =
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice T — bridge observability: logger.info on successful start (T-T-01)
+//
+// GPT 4C finding (PR #255 4C review): controller.start() has zero success logs.
+// CDP-based E2E probes cannot assert bridge activation without an explicit signal.
+// Fix: extend logger type to include 'info', pass logger from notion.adapter.ts,
+// and emit logger.info('[Notion Bridge] ToolCallLoop active') inside start().
+// ---------------------------------------------------------------------------
+
+describe('Slice T — bridge observability: logger.info on start() (T-T-01)', () => {
+  interface MockLogger {
+    errorCalls: unknown[][];
+    warnCalls: unknown[][];
+    infoCalls: unknown[][];
+    error: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    info: (...args: unknown[]) => void;
+  }
+
+  function makeMockLogger(): MockLogger {
+    const logger: MockLogger = {
+      errorCalls: [],
+      warnCalls: [],
+      infoCalls: [],
+      error: (...args: unknown[]) => { logger.errorCalls.push(args); },
+      warn: (...args: unknown[]) => { logger.warnCalls.push(args); },
+      info: (...args: unknown[]) => { logger.infoCalls.push(args); },
+    };
+    return logger;
+  }
+
+  it('T-T-01a: controller.start() emits logger.info with activation message', async () => {
+    const logger = makeMockLogger();
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      logger,
+    });
+    const disposable = bridge.start();
+
+    assert.ok(
+      logger.infoCalls.length >= 1,
+      `Expected at least 1 logger.info call on start(), got ${logger.infoCalls.length}`,
+    );
+    const allMessages = logger.infoCalls.flat().join(' ');
+    assert.ok(
+      allMessages.includes('ToolCallLoop active') || allMessages.includes('Notion Bridge'),
+      `Expected logger.info message to contain 'ToolCallLoop active' or 'Notion Bridge', got: ${allMessages}`,
+    );
+
+    await disposable.dispose();
+  });
+
+  it('T-T-01b: controller.start() twice → logger.info called only once (lifecycle guard)', async () => {
+    const logger = makeMockLogger();
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      logger,
+    });
+    bridge.start(); // first call
+    const disposable = bridge.start(); // second call — should be no-op
+
+    assert.equal(
+      logger.infoCalls.length,
+      1,
+      `Expected exactly 1 logger.info call across two start() calls (lifecycle guard), got ${logger.infoCalls.length}`,
+    );
+
+    await disposable.dispose();
+  });
+
+  it('T-T-01c: source-contract — notion.adapter.ts passes logger to startNotionRuntimeBridgeIfEnabled deps', () => {
+    const adapterSrc = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../notion.adapter.ts'),
+      'utf-8',
+    );
+    assert.ok(
+      adapterSrc.includes('logger'),
+      'notion.adapter.ts must include "logger" in the deps passed to startNotionRuntimeBridgeIfEnabled',
+    );
+    // Verify the logger is in the deps block (second arg), not just referenced elsewhere.
+    // Check that the call site deps object contains a 'logger' key.
+    const depsBlock = adapterSrc.slice(
+      adapterSrc.indexOf('startNotionRuntimeBridgeIfEnabled('),
+      adapterSrc.indexOf(');', adapterSrc.indexOf('startNotionRuntimeBridgeIfEnabled(')) + 2,
+    );
+    assert.ok(
+      depsBlock.includes('logger'),
+      `Expected 'logger' in the deps object passed to startNotionRuntimeBridgeIfEnabled, found:\n${depsBlock.slice(0, 400)}`,
+    );
+  });
+
+  it('T-T-01d: source-contract — logger type includes "info"', () => {
+    const controllerSrc = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../notion/notion-bridge-controller.ts',
+      ),
+      'utf-8',
+    );
+    assert.ok(
+      controllerSrc.includes("'info'") || controllerSrc.includes('"info"'),
+      "notion-bridge-controller.ts logger type must include 'info' capability",
+    );
+  });
+
+  it('T-T-01e: activation signal uses direct console.info (CDP-visible regardless of logger level)', () => {
+    // The smoke script listens for Runtime.consoleAPICalled via CDP.
+    // If activation only went through the injected logger (which defaults to LogLevel.ERROR),
+    // console.info would never be called and the smoke probe would miss the signal.
+    // This test ensures notion-bridge-controller.ts contains a direct console.info call
+    // for the activation seam — not gated by the injected logger.
+    const controllerSrc = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '../notion/notion-bridge-controller.ts',
+      ),
+      'utf-8',
+    );
+    assert.ok(
+      controllerSrc.includes("console.info('[Notion Bridge] ToolCallLoop active')"),
+      "notion-bridge-controller.ts must call console.info('[Notion Bridge] ToolCallLoop active') " +
+      "directly (not only via injected logger) so CDP Runtime.consoleAPICalled is always emitted",
+    );
+  });
+});
