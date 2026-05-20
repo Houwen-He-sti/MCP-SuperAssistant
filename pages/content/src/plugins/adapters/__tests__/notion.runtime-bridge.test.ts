@@ -787,3 +787,154 @@ describe('Slice L — rejection path integration (validateArgs→handler→inser
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice M — ToolCatalogSource wiring (T-M-04..T-M-05)
+//
+// Verifies:
+//   T-M-04: Controller.start() calls source.getTools() when toolCatalogSource + toolRegistry present
+//   T-M-05: Lane gate creates NotionMcpToolCatalogSource + passes to Controller; no inline populate glue
+//
+// TDD: these tests are added before the implementation changes. Run to confirm RED first.
+// Plan: plans/slice-m-tool-catalog-source-plan.md
+// Committee: Option Y+ (GPT 4C verdict) — registry creation stays in lane gate,
+//            Controller.start() coordinates source→registry populate.
+// ---------------------------------------------------------------------------
+
+describe('Slice M — ToolCatalogSource controller wiring (T-M-04)', () => {
+  it('T-M-04: Controller.start() calls source.getTools() and populates registry when both toolCatalogSource + toolRegistry present', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let getToolsCalled = false;
+    const mockSource = {
+      getTools: async () => {
+        getToolsCalled = true;
+        return [
+          { name: 'tool_alpha', description: 'Alpha tool' },
+          { name: 'tool_beta' },
+        ];
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+    });
+    bridge.start();
+
+    // Wait for async source.getTools() → populate to resolve
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.strictEqual(getToolsCalled, true, 'source.getTools() must be called in Controller.start()');
+
+    const tools = await registry.listTools();
+    assert.deepStrictEqual(
+      tools.map(t => t.name).sort(),
+      ['tool_alpha', 'tool_beta'],
+      'registry must be populated with tools from source.getTools()'
+    );
+  });
+
+  it('T-M-04b: Controller.start() does NOT call source.getTools() when toolCatalogSource absent', async () => {
+    let getToolsCalled = false;
+    const mockSource = {
+      getTools: async () => {
+        getToolsCalled = true;
+        return [];
+      },
+    };
+
+    // toolCatalogSource absent (not in deps)
+    const bridge = createNotionRuntimeBridge(makeBridgeDeps());
+    // Intentionally NOT passing toolCatalogSource
+    void mockSource; // silence unused warning
+
+    bridge.start();
+
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.strictEqual(getToolsCalled, false, 'source.getTools() must NOT be called when toolCatalogSource is absent');
+  });
+
+  it('T-M-04c: Controller.start() warns and continues when source.getTools() rejects', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    const warnings: string[] = [];
+    const registry = new InMemoryToolRegistry();
+
+    const failSource = {
+      getTools: async () => {
+        throw new Error('MCP catalog unavailable');
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      logger: {
+        warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
+        error: (_msg: string, ..._rest: unknown[]) => {},
+      },
+      toolCatalogSource: failSource,
+      toolRegistry: registry,
+    });
+
+    // start() must NOT throw, even when source.getTools() rejects
+    assert.doesNotThrow(() => { bridge.start(); }, 'start() must not throw when source.getTools() rejects');
+
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Registry should remain empty (populate not called)
+    const tools = await registry.listTools();
+    assert.deepStrictEqual(tools, [], 'registry must remain empty when source.getTools() rejects');
+
+    // Warn must be logged
+    const warnMsg = warnings.find(w => w.includes('getTools') || w.includes('failed') || w.includes('NotionBridgeController'));
+    assert.ok(warnMsg !== undefined, 'Controller must log a warn when source.getTools() rejects');
+  });
+});
+
+describe('Slice M — lane gate ToolCatalogSource end-to-end (T-M-05)', () => {
+  it('T-M-05: lane gate + controller: registry populated via ToolCatalogSource path (end-to-end)', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let capturedRegistry: InMemoryToolRegistry | undefined;
+
+    const tools = [
+      { name: 'e2e_tool_a', input_schema: { type: 'object', properties: {} } },
+    ];
+
+    const windowLike = {
+      __BH_RUNTIME_BRIDGE_ENABLED__: true,
+      mcpClient: {
+        callTool: async (_name: string, _args: Record<string, unknown>) => ({ ok: true }),
+        isReady: () => true,
+        getAvailableTools: async () => tools,
+      },
+    };
+
+    const result = startNotionRuntimeBridgeIfEnabled(windowLike, {
+      ...makeBridgeDeps(),
+      onRegistryCreated: (r: InMemoryToolRegistry) => {
+        capturedRegistry = r;
+      },
+    });
+
+    assert.notEqual(result, null, 'Bridge must start');
+
+    // Wait for async populate via ToolCatalogSource path
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.notEqual(capturedRegistry, undefined, 'Registry must be created (onRegistryCreated must fire)');
+    const listed = await capturedRegistry!.listTools();
+    assert.deepStrictEqual(
+      listed.map(t => t.name),
+      ['e2e_tool_a'],
+      'Registry must be populated via ToolCatalogSource path (same observable result as Slice I)'
+    );
+
+    await result!.dispose();
+  });
+});

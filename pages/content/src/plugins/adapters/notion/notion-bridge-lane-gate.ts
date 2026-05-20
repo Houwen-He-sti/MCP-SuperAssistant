@@ -22,7 +22,7 @@ import { InMemoryToolRegistry } from '../../../../../../../mcp-runtime/src/core/
 import { CfWorkerSchemaValidatorAdapter } from './cfworker-schema-validator-adapter.ts';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
 import { type NotionMcpClientLike } from './notion-host-bindings.ts';
-import { normalizeToolDescriptors } from './notion-tool-shape-adapter.ts';
+import { NotionMcpToolCatalogSource } from './notion-mcp-tool-catalog-source.ts';
 import { createNotionRuntimeBridge, type NotionRuntimeBridgeDeps } from './notion-bridge-controller.ts';
 
 // ---------------------------------------------------------------------------
@@ -68,17 +68,15 @@ export function startNotionRuntimeBridgeIfEnabled(
 
     // Slice I: Wire InMemoryToolRegistry if mcpClient supports getAvailableTools
     let toolRegistry: InMemoryToolRegistry | undefined;
+    let toolCatalogSource: NotionMcpToolCatalogSource | undefined;
     if (typeof mcpClient.getAvailableTools === 'function') {
         const schemaValidator = new CfWorkerSchemaValidatorAdapter(new CfWorkerJsonSchemaValidator());
         toolRegistry = new InMemoryToolRegistry({ schemaValidator });
         deps.onRegistryCreated?.(toolRegistry);
-        // Async post-init populate — registry is empty until this resolves.
-        // Early tool calls will return tool_not_found (accepted race — Slice J blocker).
-        mcpClient.getAvailableTools().then(tools => {
-            toolRegistry!.populate(normalizeToolDescriptors(tools));
-        }).catch(err => {
-            deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools failed — registry remains empty', err);
-        });
+        // Slice M: create ToolCatalogSource — Controller.start() will coordinate populate.
+        // Async post-init populate — registry is empty until Controller.start() resolves.
+        // Early tool calls will return tool_not_found (accepted race — T-LOOP-I-08).
+        toolCatalogSource = new NotionMcpToolCatalogSource(mcpClient);
     } else {
         deps.logger?.warn?.('[NotionRuntimeBridge] getAvailableTools not available — skip registry wiring');
     }
@@ -87,6 +85,7 @@ export function startNotionRuntimeBridgeIfEnabled(
         ...deps,
         mcpClient,
         toolRegistry,
+        toolCatalogSource,
     });
     return bridge.start();
 }
