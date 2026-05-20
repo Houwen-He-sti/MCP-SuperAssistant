@@ -160,11 +160,15 @@ export class NotionAdapter extends BaseAdapterPlugin {
             this.setupDOMObservers();
             this.setupUIIntegration();
 
-            // BH-4: start ToolCallLoop if __BH_RUNTIME_BRIDGE_ENABLED__ flag is set (opt-in, default off)
-            // Returns null when flag is absent/false or mcpClient unavailable (fail-closed).
-            // Must be called BEFORE setupMessageObserver so the return value gates the DOM scan path.
+            // BH-4: start ToolCallLoop — Slice R enables BH bridge unconditionally.
+            // All prerequisites satisfied (Slices I/J1/K/L/M/N/O/P merged).
+            // Fail-closed: if window.mcpClient is absent/malformed, lane gate returns null
+            // → legacy stream bridge remains active as safe fallback.
             this.bhBridgeDisposable = startNotionRuntimeBridgeIfEnabled(
-                window as unknown as WindowLike,
+                {
+                    __BH_RUNTIME_BRIDGE_ENABLED__: true,
+                    mcpClient: (window as unknown as WindowLike).mcpClient,
+                },
                 {
                     adapter: { insertText: (t) => this.insertText(t), submitForm: () => this.submitForm() },
                     document,

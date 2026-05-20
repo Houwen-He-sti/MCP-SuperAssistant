@@ -24,6 +24,9 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createNotionRuntimeBridge, startNotionRuntimeBridgeIfEnabled } from '../notion/notion-runtime-bridge.ts';
 
@@ -1392,5 +1395,45 @@ describe('Slice P — queue semantics on rapid reconnect (T-P-07)', () => {
     // Total calls: 1 (initial) + 1 (first reconnect) + 1 (queued second reconnect) = 3
     assert.strictEqual(callCount, 3,
       'queue semantics: second reconnect must trigger a refresh after first completes (not dropped)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice R — BH bridge enable source-contract (T-R-01)
+// ---------------------------------------------------------------------------
+// Regression guard: locks down the notion.adapter.ts call-site shape so that
+// reverting to `startNotionRuntimeBridgeIfEnabled(window as unknown as WindowLike, ...)`
+// (which silently keeps the bridge OFF) is immediately caught.
+// ---------------------------------------------------------------------------
+
+const __filename_r = fileURLToPath(import.meta.url);
+const __dirname_r = dirname(__filename_r);
+const adapterSrc = readFileSync(
+  resolve(__dirname_r, '../notion.adapter.ts'),
+  'utf-8',
+);
+
+describe('Slice R — source-contract: explicit BH enable object (T-R-01)', () => {
+  it('T-R-01a: adapter passes __BH_RUNTIME_BRIDGE_ENABLED__: true to lane gate', () => {
+    assert.ok(
+      adapterSrc.includes('__BH_RUNTIME_BRIDGE_ENABLED__: true'),
+      'notion.adapter.ts must pass __BH_RUNTIME_BRIDGE_ENABLED__: true explicitly',
+    );
+  });
+
+  it('T-R-01b: adapter reads mcpClient from window', () => {
+    assert.ok(
+      adapterSrc.includes('mcpClient: (window as unknown as WindowLike).mcpClient'),
+      'notion.adapter.ts must read mcpClient from (window as unknown as WindowLike).mcpClient',
+    );
+  });
+
+  it('T-R-01c: adapter does NOT pass raw window to lane gate (old disabled-bridge shape absent)', () => {
+    // The old shape: startNotionRuntimeBridgeIfEnabled(window as unknown as WindowLike, ...)
+    // This form silently kept the bridge OFF because __BH_RUNTIME_BRIDGE_ENABLED__ was never set.
+    assert.ok(
+      !adapterSrc.includes('startNotionRuntimeBridgeIfEnabled(\n                window as unknown as WindowLike'),
+      'notion.adapter.ts must NOT pass raw window directly to startNotionRuntimeBridgeIfEnabled',
+    );
   });
 });
