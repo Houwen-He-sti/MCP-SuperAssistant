@@ -30,8 +30,6 @@ import type { McpClientToolShape } from './notion-tool-shape-adapter.ts';
 
 export interface NotionMcpClientLike {
   callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
-  /** Optional — if absent, callTool is called unconditionally (it will throw if not connected). */
-  isReady?: () => boolean;
   /**
    * Optional — Slice I: returns available tool descriptors in McpClient native shape (snake_case).
    * Caller (notion-runtime-bridge.ts) must run normalizeToolDescriptors() before populate().
@@ -85,14 +83,6 @@ export function createNotionHostBindings(deps: NotionHostBindingsDeps): HostBind
             error: 'MCP_NOT_CONNECTED',
           };
         }
-      } else if (deps.mcpClient.isReady && !deps.mcpClient.isReady()) {
-        deps.logger?.warn?.('[NotionHostBindings] MCP client not ready');
-        return {
-          callId: payload.callId,
-          formattedResponse: '',
-          success: false,
-          error: 'MCP_CLIENT_NOT_READY',
-        };
       }
 
       try {

@@ -1,7 +1,9 @@
 /**
  * BH-4 TDD: NotionHostBindings
  *
- * T-BH-15..T-BH-18b + T-BH-17b + T-N-06 + T-N-06b (Slice N: ConnectionStatePort D6 guard)
+ * T-BH-15..T-BH-16 + T-BH-17b + T-BH-18..T-BH-18b + T-N-06 + T-N-06b
+ * (Slice N: ConnectionStatePort D6 guard)
+ * (Slice O: T-BH-17 removed — legacy isReady? path deleted; T-N-06/T-N-06b cleaned up)
  *
  * Critical contract (from ToolCallLoop line 57):
  *   if (!result.success) return;  → formattedResponse is NOT inserted when success:false
@@ -110,30 +112,6 @@ describe('T-BH-16: callTool throws → success:true (still insert error result)'
 });
 
 // ---------------------------------------------------------------------------
-// T-BH-17 — isReady() = false → success:false + empty formattedResponse
-//
-// Infrastructure not available: do NOT attempt insert, do NOT call callTool
-// ---------------------------------------------------------------------------
-
-describe('T-BH-17: mcpClient.isReady() = false → success:false', () => {
-    it('returns success:false and empty formattedResponse when not ready', async () => {
-        let callToolCalled = false;
-        const mcpClient = {
-            callTool: async () => { callToolCalled = true; return {}; },
-            isReady: () => false,
-        };
-        const hb = createNotionHostBindings({ mcpClient, formatFunctionResult: makeFormatter() });
-
-        const result = await hb.onToolCallDetect(makePayload({ callId: 'call-nr-1' }));
-
-        assert.equal(result.success, false, 'success must be false when mcpClient not ready');
-        assert.equal(result.formattedResponse, '', 'formattedResponse must be empty when not ready');
-        assert.equal(result.error, 'MCP_CLIENT_NOT_READY');
-        assert.equal(callToolCalled, false, 'callTool must NOT be called when not ready');
-    });
-});
-
-// ---------------------------------------------------------------------------
 // T-BH-18 — onAdapterError does not throw outward
 // ---------------------------------------------------------------------------
 
@@ -162,14 +140,16 @@ describe('T-BH-18: onAdapterError no-crash', () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-BH-18b — isReady optional: absent → proceed to callTool
+// T-BH-18b — connectionState absent → proceeds to callTool (no guard)
+//
+// When connectionState is not provided in deps, no connection check is performed.
+// callTool is called unconditionally (it will throw internally if MCP is down).
 // ---------------------------------------------------------------------------
 
-describe('T-BH-18b: isReady absent → proceeds to callTool', () => {
-    it('calls callTool when isReady is not defined on mcpClient', async () => {
+describe('T-BH-18b: connectionState absent → proceeds to callTool', () => {
+    it('calls callTool when connectionState is not provided in deps', async () => {
         let callToolCalled = false;
         const mcpClient = {
-            // isReady NOT defined
             callTool: async () => { callToolCalled = true; return { result: 'ok' }; },
         };
         const hb = createNotionHostBindings({ mcpClient, formatFunctionResult: makeFormatter() });
@@ -177,7 +157,7 @@ describe('T-BH-18b: isReady absent → proceeds to callTool', () => {
         const result = await hb.onToolCallDetect(makePayload());
 
         assert.equal(result.success, true);
-        assert.equal(callToolCalled, true, 'callTool must be called when isReady is absent');
+        assert.equal(callToolCalled, true, 'callTool must be called when connectionState is absent');
     });
 });
 
@@ -210,18 +190,17 @@ describe('T-BH-17b: connectionState.isConnected() = false → success:false + MC
 });
 
 // ---------------------------------------------------------------------------
-// T-N-06 — D6 precedence: connectionState false + mcpClient.isReady true → MCP_NOT_CONNECTED
+// T-N-06 — D6 precedence: connectionState false → MCP_NOT_CONNECTED
 //
 // connectionState is AUTHORITATIVE: if present and returning false,
-// it overrides even a "ready" mcpClient.
+// the call is blocked regardless of mcpClient state.
 // ---------------------------------------------------------------------------
 
-describe('T-N-06: connectionState false + mcpClient.isReady true → MCP_NOT_CONNECTED (D6 precedence)', () => {
-    it('uses connectionState over isReady when connectionState returns false', async () => {
+describe('T-N-06: connectionState false → MCP_NOT_CONNECTED (D6 precedence)', () => {
+    it('blocks call with MCP_NOT_CONNECTED when connectionState returns false', async () => {
         let callToolCalled = false;
         const mcpClient = {
             callTool: async () => { callToolCalled = true; return {}; },
-            isReady: () => true,
         };
         const connectionState = {
             isConnected: () => false,
@@ -230,25 +209,23 @@ describe('T-N-06: connectionState false + mcpClient.isReady true → MCP_NOT_CON
 
         const result = await hb.onToolCallDetect(makePayload({ callId: 'call-d6-1' }));
 
-        assert.equal(result.success, false, 'connectionState false must override isReady true');
-        assert.equal(result.error, 'MCP_NOT_CONNECTED', 'error code must be MCP_NOT_CONNECTED (not MCP_CLIENT_NOT_READY)');
+        assert.equal(result.success, false, 'connectionState false must block the call');
+        assert.equal(result.error, 'MCP_NOT_CONNECTED');
         assert.equal(callToolCalled, false);
     });
 });
 
 // ---------------------------------------------------------------------------
-// T-N-06b — connectionState true + isReady false → proceed to callTool
+// T-N-06b — connectionState true → proceed to callTool
 //
-// connectionState is AUTHORITATIVE: if present and returning true,
-// the legacy isReady guard is bypassed entirely.
+// connectionState true bypasses any other check.
 // ---------------------------------------------------------------------------
 
-describe('T-N-06b: connectionState true + isReady false → proceed to callTool (connectionState wins)', () => {
-    it('bypasses isReady when connectionState reports connected', async () => {
+describe('T-N-06b: connectionState true → proceed to callTool (connectionState wins)', () => {
+    it('allows call when connectionState reports connected', async () => {
         let callToolCalled = false;
         const mcpClient = {
             callTool: async () => { callToolCalled = true; return { result: 'ok' }; },
-            isReady: () => false,
         };
         const connectionState = {
             isConnected: () => true,
