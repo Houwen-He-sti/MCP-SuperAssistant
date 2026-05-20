@@ -48,9 +48,10 @@ export interface NotionHostBindingsDeps {
   }) => string;
   logger?: Pick<Console, 'error' | 'warn'>;
   /**
-   * Optional — Slice N: ConnectionStatePort.
-   * When present, isConnected() is the authoritative gate (D6 guard).
-   * When absent, falls back to legacy mcpClient.isReady?.() gate.
+   * Optional — Slice N/O migration seam.
+   * When present, isConnected() is the authoritative transport gate.
+   * When absent, no HostBindings-level connection guard is applied;
+   * callTool() is invoked and may fail internally.
    */
   connectionState?: ConnectionStatePort;
 }
@@ -62,14 +63,9 @@ export interface NotionHostBindingsDeps {
 export function createNotionHostBindings(deps: NotionHostBindingsDeps): HostBindings {
   return {
     async onToolCallDetect(payload: ToolCallPayload): Promise<ToolCallResult> {
-      // D6 guard: connectionState present → authoritative (MCP_NOT_CONNECTED)
-      //            absent → legacy isReady fallback (MCP_CLIENT_NOT_READY)
-      //
-      // Error code distinction (GPT 4C P2-1):
-      //   MCP_NOT_CONNECTED    = ConnectionStatePort reports transport not connected (SSE/WS down).
-      //                          Authoritative — overrides mcpClient.isReady even if true.
-      //   MCP_CLIENT_NOT_READY = Legacy: mcpClient.isReady() = false (= isInitialized, not transport state).
-      //                          Fallback for callers that do not inject ConnectionStatePort.
+      // D6 guard: connectionState present → authoritative transport gate (MCP_NOT_CONNECTED).
+      // If absent, HostBindings does not perform a connection pre-check;
+      // callTool() is invoked and any failure is returned as a tool execution error.
       //
       // Note: isConnected() is NOT an authorization check. It only gates on transport connectivity.
       // Tool allowlist / schema validation remain separate concerns (SchemaValidatorPort, ToolRegistry).
