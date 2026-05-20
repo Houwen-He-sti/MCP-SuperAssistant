@@ -21,6 +21,7 @@ import type {
   ToolCallResult,
 } from '../../../../../../../mcp-runtime/src/bridge/host-bindings.ts';
 import type { ToolCallPayload } from '../../../../../../../mcp-runtime/src/core/tool-call-parser.ts';
+import type { ConnectionStatePort } from '../../../../../../../mcp-runtime/src/core/connection-state-port.ts';
 import type { McpClientToolShape } from './notion-tool-shape-adapter.ts';
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,12 @@ export interface NotionHostBindingsDeps {
     result: unknown;
   }) => string;
   logger?: Pick<Console, 'error' | 'warn'>;
+  /**
+   * Optional — Slice N: ConnectionStatePort.
+   * When present, isConnected() is the authoritative gate (D6 guard).
+   * When absent, falls back to legacy mcpClient.isReady?.() gate.
+   */
+  connectionState?: ConnectionStatePort;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +64,28 @@ export interface NotionHostBindingsDeps {
 export function createNotionHostBindings(deps: NotionHostBindingsDeps): HostBindings {
   return {
     async onToolCallDetect(payload: ToolCallPayload): Promise<ToolCallResult> {
-      // Guard: check readiness only if isReady() is available
-      if (deps.mcpClient.isReady && !deps.mcpClient.isReady()) {
+      // D6 guard: connectionState present → authoritative (MCP_NOT_CONNECTED)
+      //            absent → legacy isReady fallback (MCP_CLIENT_NOT_READY)
+      //
+      // Error code distinction (GPT 4C P2-1):
+      //   MCP_NOT_CONNECTED    = ConnectionStatePort reports transport not connected (SSE/WS down).
+      //                          Authoritative — overrides mcpClient.isReady even if true.
+      //   MCP_CLIENT_NOT_READY = Legacy: mcpClient.isReady() = false (= isInitialized, not transport state).
+      //                          Fallback for callers that do not inject ConnectionStatePort.
+      //
+      // Note: isConnected() is NOT an authorization check. It only gates on transport connectivity.
+      // Tool allowlist / schema validation remain separate concerns (SchemaValidatorPort, ToolRegistry).
+      if (deps.connectionState) {
+        if (!deps.connectionState.isConnected()) {
+          deps.logger?.warn?.('[NotionHostBindings] MCP not connected');
+          return {
+            callId: payload.callId,
+            formattedResponse: '',
+            success: false,
+            error: 'MCP_NOT_CONNECTED',
+          };
+        }
+      } else if (deps.mcpClient.isReady && !deps.mcpClient.isReady()) {
         deps.logger?.warn?.('[NotionHostBindings] MCP client not ready');
         return {
           callId: payload.callId,
