@@ -1023,3 +1023,374 @@ describe('Slice N — lifecycle guard Δ-028-B (T-N-05)', () => {
       'populate() must NOT be called after dispose() — lifecycle guard Δ-028-B missing or not working');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice P — registry refresh on reconnect (T-P-01..T-P-07)
+//
+// Verifies:
+//   T-P-01: onConnectionChange fires true → refreshRegistry → populate
+//   T-P-02: onConnectionChange fires false → no refresh
+//   T-P-03: dispose() before reconnect callback → !disposed guard
+//   T-P-04: connectionState.onConnectionChange absent → no subscribe, no crash
+//   T-P-05: getTools() rejects on reconnect → warn logged, registry unchanged
+//   T-P-06: dispose() while refresh in-flight → !disposed guard prevents populate
+//   T-P-07: two rapid true events, first in-flight → queue semantics: second refresh executes after first
+//
+// TDD: tests added before implementation (RED phase).
+// Plan: plans/slice-p-oo-pl-tdd-plan.md
+// ---------------------------------------------------------------------------
+
+describe('Slice P — registry refresh on reconnect (T-P-01)', () => {
+  it('T-P-01: onConnectionChange(true) triggers refreshRegistry → getTools() → populate()', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let getToolsCallCount = 0;
+    const mockSource = {
+      getTools: async () => {
+        getToolsCallCount++;
+        return [{ name: 'tool_after_reconnect' }];
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => false,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    bridge.start();
+
+    // Wait for initial populate (Slice M)
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.strictEqual(getToolsCallCount, 1, 'initial populate must call getTools() once');
+
+    // Simulate reconnect
+    assert.ok(capturedCb !== undefined, 'onConnectionChange must have been called with a callback');
+    capturedCb!(true);
+
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.strictEqual(getToolsCallCount, 2, 'reconnect true must trigger a second getTools() call');
+
+    const tools = await registry.listTools();
+    assert.deepStrictEqual(tools.map(t => t.name), ['tool_after_reconnect']);
+  });
+});
+
+describe('Slice P — no refresh on disconnect (T-P-02)', () => {
+  it('T-P-02: onConnectionChange(false) does NOT trigger refreshRegistry', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let getToolsCallCount = 0;
+    const mockSource = {
+      getTools: async () => {
+        getToolsCallCount++;
+        return [{ name: 'tool_x' }];
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => true,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    bridge.start();
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    const countAfterStart = getToolsCallCount;
+
+    // Fire connected=false
+    capturedCb!(false);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.strictEqual(getToolsCallCount, countAfterStart,
+      'connected=false must NOT trigger getTools()');
+  });
+});
+
+describe('Slice P — dispose guard before reconnect (T-P-03)', () => {
+  it('T-P-03: dispose() before reconnect fires — populate() must NOT be called', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    type ToolDescriptor = { name: string };
+    let resolveInitial!: (t: ToolDescriptor[]) => void;
+    const initialDeferred = new Promise<ToolDescriptor[]>(r => { resolveInitial = r; });
+
+    let getToolsCallCount = 0;
+    const mockSource = {
+      getTools: () => {
+        getToolsCallCount++;
+        return initialDeferred;
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+    let populateCalled = false;
+    const origPopulate = registry.populate.bind(registry);
+    registry.populate = (tools: ToolDescriptor[]) => {
+      populateCalled = true;
+      return origPopulate(tools);
+    };
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => false,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    const disposable = bridge.start();
+
+    // Dispose BEFORE initial fetch resolves and before reconnect
+    await disposable.dispose();
+
+    // Now fire reconnect
+    capturedCb!(true);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Resolve the initial deferred (should not matter — disposed)
+    resolveInitial([{ name: 'ghost_tool' }]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.equal(populateCalled, false,
+      'populate() must NOT be called after dispose()');
+  });
+});
+
+describe('Slice P — connectionState.onConnectionChange absent (T-P-04)', () => {
+  it('T-P-04: connectionState without onConnectionChange — no crash, initial populate still works', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let getToolsCalled = false;
+    const mockSource = {
+      getTools: async () => {
+        getToolsCalled = true;
+        return [{ name: 'tool_pullonly' }];
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+
+    // Pull-only connectionState — NO onConnectionChange
+    const connectionState = {
+      isConnected: () => true,
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    // Must not throw
+    assert.doesNotThrow(() => { bridge.start(); });
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.equal(getToolsCalled, true, 'initial populate must still work when onConnectionChange absent');
+  });
+});
+
+describe('Slice P — getTools() rejects on reconnect (T-P-05)', () => {
+  it('T-P-05: getTools() rejects on reconnect → warn logged, registry preserves previous state', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    let callCount = 0;
+    const mockSource = {
+      getTools: async () => {
+        callCount++;
+        if (callCount === 1) return [{ name: 'tool_initial' }];
+        throw new Error('refresh failed');
+      },
+    };
+
+    const warnings: string[] = [];
+    const registry = new InMemoryToolRegistry();
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => true,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      logger: {
+        warn: (msg: string, ..._rest: unknown[]) => warnings.push(msg),
+        error: (_msg: string, ..._rest: unknown[]) => {},
+      },
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    bridge.start();
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Reconnect triggers failing getTools()
+    capturedCb!(true);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Registry should still have initial tools
+    const tools = await registry.listTools();
+    assert.deepStrictEqual(tools.map(t => t.name), ['tool_initial'],
+      'registry must preserve previous state when reconnect refresh fails');
+
+    // Warn must be logged
+    const warnMsg = warnings.find(w => w.includes('NotionBridgeController') || w.includes('refresh') || w.includes('failed'));
+    assert.ok(warnMsg !== undefined, 'warn must be logged when reconnect refresh fails');
+  });
+});
+
+describe('Slice P — dispose during in-flight refresh (T-P-06)', () => {
+  it('T-P-06: dispose() during in-flight reconnect refresh → !disposed guard prevents populate', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    type ToolDescriptor = { name: string };
+    let callCount = 0;
+    let resolveReconnectFetch!: (t: ToolDescriptor[]) => void;
+    const reconnectDeferred = new Promise<ToolDescriptor[]>(r => { resolveReconnectFetch = r; });
+
+    const mockSource = {
+      getTools: () => {
+        callCount++;
+        if (callCount === 1) return Promise.resolve([{ name: 'tool_initial' }]);
+        return reconnectDeferred;
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+    let populateCallCount = 0;
+    const origPopulate = registry.populate.bind(registry);
+    registry.populate = (tools: ToolDescriptor[]) => {
+      populateCallCount++;
+      return origPopulate(tools);
+    };
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => true,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    const disposable = bridge.start();
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    const populateCountAfterInitial = populateCallCount;
+
+    // Trigger reconnect → getTools() in-flight
+    capturedCb!(true);
+    // Dispose immediately before reconnect fetch resolves
+    await disposable.dispose();
+
+    // Now resolve the in-flight fetch
+    resolveReconnectFetch([{ name: 'tool_after_dispose' }]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    assert.equal(populateCallCount, populateCountAfterInitial,
+      'populate() must NOT be called for reconnect fetch that completes after dispose()');
+  });
+});
+
+describe('Slice P — queue semantics on rapid reconnect (T-P-07)', () => {
+  it('T-P-07: two rapid true events while first in-flight → second refresh executes after first', async () => {
+    const { InMemoryToolRegistry } = await import('../../../../../../../mcp-runtime/src/core/in-memory-tool-registry.ts');
+
+    type ToolDescriptor = { name: string };
+
+    let callCount = 0;
+    let resolveFirst!: (t: ToolDescriptor[]) => void;
+    const firstDeferred = new Promise<ToolDescriptor[]>(r => { resolveFirst = r; });
+
+    const mockSource = {
+      getTools: () => {
+        callCount++;
+        if (callCount === 1) return Promise.resolve([{ name: 'initial' }]);
+        if (callCount === 2) return firstDeferred;
+        return Promise.resolve([{ name: `call_${callCount}` }]);
+      },
+    };
+
+    const registry = new InMemoryToolRegistry();
+
+    let capturedCb: ((connected: boolean) => void) | undefined;
+    const connectionState = {
+      isConnected: () => true,
+      onConnectionChange: (cb: (connected: boolean) => void) => {
+        capturedCb = cb;
+        return { dispose: () => {} };
+      },
+    };
+
+    const bridge = createNotionRuntimeBridge({
+      ...makeBridgeDeps(),
+      toolCatalogSource: mockSource,
+      toolRegistry: registry,
+      connectionState,
+    });
+
+    bridge.start();
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // First reconnect — triggers call #2 (in-flight, deferred)
+    capturedCb!(true);
+    // Immediately: second reconnect — should be queued, NOT dropped
+    capturedCb!(true);
+
+    // Resolve first in-flight fetch
+    resolveFirst([{ name: 'from_first_reconnect' }]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    // Queue semantics: after first completes, pending=true triggers call #3
+    // Total calls: 1 (initial) + 1 (first reconnect) + 1 (queued second reconnect) = 3
+    assert.strictEqual(callCount, 3,
+      'queue semantics: second reconnect must trigger a refresh after first completes (not dropped)');
+  });
+});
