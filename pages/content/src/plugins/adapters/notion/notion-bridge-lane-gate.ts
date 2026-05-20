@@ -43,7 +43,7 @@ export type NotionRuntimeBridgeLaneGateDeps = Omit<NotionRuntimeBridgeDeps, 'mcp
     /**
      * Slice N: optional ConnectionStatePort for the D6 guard.
      * In production: caller (notion.adapter.ts) provides NotionConnectionState backed by useConnectionStore.
-     * In tests: omitted (legacy isReady? fallback remains active).
+     * In tests: omitted (no HostBindings-level connection guard; callTool invoked unconditionally).
      */
     connectionState?: ConnectionStatePort;
 };
@@ -94,7 +94,7 @@ export function startNotionRuntimeBridgeIfEnabled(
         toolRegistry,
         toolCatalogSource,
         // connectionState forwarded from deps (provided by notion.adapter.ts in production;
-        // absent in tests → legacy isReady? fallback)
+        // absent in tests → no connection pre-check, callTool invoked unconditionally)
     });
     return bridge.start();
 }

@@ -11,6 +11,7 @@ import { formatFunctionResult } from '../../../../../../mcp-runtime/src/core/fun
 import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
 import { NotionConnectionState } from './notion/notion-connection-state.ts';
 import { useConnectionStore } from '../../stores/connection.store';
+import { eventBus } from '../../events/event-bus';
 import { enableStreamBridgeOnWindow } from './notion.bridge-enable';
 
 /**
@@ -169,7 +170,13 @@ export class NotionAdapter extends BaseAdapterPlugin {
                     document,
                     MutationObserver,
                     formatFunctionResult,
-                    connectionState: new NotionConnectionState(() => useConnectionStore.getState().status),
+                    connectionState: new NotionConnectionState(
+                        () => useConnectionStore.getState().status,
+                        (cb) => {
+                            const unsubscribe = eventBus.on('connection:status-changed', ({ status }) => cb(status));
+                            return { dispose: unsubscribe };
+                        },
+                    ),
                 },
             );
 
