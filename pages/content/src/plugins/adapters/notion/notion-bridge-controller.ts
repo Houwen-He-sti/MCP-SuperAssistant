@@ -97,24 +97,61 @@ class NotionRuntimeBridgeController implements NotionRuntimeBridge {
         // populate() being called after dispose() has already run.
         let disposed = false;
 
-        // Slice M: coordinate source → registry populate (fire-and-forget, Option Y+)
+        // Slice M + P: coordinate source → registry populate + reconnect refresh
+        let connectionChangeSubscription: Disposable | undefined;
+
         if (this.deps.toolCatalogSource && this.deps.toolRegistry) {
             const registry = this.deps.toolRegistry;
-            this.deps.toolCatalogSource.getTools()
-                .then(tools => {
-                    if (!disposed) {
-                        registry.populate(tools);
-                    }
-                })
-                .catch(err => {
-                    this.deps.logger?.warn?.('[NotionBridgeController] getTools failed — registry remains empty', err);
-                });
+            const source = this.deps.toolCatalogSource;
+
+            // Queue semantics: if a refresh is already in-flight and another reconnect fires,
+            // mark refreshPending=true; after the in-flight request completes (success or failure),
+            // a pending refresh is executed. This ensures the most recent reconnect always
+            // triggers a refresh, even if the previous fetch was slow or failed.
+            let refreshInFlight = false;
+            let refreshPending = false;
+
+            const refreshRegistry = () => {
+                if (disposed) return;
+                if (refreshInFlight) {
+                    refreshPending = true;
+                    return;
+                }
+                refreshInFlight = true;
+                source.getTools()
+                    .then(tools => {
+                        if (!disposed) {
+                            registry.populate(tools);
+                        }
+                    })
+                    .catch(err => {
+                        this.deps.logger?.warn?.('[NotionBridgeController] registry refresh failed', err);
+                    })
+                    .finally(() => {
+                        refreshInFlight = false;
+                        if (refreshPending && !disposed) {
+                            refreshPending = false;
+                            refreshRegistry();
+                        }
+                    });
+            };
+
+            // Slice M: initial populate (same refreshRegistry path)
+            refreshRegistry();
+
+            // Slice P: subscribe to reconnect events
+            if (this.deps.connectionState?.onConnectionChange) {
+                connectionChangeSubscription = this.deps.connectionState.onConnectionChange(
+                    (connected) => { if (connected) refreshRegistry(); }
+                );
+            }
         }
 
         this.disposable = {
             dispose: async () => {
                 if (disposed) return; // safe double-dispose
                 disposed = true;
+                await connectionChangeSubscription?.dispose();
                 await inner.dispose();
                 this.disposable = null;
             },
