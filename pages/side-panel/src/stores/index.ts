@@ -75,7 +75,7 @@ const uiInitialState: UIStoreState = {
     autoExecute: false,
     autoInsertDelay: 2,
     autoSubmitDelay: 2,
-    autoExecuteDelay: 1,
+    autoExecuteDelay: 2,
     notifications: true,
     theme: 'system',
     language: 'en',
@@ -86,7 +86,7 @@ const uiInitialState: UIStoreState = {
     customInstructionsEnabled: false,
   },
   theme: 'system',
-  mcpEnabled: false,
+  mcpEnabled: true, // Match ui.store.ts default: enabled unless user explicitly disabled
 };
 
 // [UI-1] Real chrome.storage-backed UI store — same persist key as content ui.store.ts
