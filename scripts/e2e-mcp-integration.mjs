@@ -179,7 +179,7 @@ function waitForCdpEvent(ws, eventName, predicate, timeout = 5000) {
  */
 async function collectExecutionContexts(ws, alreadyEnabled = false) {
   const contexts = [];
-  const contextHandler = (data) => {
+  const contextHandler = data => {
     const msg = JSON.parse(data.toString());
     if (msg.method === 'Runtime.executionContextCreated') {
       contexts.push(msg.params.context);
@@ -295,9 +295,8 @@ async function runProbe() {
     // Strategy: evaluate document.URL + (window === window.top) in each candidate.
     // Only accept a context where the URL matches notionTabOrigin AND it is the top frame.
     const notionTabOrigin = new URL(notionTab.url).origin; // https://www.notion.so
-    const mcpSuperAssistantCandidates = allContexts.filter(c =>
-      c.name === 'MCP SuperAssistant' &&
-      c.origin?.startsWith('chrome-extension://')
+    const mcpSuperAssistantCandidates = allContexts.filter(
+      c => c.name === 'MCP SuperAssistant' && c.origin?.startsWith('chrome-extension://'),
     );
 
     let contentScriptCtx = null;
@@ -313,16 +312,18 @@ async function runProbe() {
           contentScriptCtx = ctx;
           break; // found main top-level frame context
         }
-      } catch (_) { /* stale context, skip */ }
+      } catch (_) {
+        /* stale context, skip */
+      }
     }
 
     // Fallback: any isolated world with notion.so origin (not playwright)
     if (!contentScriptCtx) {
-      contentScriptCtx = allContexts.find(c =>
-        c.auxData?.isDefault === false &&
-        c.origin === notionTabOrigin &&
-        !c.name?.includes('playwright')
-      ) ?? null;
+      console.warn('[WARN] No top-level MCP SuperAssistant context found; falling back to first notion.so isolated world (may be wrong frame)');
+      contentScriptCtx =
+        allContexts.find(
+          c => c.auxData?.isDefault === false && c.origin === notionTabOrigin && !c.name?.includes('playwright'),
+        ) ?? null;
     }
 
     result.details.isolatedContextCount = allContexts.filter(c => !c.auxData?.isDefault).length;
@@ -331,7 +332,8 @@ async function runProbe() {
 
     if (!contentScriptCtx) {
       result.fc = FC.MCP_NOT_CONNECTED;
-      result.details.error = 'No "MCP SuperAssistant" isolated execution context found — extension may not be active on this page';
+      result.details.error =
+        'No "MCP SuperAssistant" isolated execution context found — extension may not be active on this page';
       ws.close();
       return result;
     }
@@ -412,7 +414,7 @@ async function runProbe() {
       const callRes = await evalInContext(
         ws,
         `(async function() {
-          const result = await window.mcpClient.callTool('${TOOL_NAME}', { message: '${MESSAGE}' });
+          const result = await window.mcpClient.callTool(${JSON.stringify(TOOL_NAME)}, { message: ${JSON.stringify(MESSAGE)} });
           return JSON.stringify(result);
         })()`,
         contentScriptCtx.id,
