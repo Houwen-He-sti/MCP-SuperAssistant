@@ -10,7 +10,7 @@ import type { ConnectionStatus, ServerConfig, Tool } from './stores';
 export interface BaseMessage {
   type: string;
   payload?: any;
-  origin: 'content' | 'background' | 'popup' | 'options';
+  origin: 'content' | 'background' | 'popup' | 'options' | 'side-panel';
   timestamp: number;
   id?: string;
 }

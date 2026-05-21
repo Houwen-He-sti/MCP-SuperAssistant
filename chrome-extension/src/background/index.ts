@@ -1102,6 +1102,10 @@ function broadcastConnectionStatusToContentScripts(isConnected: boolean, error?:
       }
     });
   });
+  // [UI-3] Also broadcast to extension pages (side panel, popup) via runtime.sendMessage
+  chrome.runtime.sendMessage(broadcastMessage).catch(() => {
+    // Ignore errors when no extension pages are listening
+  });
 }
 
 /**
@@ -1129,6 +1133,10 @@ function broadcastToolsUpdateToContentScripts(tools: any[]) {
         });
       }
     });
+  });
+  // [UI-3] Also broadcast to extension pages (side panel, popup) via runtime.sendMessage
+  chrome.runtime.sendMessage(broadcastMessage).catch(() => {
+    // Ignore errors when no extension pages are listening
   });
 }
 
