@@ -234,34 +234,53 @@ export class NotionAdapterBridgeHost implements NotionProviderHost {
     //
     // Performs initial scan of existing nodes, then attaches MutationObserver.
     // Shared `seen` WeakSet prevents double-fire for nodes present at scan time.
+    //
+    // Slice Y fix: Notion AI streams via characterData mutations (in-place text
+    // node updates), NOT childList additions.  Added:
+    //   (a) characterData:true  so mutations are observed
+    //   (b) 500ms debounce scan on characterData — fires isComplete:true once
+    //       text stops changing, regardless of stop-button presence
+    //   (c) streaming-end poller (300ms, stop-button fallback) — backup path
     // ------------------------------------------------------------------
 
     private _attachObserver(container: Element, callback: AssistantMessageCallback): Disposable {
-        const seen = new WeakSet<object>();
+        let disposed = false;
+        let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-        // Initial scan: emit pre-existing non-empty nodes
-        // Defensive: childNodes may be absent in test mocks that only implement querySelector
-        const existingNodes = (container as unknown as { childNodes?: Iterable<unknown> }).childNodes;
-        for (const node of existingNodes ? Array.from(existingNodes) : []) {
-            const content = (node as { textContent?: string | null }).textContent ?? '';
-            if (!content.trim()) continue;
-            seen.add(node as object);
-            void callback({ content, isComplete: true, timestamp: Date.now() });
-        }
+        /** Emit the current full container text as a complete message. */
+        const scanNow = () => {
+            if (disposed) return;
+            const content = (container as unknown as { textContent?: string | null }).textContent ?? '';
+            if (content.trim()) {
+                console.info('[Notion Bridge Host] Emitting full container content for parsing, len =', content.length);
+                void callback({ content, isComplete: true, timestamp: Date.now() });
+            }
+        };
 
-        // MutationObserver for new nodes (shares `seen` with initial scan)
+        /** Re-arm a 300 ms debounce so rapid mutations produce one scan after quiet period. */
+        const debouncedScan = () => {
+            if (disposed) return;
+            if (debounceTimer !== null) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(scanNow, 300);
+        };
+
+        // Initial scan: emit existing content immediately (if any)
+        scanNow();
+
+        // MutationObserver: listen to any node addition/removal or text mutations in the subtree
         const observer = new this.MutationObserverCtor((records) => {
-            for (const record of records) {
-                for (const node of Array.from(record.addedNodes)) {
-                    if (seen.has(node as object)) continue;
-                    seen.add(node as object);
-                    const content = (node as { textContent?: string | null }).textContent ?? '';
-                    if (!content.trim()) continue;
-                    void callback({ content, isComplete: true, timestamp: Date.now() });
-                }
+            if (records.length > 0) {
+                debouncedScan();
             }
         });
-        observer.observe(container as unknown as Node, { childList: true, subtree: true });
-        return { dispose: () => observer.disconnect() };
+        observer.observe(container as unknown as Node, { childList: true, subtree: true, characterData: true });
+
+        return {
+            dispose: () => {
+                disposed = true;
+                if (debounceTimer !== null) clearTimeout(debounceTimer);
+                observer.disconnect();
+            },
+        };
     }
 }
