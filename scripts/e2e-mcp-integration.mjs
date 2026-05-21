@@ -32,7 +32,7 @@
  * This script enumerates execution contexts and targets the isolated world.
  *
  * Usage:
- *   node scripts/e2e-mcp-integration.mjs [--tool committee-bridge.echo] [--message slice-x-probe]
+ *   node scripts/e2e-mcp-integration.mjs [--tool=committee-bridge.echo] [--message=slice-x-probe]
  *   node scripts/e2e-mcp-integration.mjs --list-contexts   # debug: list all contexts
  *
  * Author: GitHub Copilot (Claude Sonnet 4.6)
@@ -74,11 +74,6 @@ const FC = {
     code: 4,
     label: 'FC-3:EXT_ABSENT',
     desc: 'Extension stream interceptor marker not found (MAIN world)',
-  },
-  BRIDGE_NOT_ACTIVE: {
-    code: 5,
-    label: 'FC-4:BRIDGE_OFF',
-    desc: 'BH bridge activation log not detected — loop may not have started',
   },
   MCP_NOT_CONNECTED: {
     code: 6,
@@ -295,9 +290,10 @@ async function runProbe() {
     // ── Find content-script isolated world (already collected above) ──────────
     // index.ts sets window.mcpClient in the "MCP SuperAssistant" isolated world.
     // There can be multiple "MCP SuperAssistant" contexts (main frame + iframes like
-    // identity.notion.so/authSync). We need the one from the MAIN www.notion.so frame.
-    // Strategy: evaluate document.URL in each candidate and pick the one whose URL
-    // matches the notionTab's origin (www.notion.so), not a subdomain (identity.notion.so).
+    // identity.notion.so/authSync or same-origin sub-iframes). We need the TOP-LEVEL
+    // main frame from www.notion.so/chat.
+    // Strategy: evaluate document.URL + (window === window.top) in each candidate.
+    // Only accept a context where the URL matches notionTabOrigin AND it is the top frame.
     const notionTabOrigin = new URL(notionTab.url).origin; // https://www.notion.so
     const mcpSuperAssistantCandidates = allContexts.filter(c =>
       c.name === 'MCP SuperAssistant' &&
@@ -307,15 +303,15 @@ async function runProbe() {
     let contentScriptCtx = null;
     for (const ctx of mcpSuperAssistantCandidates) {
       try {
-        const urlCheck = await cdpCommand(ws, 'Runtime.evaluate', {
-          expression: 'document.URL',
+        const frameCheck = await cdpCommand(ws, 'Runtime.evaluate', {
+          expression: 'JSON.stringify({ url: document.URL, isTop: window === window.top })',
           contextId: ctx.id,
           returnByValue: true,
         });
-        const frameUrl = urlCheck?.result?.value ?? '';
-        if (frameUrl.startsWith(notionTabOrigin)) {
+        const { url = '', isTop = false } = JSON.parse(frameCheck?.result?.value ?? '{}');
+        if (url.startsWith(notionTabOrigin) && isTop) {
           contentScriptCtx = ctx;
-          break; // found main frame context; stop searching
+          break; // found main top-level frame context
         }
       } catch (_) { /* stale context, skip */ }
     }
