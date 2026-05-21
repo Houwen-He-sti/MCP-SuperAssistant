@@ -175,20 +175,81 @@ export class NotionAdapterBridgeHost implements NotionProviderHost {
     // Evidence: BH-1 CDP probe confirms .layout-content MutationObserver target.
     // See NATIVE_CHAT_CONTENT_SEL contract comment above.
     //
+    // DEFERRED SETUP (Slice V fix for React SPA timing):
+    //   Notion AI renders .layout-content asynchronously (~50-200ms after
+    //   document_idle). If the container is absent at call time, a document-level
+    //   MutationObserver waits for it to appear, then attaches the real observer.
+    //
     // OBSERVER LIFECYCLE:
-    //   [CREATE] new MutationObserver on .layout-content
-    //   [ACTIVE] fires callback for each new content node (empty nodes skipped)
-    //   [DISPOSE] caller calls disposable.dispose() → observer.disconnect()
+    //   Fast path (element present at call time):
+    //     [CREATE] new MutationObserver on .layout-content
+    //     [SCAN]   emit all existing non-empty childNodes (initial scan)
+    //     [ACTIVE] fires callback for each new content node (empty nodes skipped)
+    //     [DISPOSE] caller calls disposable.dispose() → observer.disconnect()
+    //
+    //   Deferred path (element absent at call time):
+    //     [CREATE] document-level watcher MutationObserver
+    //     [WAIT]   fires each DOM mutation until .layout-content appears
+    //     [ATTACH] disconnect watcher → initial scan → real observer (fast path)
+    //     [DISPOSE] sets disposed flag; disconnects watcher OR real observer
+    //
+    // SAFETY INVARIANTS (P1 constraints from committee review):
+    //   - disposed flag prevents real observer from attaching after dispose()
+    //   - initial scan nodes added to shared `seen` WeakSet → no double-fire
     // ------------------------------------------------------------------
 
     observeAssistantMessages(callback: AssistantMessageCallback): Disposable {
         const container = this.doc.querySelector(NATIVE_CHAT_CONTENT_SEL);
-        if (!container) {
-            throw new Error(
-                'observeAssistantMessages: .layout-content container not found — cannot observe assistant messages',
-            );
+        if (container) {
+            // Fast path: element already present
+            return this._attachObserver(container, callback);
         }
+
+        // Deferred path: wait for .layout-content to appear
+        let disposed = false;
+        let innerDispose: (() => void) | null = null;
+
+        const watcher = new this.MutationObserverCtor(() => {
+            // disposed flag prevents attach after dispose() clears the watcher
+            if (disposed) return;
+            const el = this.doc.querySelector(NATIVE_CHAT_CONTENT_SEL);
+            if (!el) return;
+            watcher.disconnect();
+            const d = this._attachObserver(el, callback);
+            innerDispose = () => d.dispose();
+        });
+        watcher.observe(this.doc.documentElement as unknown as Node, { childList: true, subtree: true });
+
+        return {
+            dispose: () => {
+                disposed = true;
+                watcher.disconnect();
+                innerDispose?.();
+            },
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // _attachObserver — internal helper for observeAssistantMessages
+    //
+    // Performs initial scan of existing nodes, then attaches MutationObserver.
+    // Shared `seen` WeakSet prevents double-fire for nodes present at scan time.
+    // ------------------------------------------------------------------
+
+    private _attachObserver(container: Element, callback: AssistantMessageCallback): Disposable {
         const seen = new WeakSet<object>();
+
+        // Initial scan: emit pre-existing non-empty nodes
+        // Defensive: childNodes may be absent in test mocks that only implement querySelector
+        const existingNodes = (container as unknown as { childNodes?: Iterable<unknown> }).childNodes;
+        for (const node of existingNodes ? Array.from(existingNodes) : []) {
+            const content = (node as { textContent?: string | null }).textContent ?? '';
+            if (!content.trim()) continue;
+            seen.add(node as object);
+            void callback({ content, isComplete: true, timestamp: Date.now() });
+        }
+
+        // MutationObserver for new nodes (shares `seen` with initial scan)
         const observer = new this.MutationObserverCtor((records) => {
             for (const record of records) {
                 for (const node of Array.from(record.addedNodes)) {
@@ -202,5 +263,4 @@ export class NotionAdapterBridgeHost implements NotionProviderHost {
         });
         observer.observe(container as unknown as Node, { childList: true, subtree: true });
         return { dispose: () => observer.disconnect() };
-    }
-}
+    }}
