@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { devtools, persist, createJSONStorage } from 'zustand/middleware';
+import { createChromeStorageStateStorage, subscribeChromeStorageRehydrate } from '@extension/storage';
 import { eventBus, initializeEventBus } from '../events'; // Assuming initializeEventBus might be called here or in a main initializer
 import type { GlobalSettings } from '../types/stores';
 import { createLogger } from '@extension/shared/lib/logger';
@@ -95,8 +96,8 @@ export const useAppStore = create<AppState>()(
         },
       }),
       {
-        name: 'mcp-super-assistant-app-store', // Unique name for localStorage
-        storage: createJSONStorage(() => localStorage), // Specify localStorage
+        name: 'mcp-super-assistant-app-store',
+        storage: createJSONStorage(() => createChromeStorageStateStorage({ area: 'local', migrateFromLocalStorage: true })),
         partialize: (state) => ({
           // Only persist globalSettings and sidebarWidth from uiStore (example)
           globalSettings: state.globalSettings,
@@ -111,6 +112,9 @@ export const useAppStore = create<AppState>()(
 // Initialize the store automatically on load or ensure it's called from a central initializer.
 // For content scripts, direct initialization might be fine.
 // useAppStore.getState().initialize(); // Consider if auto-init is desired or should be triggered by an initializer module.
+
+// Sync: rehydrate when chrome.storage.local changes from another context (e.g. side panel)
+subscribeChromeStorageRehydrate({ key: 'mcp-super-assistant-app-store', store: useAppStore });
 
 // Listen to chrome.runtime.onMessage for site changes from background or popup
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {

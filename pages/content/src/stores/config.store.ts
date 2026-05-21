@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { devtools, persist, createJSONStorage } from 'zustand/middleware';
+import { createChromeStorageStateStorage, subscribeChromeStorageRehydrate } from '@extension/storage';
 
 export interface FeatureFlag {
   enabled: boolean;
@@ -324,7 +325,7 @@ export const useConfigStore = create<ConfigState>()(
       }),
       {
         name: 'config-store',
-        storage: createJSONStorage(() => localStorage),
+        storage: createJSONStorage(() => createChromeStorageStateStorage({ area: 'local', migrateFromLocalStorage: true })),
         partialize: (state) => ({
           featureFlags: state.featureFlags,
           userProperties: state.userProperties,
@@ -339,3 +340,6 @@ export const useConfigStore = create<ConfigState>()(
     { name: 'ConfigStore' }
   )
 );
+
+// Sync: rehydrate when chrome.storage.local changes from another context (e.g. side panel)
+subscribeChromeStorageRehydrate({ key: 'config-store', store: useConfigStore });
