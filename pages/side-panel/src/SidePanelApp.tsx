@@ -160,7 +160,7 @@ export const SidePanelApp = () => {
                                 <li key={tool.name} className="text-sm text-slate-700 dark:text-slate-300 py-1 px-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800">
                                     <span className="font-medium">{tool.name}</span>
                                     {tool.description && (
-                                        <span className="ml-2 text-xs text-slate-500 dark:text-slate-400">{tool.description}</span>
+                                        <span className="ml-2 text-xs text-slate-500 dark:text-slate-400 truncate max-w-xs">{tool.description}</span>
                                     )}
                                 </li>
                             ))}
