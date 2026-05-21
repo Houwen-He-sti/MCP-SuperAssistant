@@ -36,20 +36,40 @@ const ACTIVATION_TIMEOUT_MS = (() => {
   const arg = args.find(a => a.startsWith('--activation-timeout-ms='));
   return arg ? parseInt(arg.split('=')[1], 10) : 8000;
 })();
-const WAIT_ONLY   = args.includes('--wait-only');
-const IDEMPOTENT  = args.includes('--idempotent');
+const WAIT_ONLY = args.includes('--wait-only');
+const IDEMPOTENT = args.includes('--idempotent');
 
 // ---------------------------------------------------------------------------
 // Failure class definitions
 // ---------------------------------------------------------------------------
 
 const FC = {
-  PASS:               { code: 0, label: 'PASS',               desc: 'BH bridge activated — ToolCallLoop active log detected' },
-  CDP_UNAVAILABLE:    { code: 2, label: 'FC-1:CDP_UNAVAILABLE',  desc: `Cannot connect to Chrome DevTools at ${CDP_HOST}:${CDP_PORT}. Is Chrome running with --remote-debugging-port=${CDP_PORT}?` },
-  NO_NOTION_TAB:      { code: 3, label: 'FC-2:NO_NOTION_TAB',   desc: 'No Notion /chat or /workspace page found. Open https://www.notion.so/chat first.' },
-  EXT_NOT_LOADED:     { code: 4, label: 'FC-3:EXT_NOT_LOADED',  desc: 'MCP-SA content script not detected. Build + reload extension in chrome://extensions/.' },
-  MCP_CLIENT_ABSENT:  { code: 5, label: 'FC-4:MCP_CLIENT_ABSENT', desc: 'window.mcpClient absent or no callTool(). Extension loaded but mcpClient not initialized.' },
-  ACTIVATION_TIMEOUT: { code: 6, label: 'FC-5:ACTIVATION_TIMEOUT', desc: `BH bridge start() did not emit activation log within ${ACTIVATION_TIMEOUT_MS}ms.` },
+  PASS: { code: 0, label: 'PASS', desc: 'BH bridge activated — ToolCallLoop active log detected' },
+  CDP_UNAVAILABLE: {
+    code: 2,
+    label: 'FC-1:CDP_UNAVAILABLE',
+    desc: `Cannot connect to Chrome DevTools at ${CDP_HOST}:${CDP_PORT}. Is Chrome running with --remote-debugging-port=${CDP_PORT}?`,
+  },
+  NO_NOTION_TAB: {
+    code: 3,
+    label: 'FC-2:NO_NOTION_TAB',
+    desc: 'No notion.so page found. Open https://www.notion.so/chat or /ai first.',
+  },
+  EXT_NOT_LOADED: {
+    code: 4,
+    label: 'FC-3:EXT_NOT_LOADED',
+    desc: 'MCP-SA content script not detected. Build + reload extension in chrome://extensions/.',
+  },
+  MCP_CLIENT_ABSENT: {
+    code: 5,
+    label: 'FC-4:MCP_CLIENT_ABSENT',
+    desc: 'window.mcpClient absent or no callTool(). Extension loaded but mcpClient not initialized.',
+  },
+  ACTIVATION_TIMEOUT: {
+    code: 6,
+    label: 'FC-5:ACTIVATION_TIMEOUT',
+    desc: `BH bridge start() did not emit activation log within ${ACTIVATION_TIMEOUT_MS}ms.`,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -75,7 +95,10 @@ async function cdpFetchJson(path) {
 function cdpEval(wsUrl, expression, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
-    const timer = setTimeout(() => { ws.close(); reject(new Error('cdpEval timeout')); }, timeoutMs);
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error('cdpEval timeout'));
+    }, timeoutMs);
     ws.on('open', () => {
       ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
     });
@@ -87,7 +110,10 @@ function cdpEval(wsUrl, expression, timeoutMs = 5000) {
         resolve(msg.result?.result ?? { type: 'error', value: JSON.stringify(msg) });
       }
     });
-    ws.on('error', e => { clearTimeout(timer); reject(e); });
+    ws.on('error', e => {
+      clearTimeout(timer);
+      reject(e);
+    });
   });
 }
 
@@ -95,13 +121,23 @@ function cdpEval(wsUrl, expression, timeoutMs = 5000) {
 function cdpCommand(wsUrl, method, params = {}, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
-    const timer = setTimeout(() => { ws.close(); resolve({ timedOut: true }); }, timeoutMs);
+    const timer = setTimeout(() => {
+      ws.close();
+      resolve({ timedOut: true });
+    }, timeoutMs);
     ws.on('open', () => ws.send(JSON.stringify({ id: 99, method, params })));
     ws.on('message', raw => {
       const msg = JSON.parse(raw);
-      if (msg.id === 99) { clearTimeout(timer); ws.close(); resolve(msg); }
+      if (msg.id === 99) {
+        clearTimeout(timer);
+        ws.close();
+        resolve(msg);
+      }
     });
-    ws.on('error', e => { clearTimeout(timer); reject(e); });
+    ws.on('error', e => {
+      clearTimeout(timer);
+      reject(e);
+    });
   });
 }
 
@@ -112,7 +148,10 @@ function cdpCommand(wsUrl, method, params = {}, timeoutMs = 5000) {
 function waitForActivationLog(wsUrl, pattern, timeoutMs) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
-    const timer = setTimeout(() => { ws.close(); resolve({ found: false, reason: 'timeout' }); }, timeoutMs);
+    const timer = setTimeout(() => {
+      ws.close();
+      resolve({ found: false, reason: 'timeout' });
+    }, timeoutMs);
     ws.on('open', () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.enable' })));
     ws.on('message', raw => {
       const msg = JSON.parse(raw);
@@ -125,7 +164,10 @@ function waitForActivationLog(wsUrl, pattern, timeoutMs) {
         }
       }
     });
-    ws.on('error', e => { clearTimeout(timer); reject(e); });
+    ws.on('error', e => {
+      clearTimeout(timer);
+      reject(e);
+    });
   });
 }
 
@@ -146,16 +188,18 @@ async function runProbe() {
     return result;
   }
 
-  // FC-2: Find a Notion chat/workspace tab with a debugger URL
-  const notionTab = tabs.find(t =>
-    t.url &&
-    (t.url.includes('notion.so/chat') || t.url.match(/notion\.so\/[a-f0-9-]{8,}/)) &&
-    !t.url.includes('_assets') &&
-    t.webSocketDebuggerUrl
+  // FC-2: Find any Notion tab (chat, ai, workspace UUID) with a debugger URL
+  const notionTab = tabs.find(
+    t =>
+      t.url &&
+      t.url.includes('notion.so') &&
+      !t.url.includes('_assets') &&
+      !t.url.startsWith('chrome://') &&
+      t.webSocketDebuggerUrl,
   );
   if (!notionTab) {
     result.fc = FC.NO_NOTION_TAB;
-    result.details.availableTabs = tabs.slice(0, 5).map(t => t.url?.slice(0, 60) ?? 'unknown');
+    result.details.availableTabs = tabs.slice(0, 5).map(t => t.url?.slice(0, 80) ?? 'unknown');
     return result;
   }
   result.details.notionTabUrl = notionTab.url.slice(0, 80);
@@ -182,17 +226,21 @@ async function runProbe() {
   const activationResult = await activationPromise;
   result.details.activationLog = activationResult;
 
-  // Probe ext/mcp state (always; needed for failure classification)
+  // Probe ext state via MAIN world (stream-interceptor-main.iife.js runs in MAIN world).
+  // NOTE: mcpClient is set in ISOLATED world and is NOT accessible via Runtime.evaluate.
+  // extLoaded is inferred from the MAIN world stream interceptor marker.
   let probeData = {};
   try {
-    const r = await cdpEval(wsUrl, `(function() {
+    const r = await cdpEval(
+      wsUrl,
+      `(function() {
       return JSON.stringify({
-        extLoaded: !!(window.__MCP_SA_LOADED__ || window.__mcpSuperAssistantLoaded__ || document.querySelector('[data-mcp]')),
-        mcpClientType: typeof window.mcpClient,
-        mcpHasCallTool: !!(window.mcpClient && typeof window.mcpClient.callTool === 'function'),
-        mcpHasGetTools: !!(window.mcpClient && typeof window.mcpClient.getAvailableTools === 'function'),
+        streamInterceptorInstalled: !!(window['__MCP_SA_NOTION_STREAM_INTERCEPTOR_INSTALLED_V1__']),
+        fetchWrapped: !!(window.fetch && window.fetch.__mcpSaWrapped),
+        extLoaded: !!(window['__MCP_SA_NOTION_STREAM_INTERCEPTOR_INSTALLED_V1__']),
       });
-    })()`);
+    })()`,
+    );
     probeData = JSON.parse(r.value ?? '{}');
   } catch (e) {
     result.details.probeError = `CDP eval failed: ${e.message}`;
@@ -200,20 +248,16 @@ async function runProbe() {
   result.details.probeData = probeData;
 
   if (!activationResult.found) {
-    if (!probeData.extLoaded)       result.fc = FC.EXT_NOT_LOADED;
-    else if (!probeData.mcpHasCallTool) result.fc = FC.MCP_CLIENT_ABSENT;
-    else                            result.fc = FC.ACTIVATION_TIMEOUT;
+    // FC-3: stream interceptor (MAIN world marker) not present → content script not injected
+    if (!probeData.extLoaded) result.fc = FC.EXT_NOT_LOADED;
+    // FC-5: interceptor present but no activation log (could be FC-4/mcpClient absent too;
+    //        ISOLATED world is not accessible here, so we can't distinguish)
+    else result.fc = FC.ACTIVATION_TIMEOUT;
     return result;
   }
 
-  // Activation confirmed — still check mcpClient (FC-4 edge case)
-  if (!probeData.mcpHasCallTool) {
-    result.fc = FC.MCP_CLIENT_ABSENT;
-    result.details.mcpClientType = probeData.mcpClientType;
-    return result;
-  }
-
-  return result;  // FC.PASS
+  // Activation log found — PASS (mcpClient must be present for bridge to activate)
+  return result; // FC.PASS
 }
 
 // ---------------------------------------------------------------------------
