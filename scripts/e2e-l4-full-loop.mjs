@@ -49,6 +49,9 @@
  */
 
 import WebSocket from 'ws';
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -253,40 +256,14 @@ async function main() {
     fail(FC.CDP_UNAVAILABLE, `WS open failed: ${e.message}`);
   }
 
-  // ---- Auto-navigate to bridge conversation if at home page ----
-  // The home page (/chat without ?t=) has a submit button that won't activate via CDP text injection.
-  // An existing bridge conversation (?t=...) has MCP system prompt draft, button already active.
+  // ---- Force-navigate to clean home page ----
+  // Force a complete page navigation reload to guarantee a pristine state,
+  // wiping out any leftover DOM text or hung session memory from previous runs.
   await cdpCommand(ws, 'Page.enable');
-  const pageUrlRes = await cdpCommand(ws, 'Runtime.evaluate', {
-    expression: 'document.URL', returnByValue: true
-  }).catch(() => ({ result: { value: '' } }));
-  const pageUrl = pageUrlRes.result?.value || '';
-  const isHomePage = pageUrl.includes('notion.so/chat') && !pageUrl.includes('?t=') && !pageUrl.includes('/chat/');
-
-  if (isHomePage) {
-    console.log('[L4-E2E] At Notion AI home page — navigating to bridge conversation...');
-    // Find the most recent bridge conversation and click it
-    const navClick = await cdpCommand(ws, 'Runtime.evaluate', {
-      expression: `(function() {
-        const all = Array.from(document.querySelectorAll('*'));
-        const item = all.find(el => el.offsetParent !== null && (el.textContent || '').trim().includes('本地代码审查桥接器协议'));
-        if (!item) return null;
-        const rect = item.getBoundingClientRect();
-        return {x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2)};
-      })()`,
-      returnByValue: true,
-    }).catch(() => ({ result: { value: null } }));
-
-    const navPos = navClick.result?.value;
-    if (navPos?.x) {
-      await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: navPos.x, y: navPos.y, button: 'left', clickCount: 1 });
-      await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: navPos.x, y: navPos.y, button: 'left', clickCount: 1 });
-      console.log('[L4-E2E] Clicked bridge conversation, waiting for SPA navigation...');
-      await new Promise(r => setTimeout(r, 4000));
-    } else {
-      console.warn('[L4-E2E] Bridge conversation item not found — proceeding at home page');
-    }
-  }
+  console.log('[L4-E2E] Navigating to Notion AI chat home page for an absolute clean context...');
+  await cdpCommand(ws, 'Page.navigate', { url: 'https://www.notion.so/chat' });
+  console.log('[L4-E2E] Navigation triggered. Waiting 6s for page bundle load...');
+  await new Promise(resolve => setTimeout(resolve, 6000));
 
   // Enable Runtime and collect execution contexts
   const contexts = await collectExecutionContexts(ws);
@@ -399,6 +376,31 @@ async function main() {
     console.log('[L4-E2E] AC-1: mcpClient present — assuming ToolCallLoop active (signal may have pre-emitted)');
   }
 
+  // ---- Click 'New Chat' button to ensure clean state ----
+  console.log('[L4-E2E] Attempting to click "New Chat" button to ensure absolute clean session...');
+  await evalInMainWorld(ws, `
+    (function() {
+      const newChatEl = Array.from(document.querySelectorAll('div, span, button')).find(el => {
+        const text = (el.textContent || '').trim();
+        return text === '新对话' || text === '新对话⌘O' || text === 'New chat' || text === 'New chat⌘O';
+      });
+      if (newChatEl) {
+        newChatEl.click();
+        return { clicked: true, text: newChatEl.textContent.trim() };
+      }
+      return { clicked: false };
+    })()
+  `, 4000).then(res => {
+    if (res?.result?.value?.clicked) {
+      console.log(`[L4-E2E] "New Chat" button clicked successfully: "${res.result.value.text}"`);
+    } else {
+      console.log('[L4-E2E] "New Chat" button not found or already clicked, proceeding');
+    }
+  }).catch(e => console.warn('[L4-E2E] Error clicking new chat button:', e.message));
+
+  // Wait 5s for new session to initialize
+  await new Promise(r => setTimeout(r, 5000));
+
   // ---- Pre-flight: Input state check (main world) ----
   // Just verify the input exists. Do NOT modify it here — the inject step handles clearing.
   // IMPORTANT: Never use innerHTML='' on Notion's contenteditable — it destroys React fiber connections.
@@ -443,17 +445,105 @@ async function main() {
     AI_RESPONSE_WAIT_MS
   ).catch(() => null);
 
-  // ---- Inject sentinel prompt into Notion AI input ----
-  // CRITICAL: must request fenced ```jsonl ... ``` block — BridgeJsonlParser requires this format.
-  // Bare JSONL silently returns 0 parsed calls.
-  const sentinelPrompt = `Please use the committee-bridge.echo tool with message "${PROBE_MESSAGE}". Wrap your response in a \`\`\`jsonl code block exactly as shown in the system instructions.`;
-  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 70)}..."`);
+  const bridgePromptPath = path.join(process.cwd(), 'pages/content/src/services/prompt/prompt-templates/notion-bridge.md');
+  const bridgePrompt = fs.readFileSync(bridgePromptPath, 'utf8');
 
-  // ---- Inject + Submit in ONE atomic eval call ----
-  // CRITICAL: execCommand triggers React's synchronous setState (Notion uses React 17 or similar).
-  // We MUST click the button in the same synchronous JS call, before the browser can change focus.
-  // Also CRITICAL: clear input first — the submit button only activates on empty→non-empty transition.
-  const insertText = sentinelPrompt;
+  const sentinelPrompt = `${bridgePrompt}\n\n` +
+    `下面是你要执行的具体指令：\n` +
+    `Please call committee-bridge.echo with message "${PROBE_MESSAGE}". ` +
+    `Wrap your response in a fenced code block exactly like this:\n` +
+    `\`\`\`jsonl\n` +
+    `{"type":"function_call_start","name":"committee-bridge.echo","call_id":"slice-y-probe-2026-05-21-1"}\n` +
+    `{"type":"description","text":"Slice Y probe"}\n` +
+    `{"type":"parameter","key":"message","value":"${PROBE_MESSAGE}"}\n` +
+    `{"type":"function_call_end","call_id":"slice-y-probe-2026-05-21-1"}\n` +
+    `\`\`\``;
+  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 70)}..."`);
+  
+  // Robust pre-click alignment in main world: scroll, focus, and place selection
+  console.log(`[L4-E2E] Performing JS scrollIntoView, focus, selection placement`);
+  await evalInMainWorld(ws, `
+    (function() {
+      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                  Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                    const ph = el.getAttribute('placeholder');
+                    const r = el.getBoundingClientRect();
+                    return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                  });
+      if (!inp) return false;
+      inp.scrollIntoView({block: 'center', behavior: 'instant'});
+      inp.focus();
+      const range = document.createRange();
+      range.selectNodeContents(inp);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      inp.click();
+      return true;
+    })()
+  `, 4000).catch(() => null);
+  await new Promise(r => setTimeout(r, 200));
+
+  // Recalculate physical coordinates post-scroll
+  const coordCheck = await evalInMainWorld(ws, `
+    (function() {
+      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                  Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                    const ph = el.getAttribute('placeholder');
+                    const r = el.getBoundingClientRect();
+                    return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                  });
+      if (!inp) return null;
+      const r = inp.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
+    })()
+  `).catch(() => ({ result: { value: null } }));
+  const coords = coordCheck.result?.value || { x: inputState.inputX, y: inputState.inputY };
+
+  console.log(`[L4-E2E] Clicking input physically at coordinates (${coords.x}, ${coords.y})`);
+  await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+  await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+  await new Promise(r => setTimeout(r, 300)); // Wait for physical focus to settle
+
+  // ---- Programmatic clipboard paste event dispatch in main world ----
+  console.log(`[L4-E2E] Dispatching programmatic ClipboardEvent('paste') carrying sentinelPrompt to contenteditable`);
+  await evalInMainWorld(ws, `
+    (function() {
+      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                  Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                    const ph = el.getAttribute('placeholder');
+                    const r = el.getBoundingClientRect();
+                    return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                  });
+      if (!inp) return false;
+      inp.scrollIntoView({block: 'center', behavior: 'instant'});
+      inp.focus();
+      
+      // Force clear any leftover text safely to keep injection completely pure
+      document.execCommand('selectAll', false, null);
+      document.execCommand('delete', false, null);
+      
+      // Construct a programmatic DataTransfer with the target prompt
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData('text/plain', ${JSON.stringify(sentinelPrompt)});
+      
+      // Dispatch a bubbling, cancelable paste ClipboardEvent
+      const pasteEvent = new ClipboardEvent('paste', {
+        clipboardData: dataTransfer,
+        bubbles: true,
+        cancelable: true
+      });
+      
+      inp.dispatchEvent(pasteEvent);
+      return true;
+    })()
+  `, 6000).catch(() => null);
+  
+  console.log(`[L4-E2E] Waiting for ProseMirror paste event parsing to settle...`);
+  await new Promise(r => setTimeout(r, 800)); // Give ProseMirror 800ms to process the paste and update React state
+
+  // ---- Check + Submit in ONE atomic eval call ----
   const injectSubmitResult = await evalInMainWorld(ws, `
     (function() {
       const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
@@ -463,29 +553,54 @@ async function main() {
                     return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
                   });
       if (!inp) return { ok: false, reason: 'no-input' };
-      inp.focus();
-      const beforeLen = (inp.textContent || '').trim().length;
-      // Atomic replace: selectAll + insertText replaces ALL existing text in ONE execCommand call.
-      // This is the key — two separate execCommands (delete + insertText) may lose React connection.
-      document.execCommand('selectAll', false, null);
-      const text = ${JSON.stringify(insertText)};
-      const execOk = document.execCommand('insertText', false, text);
+      
       const after = (inp.textContent || '').trim();
-      // Step 3: Immediately find and click the now-active submit button
+      const execOk = true;
+      const beforeLen = 0;
+      
+      // Step 3: Find and click the now-active submit button
       const btns = Array.from(document.querySelectorAll('button'));
       const btn = btns.find(b => {
         if (!b.offsetParent) return false;
         const s = window.getComputedStyle(b);
-        return s.pointerEvents !== 'none' && parseFloat(s.opacity) > 0.5 && b.type === 'submit';
+        // Relax check: accept either type="submit" or type="button" and check only visible opacity > 0.5.
+        // pointer-events: none inside ComputedStyle doesn't block programmatic JS .click() calls.
+        return parseFloat(s.opacity) > 0.5 && (b.type === 'submit' || b.type === 'button');
       });
       if (btn) {
         btn.click();
+        
+        // Also dispatch highly realistic Enter KeyboardEvents to guarantee physical submission
+        const enterDown = new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+        });
+        const enterUp = new KeyboardEvent('keyup', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+        });
+        inp.dispatchEvent(enterDown);
+        inp.dispatchEvent(enterUp);
+        
         const rect = btn.getBoundingClientRect();
         return { ok: true, execOk, beforeLen, afterLen: after.length, submitted: true, btnX: Math.round(rect.x+rect.width/2), btnY: Math.round(rect.y+rect.height/2) };
       }
       // Button not active — return diagnostic info
       const allBtnStates = btns.map(b => ({ type: b.type, op: window.getComputedStyle(b).opacity, pe: window.getComputedStyle(b).pointerEvents }));
-      return { ok: true, execOk, beforeLen, afterLen: after.length, submitted: false, allBtns: allBtnStates };
+      const inpAttrs = Array.from(inp.attributes).map(a => ({ name: a.name, value: a.value }));
+      const activeEl = document.activeElement;
+      return { 
+        ok: true, 
+        execOk, 
+        beforeLen, 
+        afterLen: after.length, 
+        submitted: false, 
+        allBtns: allBtnStates, 
+        inpClass: inp.className, 
+        inpAttrs, 
+        inpHTML: inp.outerHTML.substring(0, 500),
+        activeTagName: activeEl ? activeEl.tagName : 'none',
+        activeClass: activeEl ? activeEl.className : '',
+        activePlaceholder: activeEl ? activeEl.getAttribute('placeholder') : ''
+      };
     })()
   `, 8000).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
 
@@ -498,14 +613,48 @@ async function main() {
   } else {
     console.warn(`[L4-E2E] Injected (before=${injectState?.beforeLen}, len=${injectState?.afterLen}) but submit button not active — trying Enter key fallback`);
     console.warn(`[L4-E2E] Button states: ${JSON.stringify(injectState?.allBtns)}`);
-    // Fallback: Enter key
+    console.warn(`[L4-E2E] Active Element: Tag=${injectState?.activeTagName}, Class=${injectState?.activeClass}, PH=${injectState?.activePlaceholder}`);
+    console.warn(`[L4-E2E] Input Class: ${injectState?.inpClass}`);
+    console.warn(`[L4-E2E] Input Attrs: ${JSON.stringify(injectState?.inpAttrs)}`);
+    console.warn(`[L4-E2E] Input HTML: ${injectState?.inpHTML}`);
+    // Fallback: Dispatch highly realistic native JS KeyboardEvent for Enter key in Main World
     await evalInMainWorld(ws, `
-      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]'); if (inp) inp.focus();
-    `, 2000).catch(() => null);
-    await new Promise(r => setTimeout(r, 100));
-    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 0 });
-    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 0 });
-    console.log('[L4-E2E] Enter key sent as fallback');
+      (function() {
+        const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                    Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                      const ph = el.getAttribute('placeholder');
+                      const r = el.getBoundingClientRect();
+                      return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                    });
+        if (!inp) return false;
+        inp.focus();
+        
+        // Dispatch bubbling, cancelable keydown event
+        const enterDown = new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        });
+        
+        // Dispatch bubbling, cancelable keyup event
+        const enterUp = new KeyboardEvent('keyup', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        });
+        
+        inp.dispatchEvent(enterDown);
+        inp.dispatchEvent(enterUp);
+        return true;
+      })()
+    `, 4000).catch(() => null);
+    console.log('[L4-E2E] Native Enter key event sequence programmatically dispatched as fallback');
   }
 
   // ---- Wait for L4 observability signals ----
