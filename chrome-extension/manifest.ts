@@ -50,7 +50,7 @@ const manifest = {
     '*://*.notion.so/*',
   ],
 
-  permissions: ['storage', 'clipboardWrite'],
+  permissions: ['storage', 'sidePanel', 'clipboardWrite'],
   // permissions: ['storage', 'scripting', 'clipboardWrite'],
   // options_page: 'options/index.html',
   background: {
@@ -184,9 +184,9 @@ const manifest = {
       matches: ['*://*/*'],
     },
   ],
-  // side_panel: {
-  //   default_path: 'side-panel/index.html',
-  // },
+  side_panel: {
+    default_path: 'side-panel/index.html',
+  },
 } satisfies chrome.runtime.ManifestV3;
 
 export default manifest;
