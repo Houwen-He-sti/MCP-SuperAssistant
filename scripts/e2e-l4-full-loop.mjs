@@ -67,7 +67,7 @@ const TIMEOUT_MS = (() => {
 const LIST_CONTEXTS = process.argv.includes('--list-contexts');
 
 // How long to wait for Notion AI to respond with JSONL after prompt injection
-const AI_RESPONSE_WAIT_MS = Math.min(TIMEOUT_MS - 10000, 50000);
+const AI_RESPONSE_WAIT_MS = Math.min(TIMEOUT_MS - 10000, 120000);
 
 // ---------------------------------------------------------------------------
 // Failure classes
@@ -152,8 +152,8 @@ async function collectExecutionContexts(ws) {
   };
   ws.on('message', handler);
   await cdpCommand(ws, 'Runtime.enable');
-  // Wait 500ms for any late-arriving context events
-  await new Promise(r => setTimeout(r, 500));
+  // Wait 2000ms for late-arriving contexts (Notion SPA may create bridge context ~1-3s after load)
+  await new Promise(r => setTimeout(r, 2000));
   ws.off('message', handler);
   return contexts;
 }
@@ -162,12 +162,14 @@ async function collectExecutionContexts(ws) {
  * Evaluate JS in a specific execution context (isolated world).
  */
 async function evalInContext(ws, contextId, expression, timeout = 10000) {
-  return cdpCommand(ws, 'Runtime.evaluate', {
-    expression,
-    contextId,
-    returnByValue: true,
-    awaitPromise: true,
-  }, timeout);
+  const params = { expression, returnByValue: true, awaitPromise: true };
+  if (contextId != null) params.contextId = contextId;
+  return cdpCommand(ws, 'Runtime.evaluate', params, timeout);
+}
+
+// Run expression in the page's main world (no isolated context)
+async function evalInMainWorld(ws, expression, timeout = 10000) {
+  return evalInContext(ws, null, expression, timeout);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +253,41 @@ async function main() {
     fail(FC.CDP_UNAVAILABLE, `WS open failed: ${e.message}`);
   }
 
+  // ---- Auto-navigate to bridge conversation if at home page ----
+  // The home page (/chat without ?t=) has a submit button that won't activate via CDP text injection.
+  // An existing bridge conversation (?t=...) has MCP system prompt draft, button already active.
+  await cdpCommand(ws, 'Page.enable');
+  const pageUrlRes = await cdpCommand(ws, 'Runtime.evaluate', {
+    expression: 'document.URL', returnByValue: true
+  }).catch(() => ({ result: { value: '' } }));
+  const pageUrl = pageUrlRes.result?.value || '';
+  const isHomePage = pageUrl.includes('notion.so/chat') && !pageUrl.includes('?t=') && !pageUrl.includes('/chat/');
+
+  if (isHomePage) {
+    console.log('[L4-E2E] At Notion AI home page — navigating to bridge conversation...');
+    // Find the most recent bridge conversation and click it
+    const navClick = await cdpCommand(ws, 'Runtime.evaluate', {
+      expression: `(function() {
+        const all = Array.from(document.querySelectorAll('*'));
+        const item = all.find(el => el.offsetParent !== null && (el.textContent || '').trim().includes('本地代码审查桥接器协议'));
+        if (!item) return null;
+        const rect = item.getBoundingClientRect();
+        return {x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2)};
+      })()`,
+      returnByValue: true,
+    }).catch(() => ({ result: { value: null } }));
+
+    const navPos = navClick.result?.value;
+    if (navPos?.x) {
+      await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: navPos.x, y: navPos.y, button: 'left', clickCount: 1 });
+      await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: navPos.x, y: navPos.y, button: 'left', clickCount: 1 });
+      console.log('[L4-E2E] Clicked bridge conversation, waiting for SPA navigation...');
+      await new Promise(r => setTimeout(r, 4000));
+    } else {
+      console.warn('[L4-E2E] Bridge conversation item not found — proceeding at home page');
+    }
+  }
+
   // Enable Runtime and collect execution contexts
   const contexts = await collectExecutionContexts(ws);
   console.log(`[L4-E2E] Found ${contexts.length} execution contexts`);
@@ -266,22 +303,37 @@ async function main() {
   await cdpCommand(ws, 'Runtime.enable');
 
   // ---- FC-3: Find extension content-script context (top-level Notion frame) ----
-  // Reuse Slice X isolation pattern: top-level Notion frame + MCP SuperAssistant world
-  const notionOrigin = new URL(notionTarget.url).origin;
+  // MCP SuperAssistant isolated world has origin="chrome-extension://..." not Notion origin.
+  // Among all "MCP SuperAssistant" contexts, find the ACTIVE top-level one.
+  // Key insight: multiple contexts satisfy (top && notion.so) due to SPA navigation;
+  // the ACTIVE context is the one where window.mcpClient has been initialized (typeof === 'object').
+  const mcpCandidates = contexts.filter(ctx => ctx.name === 'MCP SuperAssistant');
+  console.log(`[L4-E2E] Found ${mcpCandidates.length} MCP SuperAssistant context(s), checking active...`);
 
-  // Try MCP SuperAssistant isolated world first
-  let mcpContext = contexts.find(ctx =>
-    ctx.name === 'MCP SuperAssistant' &&
-    ctx.origin === notionOrigin
-  );
-
-  // Fallback: find any content-script context in top-level Notion frame
+  let mcpContext = null;
+  // Pass 1: find context with mcpClient initialized (the fully-initialized bridge)
+  for (const ctx of mcpCandidates) {
+    try {
+      const r = await evalInContext(ws, ctx.id,
+        'document.URL.includes("notion.so") && window === window.top && typeof window.mcpClient === "object"',
+        2000
+      );
+      if (r.result?.value === true) {
+        mcpContext = ctx;
+        break;
+      }
+    } catch {
+      // skip — context may have been destroyed
+    }
+  }
+  // Pass 2 fallback: any top-level Notion frame (mcpClient may still be initializing)
   if (!mcpContext) {
-    // Identify top-level frame by checking window===window.top via eval
-    for (const ctx of contexts) {
-      if (!ctx.origin.includes('notion.so')) continue;
+    for (const ctx of mcpCandidates) {
       try {
-        const r = await evalInContext(ws, ctx.id, 'typeof window.__MCP_ASSISTANT_STREAM_INTERCEPTOR__ !== "undefined"', 2000);
+        const r = await evalInContext(ws, ctx.id,
+          'document.URL.includes("notion.so") && window === window.top',
+          2000
+        );
         if (r.result?.value === true) {
           mcpContext = ctx;
           break;
@@ -290,12 +342,15 @@ async function main() {
         // skip
       }
     }
+    if (mcpContext) {
+      console.warn('[L4-E2E] Using fallback context (mcpClient not yet initialized) — bridge may be initializing');
+    }
   }
 
   if (!mcpContext) {
     console.error('[L4-E2E] Available contexts:');
     contexts.forEach(ctx => console.error(`  id=${ctx.id} name="${ctx.name}" origin="${ctx.origin}"`));
-    fail(FC.EXT_NOT_LOADED, 'MCP SuperAssistant isolated world not found');
+    fail(FC.EXT_NOT_LOADED, 'No MCP SuperAssistant context found in top-level Notion frame');
   }
   console.log(`[L4-E2E] Using context id=${mcpContext.id} name="${mcpContext.name}"`);
 
@@ -344,26 +399,30 @@ async function main() {
     console.log('[L4-E2E] AC-1: mcpClient present — assuming ToolCallLoop active (signal may have pre-emitted)');
   }
 
-  // ---- Pre-flight: Input state check ----
-  const inputCheck = await evalInContext(ws, mcpContext.id, `
+  // ---- Pre-flight: Input state check (main world) ----
+  // Just verify the input exists. Do NOT modify it here — the inject step handles clearing.
+  // IMPORTANT: Never use innerHTML='' on Notion's contenteditable — it destroys React fiber connections.
+  const inputCheck = await evalInMainWorld(ws, `
     (function() {
-      const input = document.querySelector('[contenteditable="true"][data-content-editable-leaf]') ||
-                    document.querySelector('.notion-selectable[contenteditable]') ||
-                    document.querySelector('[placeholder]');
-      if (!input) return { found: false };
-      const text = (input.textContent || '').trim();
-      return { found: true, draft: text.length > 0, draftPreview: text.slice(0, 50) };
+      const notionInput = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                          Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                            const ph = el.getAttribute('placeholder');
+                            const r = el.getBoundingClientRect();
+                            return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                          });
+      if (!notionInput) return { found: false };
+      const text = (notionInput.textContent || '').trim();
+      const r2 = notionInput.getBoundingClientRect();
+      return { found: true, existingLen: text.length, inputX: Math.round(r2.x + r2.width/2), inputY: Math.round(r2.y + r2.height/2) };
     })()
   `).catch(() => ({ result: { value: { found: false } } }));
 
   const inputState = inputCheck.result?.value;
   if (!inputState?.found) {
-    fail(FC.INPUT_MISSING, 'No contenteditable input found in Notion AI');
+    fail(FC.INPUT_MISSING, 'No Notion AI contenteditable input found in main world');
   }
-  if (inputState?.draft) {
-    fail(FC.INPUT_DRAFT, `Input has draft: "${inputState.draftPreview}"`);
-  }
-  console.log('[L4-E2E] Pre-flight: Input available and empty');
+  console.log(`[L4-E2E] Pre-flight: Notion AI input found at (~${inputState.inputX}, ~${inputState.inputY}), existingLen=${inputState.existingLen}`);
+  const hasMcpDraft = false; // Notion chat input is always used fresh
 
   // ---- Subscribe to observability seam signals before sending prompt ----
   const parsedCallsSignal = waitForConsoleSignal(ws,
@@ -374,66 +433,79 @@ async function main() {
     (type, args) => type === 'warn' && args[0] === '[Notion Bridge] ToolCallLoop parse failed',
     AI_RESPONSE_WAIT_MS
   );
+  // Suppress unhandled rejections on timeout — these are awaited inside the try/catch below
   const insertOkSignal = waitForConsoleSignal(ws,
     (type, args) => type === 'info' && args[0] === '[Notion Bridge] ToolCallLoop insertText ok',
     AI_RESPONSE_WAIT_MS
-  );
+  ).catch(() => null);
   const insertFailSignal = waitForConsoleSignal(ws,
     (type, args) => type === 'warn' && args[0] === '[Notion Bridge] ToolCallLoop insertText failed',
     AI_RESPONSE_WAIT_MS
-  );
+  ).catch(() => null);
 
   // ---- Inject sentinel prompt into Notion AI input ----
-  const sentinelPrompt = `Please use the committee-bridge.echo tool with message "${PROBE_MESSAGE}". Respond using the JSONL bridge format from the system instructions.`;
-  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 60)}..."`);
+  // CRITICAL: must request fenced ```jsonl ... ``` block — BridgeJsonlParser requires this format.
+  // Bare JSONL silently returns 0 parsed calls.
+  const sentinelPrompt = `Please use the committee-bridge.echo tool with message "${PROBE_MESSAGE}". Wrap your response in a \`\`\`jsonl code block exactly as shown in the system instructions.`;
+  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 70)}..."`);
 
-  const injectResult = await evalInContext(ws, mcpContext.id, `
+  // ---- Inject + Submit in ONE atomic eval call ----
+  // CRITICAL: execCommand triggers React's synchronous setState (Notion uses React 17 or similar).
+  // We MUST click the button in the same synchronous JS call, before the browser can change focus.
+  // Also CRITICAL: clear input first — the submit button only activates on empty→non-empty transition.
+  const insertText = sentinelPrompt;
+  const injectSubmitResult = await evalInMainWorld(ws, `
     (function() {
-      // Find Notion AI contenteditable input
-      const input = document.querySelector('[contenteditable="true"][data-content-editable-leaf]') ||
-                    document.querySelector('.notion-selectable[contenteditable]');
-      if (!input) return { ok: false, reason: 'input-not-found' };
-      // Focus and insert text
-      input.focus();
-      const inserted = document.execCommand('insertText', false, ${JSON.stringify(sentinelPrompt)});
-      if (!inserted) {
-        // Fallback: set textContent + dispatch input event
-        input.textContent = ${JSON.stringify(sentinelPrompt)};
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
+                  Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
+                    const ph = el.getAttribute('placeholder');
+                    const r = el.getBoundingClientRect();
+                    return ph && r.width > 100 && r.height > 20 && r.height < 200 && r.y >= 0 && r.y < 1000;
+                  });
+      if (!inp) return { ok: false, reason: 'no-input' };
+      inp.focus();
+      const beforeLen = (inp.textContent || '').trim().length;
+      // Atomic replace: selectAll + insertText replaces ALL existing text in ONE execCommand call.
+      // This is the key — two separate execCommands (delete + insertText) may lose React connection.
+      document.execCommand('selectAll', false, null);
+      const text = ${JSON.stringify(insertText)};
+      const execOk = document.execCommand('insertText', false, text);
+      const after = (inp.textContent || '').trim();
+      // Step 3: Immediately find and click the now-active submit button
+      const btns = Array.from(document.querySelectorAll('button'));
+      const btn = btns.find(b => {
+        if (!b.offsetParent) return false;
+        const s = window.getComputedStyle(b);
+        return s.pointerEvents !== 'none' && parseFloat(s.opacity) > 0.5 && b.type === 'submit';
+      });
+      if (btn) {
+        btn.click();
+        const rect = btn.getBoundingClientRect();
+        return { ok: true, execOk, beforeLen, afterLen: after.length, submitted: true, btnX: Math.round(rect.x+rect.width/2), btnY: Math.round(rect.y+rect.height/2) };
       }
-      return { ok: true };
+      // Button not active — return diagnostic info
+      const allBtnStates = btns.map(b => ({ type: b.type, op: window.getComputedStyle(b).opacity, pe: window.getComputedStyle(b).pointerEvents }));
+      return { ok: true, execOk, beforeLen, afterLen: after.length, submitted: false, allBtns: allBtnStates };
     })()
-  `).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
+  `, 8000).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
 
-  if (!injectResult.result?.value?.ok) {
-    fail(FC.INPUT_MISSING, `Prompt injection failed: ${injectResult.result?.value?.reason}`);
+  const injectState = injectSubmitResult.result?.value;
+  if (!injectState?.ok) {
+    fail(FC.INPUT_MISSING, `Inject+Submit failed: ${injectState?.reason}`);
   }
-  console.log('[L4-E2E] Sentinel prompt injected');
-
-  // Submit the prompt (click submit button)
-  const submitResult = await evalInContext(ws, mcpContext.id, `
-    (function() {
-      // Try common Notion AI submit button selectors
-      const btn = document.querySelector('button[data-testid="ask-ai-submit"]') ||
-                  document.querySelector('button[aria-label="Submit"]') ||
-                  document.querySelector('button[type="submit"]') ||
-                  (() => {
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    return btns.find(b => /send|submit|enter/i.test(b.textContent || b.getAttribute('aria-label') || ''));
-                  })();
-      if (!btn) return { ok: false, reason: 'submit-button-not-found' };
-      btn.click();
-      return { ok: true };
-    })()
-  `).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
-
-  if (!submitResult.result?.value?.ok) {
-    console.warn(`[L4-E2E] Submit button not found — trying keyboard Enter`);
-    // Fallback: send Enter key event
-    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  if (injectState?.submitted) {
+    console.log(`[L4-E2E] Sentinel prompt injected and submitted via btn.click() at (${injectState.btnX}, ${injectState.btnY}) — execOk=${injectState.execOk}, len=${injectState.afterLen}`);
   } else {
-    console.log('[L4-E2E] Prompt submitted via button click');
+    console.warn(`[L4-E2E] Injected (before=${injectState?.beforeLen}, len=${injectState?.afterLen}) but submit button not active — trying Enter key fallback`);
+    console.warn(`[L4-E2E] Button states: ${JSON.stringify(injectState?.allBtns)}`);
+    // Fallback: Enter key
+    await evalInMainWorld(ws, `
+      const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]'); if (inp) inp.focus();
+    `, 2000).catch(() => null);
+    await new Promise(r => setTimeout(r, 100));
+    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 0 });
+    await cdpCommand(ws, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 0 });
+    console.log('[L4-E2E] Enter key sent as fallback');
   }
 
   // ---- Wait for L4 observability signals ----
