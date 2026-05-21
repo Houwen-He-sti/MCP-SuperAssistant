@@ -21,10 +21,9 @@
  *   FC-1 (exit 2):  CDP_UNAVAILABLE    — Cannot connect to Chrome CDP
  *   FC-2 (exit 3):  NO_NOTION_TAB      — No Notion tab found
  *   FC-3 (exit 4):  EXT_NOT_LOADED     — Extension content-script not active
- *   FC-4 (exit 5):  BRIDGE_NOT_ACTIVE  — BH bridge activation log not seen
  *   FC-MCP (exit 6): MCP_NOT_CONNECTED — window.mcpClient absent or not connected
- *   FC-NO-ECHO (exit 7): ECHO_NOT_REGISTERED — 'echo' tool not in getAvailableTools()
- *   FC-L3 (exit 8): CALL_FAILED        — callTool('echo') failed or result mismatch
+ *   FC-NO-ECHO (exit 7): ECHO_NOT_REGISTERED — 'committee-bridge.echo' tool not in getAvailableTools()
+ *   FC-L3 (exit 8): CALL_FAILED        — callTool('committee-bridge.echo') failed or result mismatch
  *   exit 0: PASS                       — L2 + L3 both passed
  *
  * Key design decision: mcpClient lives in content-script ISOLATED world.
