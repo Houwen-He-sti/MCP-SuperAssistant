@@ -581,4 +581,21 @@ describe('NotionAdapterBridgeHost.observeAssistantMessages() — deferred path (
         // Must NOT emit again (shared WeakSet prevents double-fire)
         assert.equal(received.length, 1, 'same node not emitted twice');
     });
+
+    it('T-BH-12g: fast path with pre-existing nodes → initial scan emits them', () => {
+        const existingNode = { textContent: 'Pre-existing in fast path' };
+        const container = { childNodes: [existingNode] as unknown as NodeList };
+        const { MOClass } = makeFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: makeSelectorDocument({ '.layout-content': container }),
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        assert.equal(received.length, 1, 'initial scan emitted pre-existing node');
+        assert.equal(received[0], 'Pre-existing in fast path');
+    });
 });
