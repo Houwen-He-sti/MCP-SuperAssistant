@@ -48,10 +48,9 @@
  * Refs: Slice Y plan (plans/slice-y-l4-full-e2e-autosubmit-plan.md), PR #262
  */
 
-import WebSocket from 'ws';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import WebSocket from 'ws';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -77,17 +76,21 @@ const AI_RESPONSE_WAIT_MS = Math.min(TIMEOUT_MS - 10000, 120000);
 // ---------------------------------------------------------------------------
 
 const FC = {
-  PASS:             { code: 0,  label: 'PASS',               desc: 'L4 full path verified' },
-  CDP_UNAVAILABLE:  { code: 2,  label: 'FC-1:CDP_UNAVAIL',   desc: `Cannot connect to Chrome CDP at ${CDP_HOST}:${CDP_PORT}` },
-  NO_NOTION_TAB:    { code: 3,  label: 'FC-2:NO_NOTION',     desc: 'No Notion tab found at /chat or /ai' },
-  EXT_NOT_LOADED:   { code: 4,  label: 'FC-3:EXT_ABSENT',    desc: 'Extension stream interceptor marker not found' },
-  INPUT_MISSING:    { code: 8,  label: 'FC-INPUT-MISSING',   desc: 'Notion AI input element not found' },
-  NO_ACTIVE:        { code: 9,  label: 'FC-L4-NO-ACTIVE',    desc: 'ToolCallLoop activation signal absent' },
-  NO_JSONL:         { code: 10, label: 'FC-L4-NO-JSONL',     desc: 'Notion AI did not produce bridge JSONL' },
-  PARSE_FAIL:       { code: 11, label: 'FC-L4-PARSE-FAIL',   desc: 'BridgeJsonlParser reported parse errors' },
-  INSERT_FAIL:      { code: 12, label: 'FC-L4-INSERT-FAIL',  desc: 'adapter.insertText() failed' },
-  NO_MATCH:         { code: 13, label: 'FC-L4-NO-MATCH',     desc: 'Injected text did not contain expected probe message' },
-  INPUT_DRAFT:      { code: 14, label: 'FC-L4-INPUT-DRAFT',  desc: 'Notion input has pre-existing draft content' },
+  PASS: { code: 0, label: 'PASS', desc: 'L4 full path verified' },
+  CDP_UNAVAILABLE: {
+    code: 2,
+    label: 'FC-1:CDP_UNAVAIL',
+    desc: `Cannot connect to Chrome CDP at ${CDP_HOST}:${CDP_PORT}`,
+  },
+  NO_NOTION_TAB: { code: 3, label: 'FC-2:NO_NOTION', desc: 'No Notion tab found at /chat or /ai' },
+  EXT_NOT_LOADED: { code: 4, label: 'FC-3:EXT_ABSENT', desc: 'Extension stream interceptor marker not found' },
+  INPUT_MISSING: { code: 8, label: 'FC-INPUT-MISSING', desc: 'Notion AI input element not found' },
+  NO_ACTIVE: { code: 9, label: 'FC-L4-NO-ACTIVE', desc: 'ToolCallLoop activation signal absent' },
+  NO_JSONL: { code: 10, label: 'FC-L4-NO-JSONL', desc: 'Notion AI did not produce bridge JSONL' },
+  PARSE_FAIL: { code: 11, label: 'FC-L4-PARSE-FAIL', desc: 'BridgeJsonlParser reported parse errors' },
+  INSERT_FAIL: { code: 12, label: 'FC-L4-INSERT-FAIL', desc: 'adapter.insertText() failed' },
+  NO_MATCH: { code: 13, label: 'FC-L4-NO-MATCH', desc: 'Injected text did not contain expected probe message' },
+  INPUT_DRAFT: { code: 14, label: 'FC-L4-INPUT-DRAFT', desc: 'Notion input has pre-existing draft content' },
 };
 
 function fail(fc, extra = '') {
@@ -118,8 +121,14 @@ function openCdpWs(wsUrl) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const timeout = setTimeout(() => reject(new Error('CDP WS connect timeout')), 5000);
-    ws.on('open', () => { clearTimeout(timeout); resolve(ws); });
-    ws.on('error', e => { clearTimeout(timeout); reject(e); });
+    ws.on('open', () => {
+      clearTimeout(timeout);
+      resolve(ws);
+    });
+    ws.on('error', e => {
+      clearTimeout(timeout);
+      reject(e);
+    });
   });
 }
 
@@ -238,9 +247,10 @@ async function main() {
   }
 
   // ---- FC-2: Find Notion tab ----
-  const notionTarget = targets.find(t =>
-    t.type === 'page' &&
-    (t.url.includes('notion.so/chat') || t.url.includes('notion.so/ai') || t.url.includes('/ai'))
+  const notionTarget = targets.find(
+    t =>
+      t.type === 'page' &&
+      (t.url.includes('notion.so/chat') || t.url.includes('notion.so/ai') || t.url.includes('/ai')),
   );
   if (!notionTarget) {
     console.error('[L4-E2E] Available tabs:');
@@ -291,9 +301,11 @@ async function main() {
   // Pass 1: find context with mcpClient initialized (the fully-initialized bridge)
   for (const ctx of mcpCandidates) {
     try {
-      const r = await evalInContext(ws, ctx.id,
+      const r = await evalInContext(
+        ws,
+        ctx.id,
         'document.URL.includes("notion.so") && window === window.top && typeof window.mcpClient === "object"',
-        2000
+        2000,
       );
       if (r.result?.value === true) {
         mcpContext = ctx;
@@ -307,10 +319,7 @@ async function main() {
   if (!mcpContext) {
     for (const ctx of mcpCandidates) {
       try {
-        const r = await evalInContext(ws, ctx.id,
-          'document.URL.includes("notion.so") && window === window.top',
-          2000
-        );
+        const r = await evalInContext(ws, ctx.id, 'document.URL.includes("notion.so") && window === window.top', 2000);
         if (r.result?.value === true) {
           mcpContext = ctx;
           break;
@@ -334,6 +343,78 @@ async function main() {
   // Start collecting all [Notion Bridge] console events for evidence
   const bridgeEvents = collectConsoleEvents(ws, '[Notion Bridge]');
 
+  // ---- Auto-configure extension to connect to local committee-bridge (localhost:8000) ----
+  console.log('[L4-E2E] Configuring extension to connect to local committee-bridge at http://localhost:8000/mcp...');
+  const configResult = await evalInContext(
+    ws,
+    mcpContext.id,
+    `
+    (async function() {
+      if (typeof window.mcpClient === 'object' && window.mcpClient !== null) {
+        try {
+          const res = await window.mcpClient.updateServerConfig({
+            uri: 'http://localhost:8000/mcp',
+            connectionType: 'streamable-http'
+          });
+          return { ok: res };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      }
+      return { ok: false, error: 'window.mcpClient is absent or not an object' };
+    })()
+  `,
+    10000,
+  ).catch(e => ({ result: { value: { ok: false, error: e.message } } }));
+
+  console.log(`[L4-E2E] Extension config update result: ${JSON.stringify(configResult.result?.value)}`);
+
+  // Poll until mcpClient.getConnectionStatus() === 'connected'.
+  // This is the SAME call that NotionConnectionState.isConnected() uses internally
+  // (useConnectionStore.getState().status === 'connected') — so this is the authoritative gate.
+  // Without this, a tool call may arrive while status is still 'disconnected', causing the
+  // D6 guard in NotionHostBindings to return success:false silently (no insertText ever called).
+  console.log('[L4-E2E] Polling mcpClient.getConnectionStatus() = connected (max 20s)...');
+  const connectionPollStart = Date.now();
+  let connectionReady = false;
+  while (Date.now() - connectionPollStart < 20000) {
+    const connCheck = await evalInContext(
+      ws,
+      mcpContext.id,
+      `(function() {
+        try {
+          const client = window.mcpClient;
+          if (!client) return { status: 'no-mcpClient' };
+          // Try getConnectionStatus (bound explicitly to avoid 'this' loss in eval)
+          if (typeof client.getConnectionStatus === 'function') {
+            const s = client.getConnectionStatus.call(client);
+            return { status: s };
+          }
+          // Fallback: read useConnectionStore from background store state reflection
+          // McpClient exposes isReady() and internal state through various properties
+          const keys = Object.keys(client).join(',');
+          return { status: 'no-getConnectionStatus', keys };
+        } catch(e) { return { status: 'error', msg: e.message }; }
+      })()`,
+    ).catch(() => ({ result: { value: { status: 'eval-failed' } } }));
+
+    const status = connCheck.result?.value?.status;
+    console.log(`[L4-E2E] Connection status poll: ${status}`);
+    if (status === 'connected') {
+      console.log(`[L4-E2E] MCP connection ready after ${Date.now() - connectionPollStart}ms`);
+      connectionReady = true;
+      break;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  if (!connectionReady) {
+    console.warn(
+      '[L4-E2E] MCP connection status did not reach "connected" in 20s — proceeding with caution (tool calls may be blocked by D6 guard)',
+    );
+  }
+  // Extra 1s settle time after connection detected
+  await new Promise(r => setTimeout(r, 1000));
+
   // ---- FC-L4-NO-ACTIVE: Wait for ToolCallLoop active signal ----
   // If bridge is already running, this signal may have been emitted before we connected.
   // We check for it in the first 3s, then proceed (it may have been emitted on init).
@@ -341,22 +422,26 @@ async function main() {
   let loopActive = false;
   try {
     await Promise.race([
-      waitForConsoleSignal(ws,
+      waitForConsoleSignal(
+        ws,
         (type, args) => type === 'log' && String(args[0]).includes('[Notion Bridge] ToolCallLoop active'),
-        3000
+        3000,
       ),
       // Also accept 'info' level
-      waitForConsoleSignal(ws,
+      waitForConsoleSignal(
+        ws,
         (type, args) => type === 'info' && String(args[0]).includes('[Notion Bridge] ToolCallLoop active'),
-        3000
+        3000,
       ),
     ]);
     console.log('[L4-E2E] AC-1: ToolCallLoop active signal received');
     loopActive = true;
   } catch {
     // Signal may have been emitted before our subscription — check via eval
-    const check = await evalInContext(ws, mcpContext.id,
-      'typeof window.__notionBridgeState !== "undefined" ? JSON.stringify(window.__notionBridgeState) : "absent"'
+    const check = await evalInContext(
+      ws,
+      mcpContext.id,
+      'typeof window.mcpAdapter === "object" && window.mcpAdapter !== null && window.mcpAdapter.bhBridgeDisposable ? "active" : "absent"',
     ).catch(() => ({ result: { value: 'eval-failed' } }));
     const stateVal = check.result?.value;
     console.log(`[L4-E2E] ToolCallLoop active check via eval: ${stateVal}`);
@@ -367,8 +452,10 @@ async function main() {
 
   if (!loopActive) {
     // Try direct eval check: is bridge controller registered?
-    const bridgeCheck = await evalInContext(ws, mcpContext.id,
-      '!!window.mcpClient && typeof window.mcpClient.getAvailableTools === "function"'
+    const bridgeCheck = await evalInContext(
+      ws,
+      mcpContext.id,
+      '!!window.mcpClient && typeof window.mcpClient.getAvailableTools === "function"',
     ).catch(() => ({ result: { value: false } }));
     if (!bridgeCheck.result?.value) {
       fail(FC.NO_ACTIVE, 'ToolCallLoop not active and mcpClient not available');
@@ -378,7 +465,9 @@ async function main() {
 
   // ---- Click 'New Chat' button to ensure clean state ----
   console.log('[L4-E2E] Attempting to click "New Chat" button to ensure absolute clean session...');
-  await evalInMainWorld(ws, `
+  await evalInMainWorld(
+    ws,
+    `
     (function() {
       const newChatEl = Array.from(document.querySelectorAll('div, span, button')).find(el => {
         const text = (el.textContent || '').trim();
@@ -390,21 +479,61 @@ async function main() {
       }
       return { clicked: false };
     })()
-  `, 4000).then(res => {
-    if (res?.result?.value?.clicked) {
-      console.log(`[L4-E2E] "New Chat" button clicked successfully: "${res.result.value.text}"`);
-    } else {
-      console.log('[L4-E2E] "New Chat" button not found or already clicked, proceeding');
-    }
-  }).catch(e => console.warn('[L4-E2E] Error clicking new chat button:', e.message));
+  `,
+    4000,
+  )
+    .then(res => {
+      if (res?.result?.value?.clicked) {
+        console.log(`[L4-E2E] "New Chat" button clicked successfully: "${res.result.value.text}"`);
+      } else {
+        console.log('[L4-E2E] "New Chat" button not found or already clicked, proceeding');
+      }
+    })
+    .catch(e => console.warn('[L4-E2E] Error clicking new chat button:', e.message));
 
   // Wait 5s for new session to initialize
   await new Promise(r => setTimeout(r, 5000));
 
+  // ---- Reactivate BH bridge after "New Chat" DOM replacement ----
+  // IMPORTANT: clicking "新对话" causes React to unmount + remount .layout-content.
+  // The ToolCallLoop's MutationObserver was bound to the OLD .layout-content node —
+  // it is now an orphaned observer and will never fire.
+  // Fix: deactivate + reactivate mcpAdapter so ToolCallLoop re-attaches to the NEW node.
+  console.log(
+    '[L4-E2E] Reactivating BH bridge (deactivate+activate) to rebind MutationObserver to new .layout-content...',
+  );
+  await evalInContext(
+    ws,
+    mcpContext.id,
+    `
+    (async function() {
+      if (typeof window.mcpAdapter === 'object' && window.mcpAdapter !== null &&
+          typeof window.mcpAdapter.deactivate === 'function' &&
+          typeof window.mcpAdapter.activate === 'function') {
+        await window.mcpAdapter.deactivate();
+        await window.mcpAdapter.activate();
+        return { ok: true };
+      }
+      return { ok: false, reason: 'mcpAdapter not available or missing deactivate/activate' };
+    })()
+  `,
+    8000,
+  )
+    .then(res => {
+      console.log(`[L4-E2E] BH bridge reactivation result: ${JSON.stringify(res?.result?.value)}`);
+    })
+    .catch(e => console.warn('[L4-E2E] BH bridge reactivation error:', e.message));
+
+  // Give ToolCallLoop 2s to re-attach to new DOM
+  await new Promise(r => setTimeout(r, 2000));
+  console.log('[L4-E2E] BH bridge reactivation complete — ToolCallLoop should be bound to new .layout-content');
+
   // ---- Pre-flight: Input state check (main world) ----
   // Just verify the input exists. Do NOT modify it here — the inject step handles clearing.
   // IMPORTANT: Never use innerHTML='' on Notion's contenteditable — it destroys React fiber connections.
-  const inputCheck = await evalInMainWorld(ws, `
+  const inputCheck = await evalInMainWorld(
+    ws,
+    `
     (function() {
       const notionInput = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                           Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -417,35 +546,56 @@ async function main() {
       const r2 = notionInput.getBoundingClientRect();
       return { found: true, existingLen: text.length, inputX: Math.round(r2.x + r2.width/2), inputY: Math.round(r2.y + r2.height/2) };
     })()
-  `).catch(() => ({ result: { value: { found: false } } }));
+  `,
+  ).catch(() => ({ result: { value: { found: false } } }));
 
   const inputState = inputCheck.result?.value;
   if (!inputState?.found) {
     fail(FC.INPUT_MISSING, 'No Notion AI contenteditable input found in main world');
   }
-  console.log(`[L4-E2E] Pre-flight: Notion AI input found at (~${inputState.inputX}, ~${inputState.inputY}), existingLen=${inputState.existingLen}`);
+  console.log(
+    `[L4-E2E] Pre-flight: Notion AI input found at (~${inputState.inputX}, ~${inputState.inputY}), existingLen=${inputState.existingLen}`,
+  );
   const hasMcpDraft = false; // Notion chat input is always used fresh
 
   // ---- Subscribe to observability seam signals before sending prompt ----
-  const parsedCallsSignal = waitForConsoleSignal(ws,
-    (type, args) => type === 'info' && args[0] === '[Notion Bridge] ToolCallLoop parsed calls',
-    AI_RESPONSE_WAIT_MS
+  const parsedCallsSignal = waitForConsoleSignal(
+    ws,
+    (type, args) => type === 'info' && args[0] === '[Notion Bridge] ToolCallLoop parsed calls' && Number(args[1]) > 0,
+    AI_RESPONSE_WAIT_MS,
   );
-  const parseFailSignal = waitForConsoleSignal(ws,
+  const parseFailSignal = waitForConsoleSignal(
+    ws,
     (type, args) => type === 'warn' && args[0] === '[Notion Bridge] ToolCallLoop parse failed',
-    AI_RESPONSE_WAIT_MS
+    AI_RESPONSE_WAIT_MS,
   );
   // Suppress unhandled rejections on timeout — these are awaited inside the try/catch below
-  const insertOkSignal = waitForConsoleSignal(ws,
+  const insertOkSignal = waitForConsoleSignal(
+    ws,
     (type, args) => type === 'info' && args[0] === '[Notion Bridge] ToolCallLoop insertText ok',
-    AI_RESPONSE_WAIT_MS
+    AI_RESPONSE_WAIT_MS,
   ).catch(() => null);
-  const insertFailSignal = waitForConsoleSignal(ws,
+  const insertFailSignal = waitForConsoleSignal(
+    ws,
     (type, args) => type === 'warn' && args[0] === '[Notion Bridge] ToolCallLoop insertText failed',
-    AI_RESPONSE_WAIT_MS
+    AI_RESPONSE_WAIT_MS,
   ).catch(() => null);
 
-  const sentinelPrompt = `Please call committee-bridge.echo with message "${PROBE_MESSAGE}". ` +
+  let bridgePromptPath = path.join(
+    process.cwd(),
+    'pages/content/src/services/prompt/prompt-templates/notion-bridge.md',
+  );
+  if (!fs.existsSync(bridgePromptPath)) {
+    bridgePromptPath = path.join(
+      process.cwd(),
+      'MCP-SuperAssistant/pages/content/src/services/prompt/prompt-templates/notion-bridge.md',
+    );
+  }
+  const bridgePrompt = fs.readFileSync(bridgePromptPath, 'utf8');
+
+  const sentinelPrompt =
+    `${bridgePrompt}\n\n` +
+    `Please call committee-bridge.echo with message "${PROBE_MESSAGE}". ` +
     `Wrap your response in a fenced code block exactly like this:\n` +
     `\`\`\`jsonl\n` +
     `{"type":"function_call_start","name":"committee-bridge.echo","call_id":"slice-y-probe-2026-05-21-1"}\n` +
@@ -453,11 +603,13 @@ async function main() {
     `{"type":"parameter","key":"message","value":"${PROBE_MESSAGE}"}\n` +
     `{"type":"function_call_end","call_id":"slice-y-probe-2026-05-21-1"}\n` +
     `\`\`\``;
-  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 70)}..."`);
-  
+  console.log(`[L4-E2E] Injecting sentinel prompt: "${sentinelPrompt.slice(0, 150)}..."`);
+
   // Robust pre-click alignment in main world: scroll, focus, and place selection
   console.log(`[L4-E2E] Performing JS scrollIntoView, focus, selection placement`);
-  await evalInMainWorld(ws, `
+  await evalInMainWorld(
+    ws,
+    `
     (function() {
       const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                   Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -477,11 +629,15 @@ async function main() {
       inp.click();
       return true;
     })()
-  `, 4000).catch(() => null);
+  `,
+    4000,
+  ).catch(() => null);
   await new Promise(r => setTimeout(r, 200));
 
   // Recalculate physical coordinates post-scroll
-  const coordCheck = await evalInMainWorld(ws, `
+  const coordCheck = await evalInMainWorld(
+    ws,
+    `
     (function() {
       const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                   Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -493,17 +649,32 @@ async function main() {
       const r = inp.getBoundingClientRect();
       return { x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) };
     })()
-  `).catch(() => ({ result: { value: null } }));
+  `,
+  ).catch(() => ({ result: { value: null } }));
   const coords = coordCheck.result?.value || { x: inputState.inputX, y: inputState.inputY };
 
   console.log(`[L4-E2E] Clicking input physically at coordinates (${coords.x}, ${coords.y})`);
-  await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
-  await cdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+  await cdpCommand(ws, 'Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: coords.x,
+    y: coords.y,
+    button: 'left',
+    clickCount: 1,
+  });
+  await cdpCommand(ws, 'Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: coords.x,
+    y: coords.y,
+    button: 'left',
+    clickCount: 1,
+  });
   await new Promise(r => setTimeout(r, 300)); // Wait for physical focus to settle
 
   // ---- Programmatic clipboard paste event dispatch in main world ----
   console.log(`[L4-E2E] Dispatching programmatic ClipboardEvent('paste') carrying sentinelPrompt to contenteditable`);
-  await evalInMainWorld(ws, `
+  await evalInMainWorld(
+    ws,
+    `
     (function() {
       const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                   Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -533,13 +704,17 @@ async function main() {
       inp.dispatchEvent(pasteEvent);
       return true;
     })()
-  `, 6000).catch(() => null);
-  
+  `,
+    6000,
+  ).catch(() => null);
+
   console.log(`[L4-E2E] Waiting for ProseMirror paste event parsing to settle...`);
   await new Promise(r => setTimeout(r, 800)); // Give ProseMirror 800ms to process the paste and update React state
 
   // ---- Check + Submit in ONE atomic eval call ----
-  const injectSubmitResult = await evalInMainWorld(ws, `
+  const injectSubmitResult = await evalInMainWorld(
+    ws,
+    `
     (function() {
       const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                   Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -597,23 +772,33 @@ async function main() {
         activePlaceholder: activeEl ? activeEl.getAttribute('placeholder') : ''
       };
     })()
-  `, 8000).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
+  `,
+    8000,
+  ).catch(e => ({ result: { value: { ok: false, reason: e.message } } }));
 
   const injectState = injectSubmitResult.result?.value;
   if (!injectState?.ok) {
     fail(FC.INPUT_MISSING, `Inject+Submit failed: ${injectState?.reason}`);
   }
   if (injectState?.submitted) {
-    console.log(`[L4-E2E] Sentinel prompt injected and submitted via btn.click() at (${injectState.btnX}, ${injectState.btnY}) — execOk=${injectState.execOk}, len=${injectState.afterLen}`);
+    console.log(
+      `[L4-E2E] Sentinel prompt injected and submitted via btn.click() at (${injectState.btnX}, ${injectState.btnY}) — execOk=${injectState.execOk}, len=${injectState.afterLen}`,
+    );
   } else {
-    console.warn(`[L4-E2E] Injected (before=${injectState?.beforeLen}, len=${injectState?.afterLen}) but submit button not active — trying Enter key fallback`);
+    console.warn(
+      `[L4-E2E] Injected (before=${injectState?.beforeLen}, len=${injectState?.afterLen}) but submit button not active — trying Enter key fallback`,
+    );
     console.warn(`[L4-E2E] Button states: ${JSON.stringify(injectState?.allBtns)}`);
-    console.warn(`[L4-E2E] Active Element: Tag=${injectState?.activeTagName}, Class=${injectState?.activeClass}, PH=${injectState?.activePlaceholder}`);
+    console.warn(
+      `[L4-E2E] Active Element: Tag=${injectState?.activeTagName}, Class=${injectState?.activeClass}, PH=${injectState?.activePlaceholder}`,
+    );
     console.warn(`[L4-E2E] Input Class: ${injectState?.inpClass}`);
     console.warn(`[L4-E2E] Input Attrs: ${JSON.stringify(injectState?.inpAttrs)}`);
     console.warn(`[L4-E2E] Input HTML: ${injectState?.inpHTML}`);
     // Fallback: Dispatch highly realistic native JS KeyboardEvent for Enter key in Main World
-    await evalInMainWorld(ws, `
+    await evalInMainWorld(
+      ws,
+      `
       (function() {
         const inp = document.querySelector('[placeholder="使用 AI 处理各种任务..."]') ||
                     Array.from(document.querySelectorAll('[contenteditable="true"]')).find(el => {
@@ -648,38 +833,48 @@ async function main() {
         inp.dispatchEvent(enterUp);
         return true;
       })()
-    `, 4000).catch(() => null);
+    `,
+      4000,
+    ).catch(() => null);
     console.log('[L4-E2E] Native Enter key event sequence programmatically dispatched as fallback');
   }
 
   // ---- Wait for L4 observability signals ----
   console.log(`[L4-E2E] Waiting up to ${AI_RESPONSE_WAIT_MS}ms for Notion AI response + L4 signals...`);
 
-  let parsedCalls, parseFail, insertOk, insertFail;
+  let parsedCalls, insertOk, insertFail;
   try {
-    parsedCalls = await Promise.race([
-      parsedCallsSignal,
-      parseFailSignal.then(r => { parseFail = r; throw new Error('parse-failed'); }),
-    ]);
+    // We remove parseFailSignal from Promise.race. During streaming, intermediate parse errors
+    // are highly expected because the JSONL block is incomplete. We must wait for the final completed
+    // sequence to parse successfully (which resolves parsedCallsSignal once parsedCount > 0).
+    parsedCalls = await parsedCallsSignal;
   } catch (e) {
-    if (parseFail) {
-      // Parse failed — output evidence
-      bridgeEvents.stop();
-      console.error('[L4-E2E] Evidence — bridge console events:');
-      bridgeEvents.events.forEach(ev => console.error(`  [${ev.type}] ${ev.args.join(' ')}`));
-      fail(FC.PARSE_FAIL, `parse failed with ${parseFail.args[1]} error(s)`);
-    }
-    // No signal at all — FC-L4-NO-JSONL
+    // No signal at all or timeout — FC-L4-NO-JSONL
     bridgeEvents.stop();
     console.error('[L4-E2E] Evidence — bridge console events collected:');
     bridgeEvents.events.forEach(ev => console.error(`  [${ev.type}] ${ev.args.join(' ')}`));
+
+    // Check if there was any parser warning in our collected events to provide diagnostics
+    const parseFailWarn = bridgeEvents.events.find(
+      ev => ev.type === 'warn' && String(ev.args[0]).includes('[Notion Bridge] ToolCallLoop parse failed'),
+    );
+    if (parseFailWarn) {
+      console.warn(
+        `[L4-E2E] Diagnostic: Parser warnings were detected during streaming. Last warning args: ${parseFailWarn.args.join(' ')}`,
+      );
+    }
+
     // Collect sanitized assistant output for NO-JSONL evidence
-    const assistantEvidence = await evalInContext(ws, mcpContext.id, `
+    const assistantEvidence = await evalInContext(
+      ws,
+      mcpContext.id,
+      `
       (function() {
         const msgs = Array.from(document.querySelectorAll('[data-content-editable-leaf],.notion-ai-response'));
         return msgs.map(m => (m.textContent || '').trim().slice(0, 200)).filter(Boolean).join(' | ').slice(0, 500);
       })()
-    `).catch(() => ({ result: { value: 'eval-failed' } }));
+    `,
+    ).catch(() => ({ result: { value: 'eval-failed' } }));
     console.error(`[L4-E2E] Sanitized assistant output excerpt: "${assistantEvidence.result?.value}"`);
     fail(FC.NO_JSONL, 'No "[Notion Bridge] ToolCallLoop parsed calls" signal received');
   }
@@ -690,12 +885,16 @@ async function main() {
   if (parsedCount === 0) {
     bridgeEvents.stop();
     // Emit evidence
-    const assistantEvidence = await evalInContext(ws, mcpContext.id, `
+    const assistantEvidence = await evalInContext(
+      ws,
+      mcpContext.id,
+      `
       (function() {
         const msgs = Array.from(document.querySelectorAll('[data-content-editable-leaf],.notion-ai-response'));
         return msgs.map(m => (m.textContent || '').trim().slice(0, 200)).filter(Boolean).join(' | ').slice(0, 500);
       })()
-    `).catch(() => ({ result: { value: 'eval-failed' } }));
+    `,
+    ).catch(() => ({ result: { value: 'eval-failed' } }));
     console.error(`[L4-E2E] NO-JSONL evidence: "${assistantEvidence.result?.value}"`);
     fail(FC.NO_JSONL, 'BridgeJsonlParser returned 0 calls (Notion AI responded but produced no JSONL)');
   }
@@ -704,7 +903,10 @@ async function main() {
   try {
     insertOk = await Promise.race([
       insertOkSignal,
-      insertFailSignal.then(r => { insertFail = r; throw new Error('insert-failed'); }),
+      insertFailSignal.then(r => {
+        insertFail = r;
+        throw new Error('insert-failed');
+      }),
     ]);
   } catch (e) {
     bridgeEvents.stop();
@@ -720,7 +922,10 @@ async function main() {
 
   // ---- AC-5: Verify DOM contains expected probe message ----
   await new Promise(r => setTimeout(r, 500)); // brief settle
-  const domCheck = await evalInContext(ws, mcpContext.id, `
+  const domCheck = await evalInContext(
+    ws,
+    mcpContext.id,
+    `
     (function() {
       // Check Notion input for injected result
       const inputs = Array.from(document.querySelectorAll('[contenteditable="true"]'));
@@ -734,7 +939,8 @@ async function main() {
       if (idx !== -1) return { found: true, text: body.slice(Math.max(0, idx-50), idx+150) };
       return { found: false };
     })()
-  `).catch(() => ({ result: { value: { found: false } } }));
+  `,
+  ).catch(() => ({ result: { value: { found: false } } }));
 
   if (!domCheck.result?.value?.found) {
     fail(FC.NO_MATCH, `DOM does not contain expected probe message "${PROBE_MESSAGE}"`);
