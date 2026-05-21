@@ -26,6 +26,7 @@ interface UIStoreState {
   mcpEnabled: boolean;
 }
 
+// TODO: [UI-1] Replace with shared chrome.storage-backed ui store
 export const useUIStore = Object.assign(
   create<UIStoreState>(() => ({
     mcpEnabled: false,
@@ -39,6 +40,7 @@ interface AppStoreState {
   isInitialized: boolean;
 }
 
+// TODO: [UI-1] Replace with shared chrome.storage-backed app store
 export const useAppStore = Object.assign(
   create<AppStoreState>(() => ({
     isInitialized: false,
@@ -52,6 +54,7 @@ interface ConfigStoreState {
   serverUrl: string;
 }
 
+// TODO: [UI-1] Replace with shared chrome.storage-backed config store
 export const useConfigStore = Object.assign(
   create<ConfigStoreState>(() => ({
     serverUrl: '',
@@ -67,6 +70,7 @@ interface ConnectionStoreState {
   status: ConnectionStatus;
 }
 
+// TODO: [UI-3] Replace with real store backed by chrome.runtime message bridge from content script
 export const useConnectionStore = create<ConnectionStoreState>(() => ({
   status: 'disconnected',
 }));

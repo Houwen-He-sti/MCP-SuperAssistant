@@ -492,6 +492,17 @@ self.addEventListener('error', event => {
   }
 });
 
+// --- Side Panel Behavior ---
+// Allow users to open the side panel by clicking the extension icon in the toolbar.
+// Guard required: Firefox and older Chrome builds do not have chrome.sidePanel.
+if (chrome.sidePanel?.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(error => {
+    logger.error('Error setting side panel behavior:', error);
+  });
+} else {
+  logger.debug('Side Panel API unavailable (Firefox or older Chrome); skipping setPanelBehavior.');
+}
+
 // --- Lifecycle Events ---
 
 chrome.runtime.onInstalled.addListener(async details => {

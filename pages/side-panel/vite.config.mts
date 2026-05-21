@@ -1,6 +1,5 @@
 import { resolve } from 'node:path';
 import { withPageConfig } from '@extension/vite-config';
-import { IS_DEV } from '@extension/env';
 import tailwindcss from 'tailwindcss';
 import autoprefixer from 'autoprefixer';
 
