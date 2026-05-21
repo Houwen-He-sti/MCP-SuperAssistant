@@ -445,12 +445,7 @@ async function main() {
     AI_RESPONSE_WAIT_MS
   ).catch(() => null);
 
-  const bridgePromptPath = path.join(process.cwd(), 'pages/content/src/services/prompt/prompt-templates/notion-bridge.md');
-  const bridgePrompt = fs.readFileSync(bridgePromptPath, 'utf8');
-
-  const sentinelPrompt = `${bridgePrompt}\n\n` +
-    `下面是你要执行的具体指令：\n` +
-    `Please call committee-bridge.echo with message "${PROBE_MESSAGE}". ` +
+  const sentinelPrompt = `Please call committee-bridge.echo with message "${PROBE_MESSAGE}". ` +
     `Wrap your response in a fenced code block exactly like this:\n` +
     `\`\`\`jsonl\n` +
     `{"type":"function_call_start","name":"committee-bridge.echo","call_id":"slice-y-probe-2026-05-21-1"}\n` +
