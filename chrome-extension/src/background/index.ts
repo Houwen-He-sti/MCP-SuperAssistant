@@ -492,6 +492,12 @@ self.addEventListener('error', event => {
   }
 });
 
+// --- Side Panel Behavior ---
+// Allow users to open the side panel by clicking the extension icon in the toolbar.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+  logger.error('Error setting side panel behavior:', error);
+});
+
 // --- Lifecycle Events ---
 
 chrome.runtime.onInstalled.addListener(async details => {
