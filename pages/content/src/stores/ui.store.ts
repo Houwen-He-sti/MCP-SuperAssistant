@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { devtools } from 'zustand/middleware'; // persist is now imported with createJSONStorage
+import { createChromeStorageStateStorage, subscribeChromeStorageRehydrate } from '@extension/storage';
 import { eventBus } from '../events';
 import type { UserPreferences, SidebarState, Notification, GlobalSettings } from '../types/stores';
 import type { RemoteNotification, NotificationAction } from './config.store';
@@ -296,7 +297,7 @@ export const useUIStore = create<UIState>()(
       }),
       {
         name: 'mcp-super-assistant-ui-store',
-        storage: createJSONStorage(() => localStorage),
+        storage: createJSONStorage(() => createChromeStorageStateStorage({ area: 'local', migrateFromLocalStorage: true })),
         partialize: (state) => ({
           // Persist sidebar state and user preferences
           sidebar: { 
@@ -340,3 +341,6 @@ useAppStore.subscribe(
 );
 
 // Consider calling unSubAppStore on cleanup if the content script can be unloaded/reloaded.
+
+// Sync: rehydrate when chrome.storage.local changes from another context (e.g. side panel)
+subscribeChromeStorageRehydrate({ key: 'mcp-super-assistant-ui-store', store: useUIStore });
