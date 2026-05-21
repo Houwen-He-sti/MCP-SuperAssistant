@@ -4,9 +4,9 @@
  * Slice X: BH Path Level 2 (Tool Discovery) + Level 3 (Tool Execution)
  *
  * Validates that:
- *   L2: mcpClient.getAvailableTools() returns a list containing 'echo'
+ *   L2: mcpClient.getAvailableTools() returns a list containing 'committee-bridge.echo'
  *       with correct schema (message: string)
- *   L3: mcpClient.callTool('echo', {message: 'slice-x-probe'}) returns
+ *   L3: mcpClient.callTool('committee-bridge.echo', {message: 'slice-x-probe'}) returns
  *       a result containing 'slice-x-probe'
  *
  * PRECONDITIONS (must be true before running):
@@ -14,7 +14,7 @@
  *   2. MCP-SA extension loaded from ./dist
  *   3. Notion tab open at /chat or /ai
  *   4. committee-bridge MCP server running at http://localhost:8000
- *      with 'echo' tool registered
+ *      with 'committee-bridge.echo' tool registered (committee-bridge MCP server)
  *   5. Extension connected to committee-bridge MCP server
  *
  * Failure classes:
@@ -32,7 +32,7 @@
  * This script enumerates execution contexts and targets the isolated world.
  *
  * Usage:
- *   node scripts/e2e-mcp-integration.mjs [--tool echo] [--message slice-x-probe]
+ *   node scripts/e2e-mcp-integration.mjs [--tool committee-bridge.echo] [--message slice-x-probe]
  *   node scripts/e2e-mcp-integration.mjs --list-contexts   # debug: list all contexts
  *
  * Author: GitHub Copilot (Claude Sonnet 4.6)
@@ -50,7 +50,7 @@ const CDP_HOST = '127.0.0.1';
 const CDP_PORT = 9222;
 const TOOL_NAME = (() => {
   const arg = process.argv.find(a => a.startsWith('--tool='));
-  return arg ? arg.split('=')[1] : 'echo';
+  return arg ? arg.split('=')[1] : 'committee-bridge.echo';
 })();
 const MESSAGE = (() => {
   const arg = process.argv.find(a => a.startsWith('--message='));
@@ -294,21 +294,40 @@ async function runProbe() {
 
     // ── Find content-script isolated world (already collected above) ──────────
     // index.ts sets window.mcpClient in the "MCP SuperAssistant" isolated world.
-    // Context is identified by name: "MCP SuperAssistant" + chrome-extension:// origin.
-    const mcpSuperAssistantCtx = allContexts.find(c =>
+    // There can be multiple "MCP SuperAssistant" contexts (main frame + iframes like
+    // identity.notion.so/authSync). We need the one from the MAIN www.notion.so frame.
+    // Strategy: evaluate document.URL in each candidate and pick the one whose URL
+    // matches the notionTab's origin (www.notion.so), not a subdomain (identity.notion.so).
+    const notionTabOrigin = new URL(notionTab.url).origin; // https://www.notion.so
+    const mcpSuperAssistantCandidates = allContexts.filter(c =>
       c.name === 'MCP SuperAssistant' &&
       c.origin?.startsWith('chrome-extension://')
     );
 
-    // Fallback: any isolated world with notion.so origin (not playwright)
-    const notionOrigin = new URL(notionTab.url).origin;
-    const fallbackCtx = allContexts.find(c =>
-      c.auxData?.isDefault === false &&
-      c.origin === notionOrigin &&
-      !c.name?.includes('playwright')
-    );
+    let contentScriptCtx = null;
+    for (const ctx of mcpSuperAssistantCandidates) {
+      try {
+        const urlCheck = await cdpCommand(ws, 'Runtime.evaluate', {
+          expression: 'document.URL',
+          contextId: ctx.id,
+          returnByValue: true,
+        });
+        const frameUrl = urlCheck?.result?.value ?? '';
+        if (frameUrl.startsWith(notionTabOrigin)) {
+          contentScriptCtx = ctx;
+          break; // found main frame context; stop searching
+        }
+      } catch (_) { /* stale context, skip */ }
+    }
 
-    const contentScriptCtx = mcpSuperAssistantCtx ?? fallbackCtx;
+    // Fallback: any isolated world with notion.so origin (not playwright)
+    if (!contentScriptCtx) {
+      contentScriptCtx = allContexts.find(c =>
+        c.auxData?.isDefault === false &&
+        c.origin === notionTabOrigin &&
+        !c.name?.includes('playwright')
+      ) ?? null;
+    }
 
     result.details.isolatedContextCount = allContexts.filter(c => !c.auxData?.isDefault).length;
     result.details.targetContextId = contentScriptCtx?.id ?? null;
