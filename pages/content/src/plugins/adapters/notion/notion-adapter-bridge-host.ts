@@ -263,4 +263,5 @@ export class NotionAdapterBridgeHost implements NotionProviderHost {
         });
         observer.observe(container as unknown as Node, { childList: true, subtree: true });
         return { dispose: () => observer.disconnect() };
-    }}
+    }
+}
