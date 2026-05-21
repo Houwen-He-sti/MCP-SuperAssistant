@@ -1141,7 +1141,7 @@ function broadcastToolsUpdateToContentScripts(tools: any[]) {
 }
 
 /**
- * Broadcast server config update to all content scripts via context bridge
+ * Broadcast server config update to content scripts and extension pages via context bridge
  *
  * @param config - The updated server configuration
  */
@@ -1166,6 +1166,8 @@ function broadcastConfigUpdateToContentScripts(config: { uri: string; connection
       }
     });
   });
+  // [UI-4] Also broadcast to extension pages (side panel, popup) via runtime.sendMessage
+  chrome.runtime.sendMessage(broadcastMessage).catch(() => {});
 }
 
 /**
