@@ -1,5 +1,5 @@
 // pages/content/src/utils/instructionGenerator.ts
-import { assembleInstructions, wrapWithSystemPromptTag } from './promptTemplateLoader';
+import { assembleInstructions, wrapWithSystemPromptTag } from '../../../services/prompt/prompt-template-loader';
 
 /**
  * Generates instructions for using MCP tools based on available tools.

@@ -1,4 +1,4 @@
-import { assembleInstructions, assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../components/sidebar/Instructions/promptTemplateLoader';
+import { assembleInstructions, assembleNotionBridgePrompt, wrapWithSystemPromptTag } from '../../services/prompt/prompt-template-loader';
 import { useToolStore } from '../../stores/tool.store';
 import type { ToolResultMountPoint } from '../../types/tool-result-ui';
 import type { AdapterCapability, PluginContext } from '../plugin-types';
@@ -6,13 +6,13 @@ import { BaseAdapterPlugin } from './base.adapter';
 import { NOTION_CHAT_CONTENT_SELECTOR } from './notion.adapter.selectors';
 import { choosePromptForFirstConversation, getEnabledToolDefinitions } from './notion.bridge-prompt';
 // Architecture: BH path uses mcp-runtime formatter; render_prescript copy retained for streamToolBridge.ts
-import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { formatFunctionResult } from '../../../../../../mcp-runtime/src/core/function-result-formatter.ts';
-import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
-import { NotionConnectionState } from './notion/notion-connection-state.ts';
-import { useConnectionStore } from '../../stores/connection.store';
+import type { Disposable } from '../../../../../../mcp-runtime/src/lifecycle/disposable.ts';
 import { eventBus } from '../../events/event-bus';
+import { useConnectionStore } from '../../stores/connection.store';
 import { enableStreamBridgeOnWindow } from './notion.bridge-enable';
+import { NotionConnectionState } from './notion/notion-connection-state.ts';
+import { startNotionRuntimeBridgeIfEnabled, type WindowLike } from './notion/notion-runtime-bridge.ts';
 
 /**
  * Notion AI Adapter — supports both:
@@ -907,14 +907,6 @@ export class NotionAdapter extends BaseAdapterPlugin {
                         context.stores.ui.setSidebarVisibility(enabled, 'mcp-popover-toggle-fallback');
                     }
 
-                    const sidebarManager = (window as any).activeSidebarManager;
-                    if (sidebarManager) {
-                        if (enabled) {
-                            sidebarManager.show().catch((e: any) => context.logger.error('Error showing sidebar:', e));
-                        } else {
-                            sidebarManager.hide().catch((e: any) => context.logger.error('Error hiding sidebar:', e));
-                        }
-                    }
                 } catch (error) {
                     context.logger.error('Error in setMCPEnabled:', error);
                 }

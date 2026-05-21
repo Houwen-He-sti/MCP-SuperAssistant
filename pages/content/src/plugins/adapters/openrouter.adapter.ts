@@ -1443,23 +1443,6 @@ export class OpenRouterAdapter extends BaseAdapterPlugin {
             }
           }
 
-          // Secondary method: Control through global sidebar manager
-          const sidebarManager = (window as any).activeSidebarManager;
-          if (sidebarManager) {
-            if (enabled) {
-              context.logger.debug('Showing sidebar via activeSidebarManager');
-              sidebarManager.show().catch((error: any) => {
-                context.logger.error('Error showing sidebar:', error);
-              });
-            } else {
-              context.logger.debug('Hiding sidebar via activeSidebarManager');
-              sidebarManager.hide().catch((error: any) => {
-                context.logger.error('Error hiding sidebar:', error);
-              });
-            }
-          } else {
-            context.logger.warn('activeSidebarManager not available on window - will rely on UI store only');
-          }
 
           context.logger.debug(
             `MCP toggle completed: MCP ${enabled ? 'enabled' : 'disabled'}, sidebar ${enabled ? 'shown' : 'hidden'}`,
@@ -1689,20 +1672,7 @@ export class OpenRouterAdapter extends BaseAdapterPlugin {
   }
 
   private checkAndRestoreSidebar(): void {
-    this.context.logger.debug('Checking sidebar state after page navigation');
-
-    try {
-      const activeSidebarManager = (window as any).activeSidebarManager;
-
-      if (!activeSidebarManager) {
-        this.context.logger.warn('No active sidebar manager found after navigation');
-        return;
-      }
-
-      // this.ensureMCPPopoverConnection();
-    } catch (error) {
-      this.context.logger.error('Error checking sidebar state after navigation:', error);
-    }
+    this.ensureMCPPopoverConnection();
   }
 
   private ensureMCPPopoverConnection(): void {
