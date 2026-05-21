@@ -1,4 +1,4 @@
-import { useAppStore, useConfigStore, useConnectionStore, useUIStore } from '@src/stores';
+import { useAppStore, useConfigStore, useConnectionStore, useToolStore, useUIStore } from '@src/stores';
 import { useEffect, useState } from 'react';
 
 // Custom hook for event-driven hydration with timeout fallback.
@@ -62,7 +62,56 @@ const getStatusDotClass = (status: string) => {
 export const SidePanelApp = () => {
     const [activeTab, setActiveTab] = useState<'tools' | 'prompt' | 'settings'>('tools');
     const { status } = useConnectionStore();
+    const { tools } = useToolStore();
     const isHydrated = useHydration();
+
+    // [UI-3] Fetch initial snapshot from background and subscribe to runtime broadcasts
+    useEffect(() => {
+        // Initial connection status fetch
+        chrome.runtime.sendMessage(
+            { type: 'mcp:get-connection-status', origin: 'side-panel', timestamp: Date.now() },
+            (res) => {
+                if (chrome.runtime.lastError) return;
+                if (res?.success && res.payload) {
+                    useConnectionStore.getState().setConnectionStatus({
+                        status: res.payload.status ?? 'disconnected',
+                        isConnected: res.payload.isConnected ?? false,
+                        error: res.payload.error,
+                    });
+                }
+            },
+        );
+
+        // Initial tools fetch
+        chrome.runtime.sendMessage(
+            { type: 'mcp:get-tools', origin: 'side-panel', timestamp: Date.now() },
+            (res) => {
+                if (chrome.runtime.lastError) return;
+                if (res?.success && Array.isArray(res.payload)) {
+                    useToolStore.getState().setTools(res.payload);
+                }
+            },
+        );
+
+        // Subscribe to background broadcasts (connection status + tools updates)
+        const handleMessage = (msg: { type?: string; payload?: any }) => {
+            if (msg.type === 'connection:status-changed' && msg.payload) {
+                useConnectionStore.getState().setConnectionStatus({
+                    status: msg.payload.status ?? 'disconnected',
+                    isConnected: msg.payload.isConnected ?? false,
+                    error: msg.payload.error,
+                });
+            }
+            if (msg.type === 'mcp:tool-update' && Array.isArray(msg.payload?.tools)) {
+                useToolStore.getState().setTools(msg.payload.tools);
+            }
+        };
+
+        chrome.runtime.onMessage.addListener(handleMessage);
+        return () => {
+            chrome.runtime.onMessage.removeListener(handleMessage);
+        };
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     if (!isHydrated) {
         return (
@@ -105,7 +154,20 @@ export const SidePanelApp = () => {
             {/* Content Area — use hidden/block to preserve scroll position and component state on tab switch */}
             <main className="flex-1 overflow-y-auto relative">
                 <div className={`absolute inset-0 p-4 ${activeTab === 'tools' ? 'block' : 'hidden'}`}>
-                    <div className="text-sm text-slate-500">Tools Panel (WIP)</div>
+                    {tools.length > 0 ? (
+                        <ul className="space-y-1">
+                            {tools.map((tool) => (
+                                <li key={tool.name} className="text-sm text-slate-700 dark:text-slate-300 py-1 px-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800">
+                                    <span className="font-medium">{tool.name}</span>
+                                    {tool.description && (
+                                        <span className="ml-2 text-xs text-slate-500 dark:text-slate-400 truncate max-w-xs">{tool.description}</span>
+                                    )}
+                                </li>
+                            ))}
+                        </ul>
+                    ) : (
+                        <div className="text-sm text-slate-500">No tools available. Connect to an MCP server.</div>
+                    )}
                 </div>
                 <div className={`absolute inset-0 p-4 ${activeTab === 'prompt' ? 'block' : 'hidden'}`}>
                     <div className="text-sm text-slate-500">Prompt Panel (WIP)</div>

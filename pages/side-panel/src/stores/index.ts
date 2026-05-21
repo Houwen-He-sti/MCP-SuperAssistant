@@ -192,16 +192,50 @@ export const useConfigStore = create<ConfigStoreState>()(
 
 subscribeChromeStorageRehydrate({ key: 'config-store', store: useConfigStore });
 
-// ─── Connection Store (stub — UI-3) ──────────────────────────────────────────
+// ─── Connection Store (UI-3: real runtime state from background) ─────────────
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'reconnecting' | 'error';
 
 interface ConnectionStoreState {
   status: ConnectionStatus;
+  isConnected: boolean;
+  error: string | undefined;
+  lastUpdatedAt: number | null;
+  // Actions
+  setConnectionStatus: (payload: { status: ConnectionStatus; isConnected: boolean; error?: string }) => void;
 }
 
-// TODO: [UI-3] Replace with real store backed by chrome.runtime message bridge from content script
-export const useConnectionStore = create<ConnectionStoreState>(() => ({
+// [UI-3] Runtime-only store (NOT persisted) — fed by chrome.runtime.onMessage listener in SidePanelApp
+export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
   status: 'disconnected',
+  isConnected: false,
+  error: undefined,
+  lastUpdatedAt: null,
+  setConnectionStatus: ({ status, isConnected, error }) =>
+    set({ status, isConnected, error: error ?? undefined, lastUpdatedAt: Date.now() }),
+}));
+
+// ─── Tool Store (UI-3: real runtime tools from background) ───────────────────
+
+/** Mirrors content page Tool shape — defined locally to avoid cross-page imports */
+interface Tool {
+  name: string;
+  description: string;
+  input_schema: unknown;
+  schema?: unknown;
+}
+
+interface ToolStoreState {
+  tools: Tool[];
+  lastUpdatedAt: number | null;
+  // Actions
+  setTools: (tools: Tool[]) => void;
+}
+
+// [UI-3] Runtime-only store (NOT persisted) — fed by chrome.runtime.onMessage listener in SidePanelApp
+export const useToolStore = create<ToolStoreState>()((set) => ({
+  tools: [],
+  lastUpdatedAt: null,
+  setTools: (tools) => set({ tools, lastUpdatedAt: Date.now() }),
 }));
 
