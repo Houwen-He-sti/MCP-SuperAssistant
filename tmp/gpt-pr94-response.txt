@@ -1,0 +1,30 @@
+PR #94 的 head 仍是我刚才 review 的同一个 commit：
+
+8e6519269c398a0d149c98748099ba47b002e898
+
+所以结论不变：
+
+Verdict: APPROVE / merge OK
+
+已写入 PR comment：
+
+Comment ID: 4505603018
+
+对 5 个问题的最终回答
+
+chrome.runtime.sendMessage broadcast approach 安全。
+Opus 的 double-receive P1 不成立。Chrome 官方语义是：runtime.sendMessage() 发给 extension frames；不能用它发给 content scripts。content scripts 仍由 tabs.sendMessage() 接收。所以当前双路径设计正确。
+
+useEffect cleanup 正确。
+handleMessage 是同一个函数引用，addListener/removeListener 成对，mount-only effect 合理。
+
+initial snapshot fetch → subscribe 是合理模式。
+对 side panel 的低频 runtime state 是 idiomatic。先 fetch 再 subscribe 有极小竞态，但非阻塞。
+
+Tool type 本地定义合理。
+UI-3 不应为了一个 display-only type 引入 shared package 重构；后续再抽 shared contract 可以作为 P2。
+
+无安全 / 正确性 / 架构 blocking issue。
+React 文本渲染安全；runtime stores 不 persist 正确；origin: 'side-panel' contract 补充正确；config broadcast 不纳入 UI-3 可接受。
+
+Blocking issues: none.

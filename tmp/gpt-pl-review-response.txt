@@ -1,0 +1,264 @@
+UI-4 PL 审查结论
+
+Verdict: REVISE before ENTER_TDD。
+
+整体方向是对的：UI-4 做 read-only Settings + Prompt，把 write-back 留到 UI-5。但当前 PL 里有两个需要修正的 P1 级计划问题；修完后我会给 ENTER_UI4_TDD。
+
+P1-1：mcpEnabled selector 路径写错
+
+你计划里写的是：
+
+TypeScript
+const mcpEnabled = useUIStore(state => state.preferences.mcpEnabled);
+
+但当前 side-panel useUIStore 的 shape 是：
+
+TypeScript
+interface UIStoreState {
+  sidebar
+  preferences
+  theme
+  mcpEnabled
+}
+
+也就是说 mcpEnabled 是 top-level field，不在 preferences 里。当前 side-panel store 明确把 mcpEnabled 放在顶层，并且 preferences 里没有 mcpEnabled 字段。
+
+index
+
+应改成：
+
+TypeScript
+const mcpEnabled = useUIStore(state => state.mcpEnabled);
+
+这不是风格问题，是实现时会直接 type fail 或显示错误的计划问题。
+
+P1-2：server config 默认值不应 fallback 到 sse
+
+你计划里的 store 初始值和 fallback 都用了：
+
+TypeScript
+connectionType: 'sse'
+
+但当前 background 的默认 connection type 是：
+
+TypeScript
+const DEFAULT_CONNECTION_TYPE: ConnectionType = 'streamable-http';
+
+并且默认 URL 是 /mcp。
+
+index
+
+所以 UI-4 应统一改为：
+
+TypeScript
+connectionType: 'streamable-http'
+
+包括：
+
+TypeScript
+export const useServerConfigStore = create<ServerConfigStoreState>()((set) => ({
+  uri: '',
+  connectionType: 'streamable-http',
+  lastUpdatedAt: null,
+  setServerConfig: ({ uri, connectionType }) =>
+    set({ uri, connectionType, lastUpdatedAt: Date.now() }),
+}));
+
+以及 snapshot / broadcast fallback：
+
+TypeScript
+connectionType: res.payload.connectionType ?? 'streamable-http'
+TypeScript
+connectionType: msg.payload.config.connectionType ?? 'streamable-http'
+
+更好的是加一个 helper，避免重复默认值：
+
+TypeScript
+const DEFAULT_CONNECTION_TYPE: TransportType = 'streamable-http';
+1. Architecture consistency
+
+useServerConfigStore 作为 runtime-only store 是合理的。
+
+原因是：mcpServerUrl / mcpConnectionType 当前不是 Zustand persist blob，而是 background 管理的 raw chrome.storage.local keys；background 已经有 mcp:get-server-config handler，会读取 raw keys 并返回规范化的 { uri, connectionType }。
+
+index
+
+所以 side panel 不应该自己直接读 raw storage key，否则会复制 background 的 default URL / type 推导逻辑。UI-4 继续沿用 UI-3 的 runtime snapshot pattern 是对的：
+
+side panel mount
+  → mcp:get-server-config
+  → setServerConfig
+
+background config change
+  → mcp:server-config-updated
+  → setServerConfig
+
+这里 read-only runtime store 比直接 chrome.storage subscription 更干净。
+
+2. broadcast wrapping
+
+给 broadcastConfigUpdateToContentScripts 追加：
+
+TypeScript
+chrome.runtime.sendMessage(broadcastMessage).catch(() => {});
+
+是合理的，和 UI-3 connection/tools 的模式一致。
+
+当前 broadcastConfigUpdateToContentScripts 只走 tabs.sendMessage，side panel 不会收到 config update。
+
+index
+
+
+Chrome 官方文档也明确：runtime.sendMessage() 会发给 extension 内部 frames；不能用它发给 content scripts，content scripts 要用 tabs.sendMessage()。因此继续保留 tabs.sendMessage，再加 runtime.sendMessage 给 side panel，是正确双通道。
+Chrome for Developers
+
+建议实现时顺手把注释从：
+
+TypeScript
+// Broadcast server config update to all content scripts
+
+改成更准确的：
+
+TypeScript
+// Broadcast server config update to content scripts and extension pages
+
+非阻塞，但能避免后续误解。
+
+3. read-only scope
+
+我同意 UI-4 只做 read-only，write-back 留 UI-5。
+
+理由很明确：Settings 写回不是简单 UI toggle。比如 autoSubmit / autoInsert / server config / MCP enabled 都可能牵涉：
+
+Zustand persist shape；
+
+content script side effects；
+
+background reconnect；
+
+bridge behavior；
+
+UI hydration / cross-context consistency；
+
+potentially prompt injection behavior。
+
+把 UI-4 控制在“显示真实状态”非常健康。UI-5 再做 write path，更符合现在项目的 slice discipline。
+
+4. Prompt tab read-only raw text
+
+可以展示 customInstructions raw text，但要保持 纯文本渲染，不要用 HTML 注入。
+
+你计划里的 JSX：
+
+TypeScript
+{customInstructions || <span className="text-slate-400 italic">No custom instructions set.</span>}
+
+是安全方向，因为 React 会按文本 escape。Chrome 文档也提醒，处理来自用户或页面的数据时应避免解释成 HTML，安全方式是作为文本处理，而不是 innerHTML / eval 之类。
+Chrome for Developers
+
+建议加两个小处理：
+
+TypeScript
+const customInstructionsPreview = customInstructions.trim();
+
+然后：
+
+TypeScript
+{customInstructionsPreview || <span ...>No custom instructions set.</span>}
+
+并给容器加上：
+
+TypeScript
+max-h-64 overflow-y-auto
+
+否则超长 prompt 会把 side panel 撑得很难用。
+
+5. 其他风险 / 建议
+P2：把 UI-3 effect 继续塞大，会开始变胖
+
+UI-3 的 SidePanelApp.tsx 现在已经在一个 useEffect 里做 connection/tools snapshot + listener。UI-4 再加 server config 后，这个 effect 会变成三类 runtime state 的聚合点。当前还能接受，但建议至少把注释改为：
+
+TypeScript
+// Fetch initial runtime snapshots and subscribe to background broadcasts.
+
+更理想但非阻塞：抽成 useSidePanelBridge() hook，UI-4 可以暂不做，UI-5 前再抽。
+
+P2：listener 注册顺序
+
+UI-3 现在是先发 snapshot request，再注册 listener。UI-4 可以保持一致，但更稳的顺序是：
+
+TypeScript
+const handleMessage = ...
+chrome.runtime.onMessage.addListener(handleMessage);
+
+// then send initial snapshot requests
+
+这样可以消除“请求期间发生广播但 listener 还没挂上”的微小窗口。Chrome runtime.onMessage 同时会收到 runtime.sendMessage 和 tabs.sendMessage 事件，listener cleanup 用同一函数引用即可。
+Chrome for Developers
+
+非阻塞，但 UI-4 是个好机会顺手整理。
+
+P2：server config type guard
+
+connectionType 来自 runtime payload，建议加轻量 guard，避免将异常字符串写入 store：
+
+TypeScript
+const isTransportType = (value: unknown): value is TransportType =>
+  value === 'sse' || value === 'websocket' || value === 'streamable-http';
+
+const normalizeConnectionType = (value: unknown): TransportType =>
+  isTransportType(value) ? value : 'streamable-http';
+
+然后 snapshot/broadcast 都用：
+
+TypeScript
+connectionType: normalizeConnectionType(res.payload.connectionType)
+P2：Settings tab 里的 dark mode class
+
+你给的 badge class 只有 light mode。side panel 已经有 dark theme classes，建议补 dark variants，避免暗色主题下 badge 对比度怪：
+
+TypeScript
+bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300
+
+不是阻塞项。
+
+建议修正版核心片段
+Store
+TypeScript
+type TransportType = 'sse' | 'websocket' | 'streamable-http';
+
+const DEFAULT_CONNECTION_TYPE: TransportType = 'streamable-http';
+
+interface ServerConfigStoreState {
+  uri: string;
+  connectionType: TransportType;
+  lastUpdatedAt: number | null;
+  setServerConfig: (payload: { uri: string; connectionType: TransportType }) => void;
+}
+
+export const useServerConfigStore = create<ServerConfigStoreState>()((set) => ({
+  uri: '',
+  connectionType: DEFAULT_CONNECTION_TYPE,
+  lastUpdatedAt: null,
+  setServerConfig: ({ uri, connectionType }) =>
+    set({ uri, connectionType, lastUpdatedAt: Date.now() }),
+}));
+Selectors
+TypeScript
+const uri = useServerConfigStore(state => state.uri);
+const connectionType = useServerConfigStore(state => state.connectionType);
+const mcpEnabled = useUIStore(state => state.mcpEnabled);
+const debugMode = useAppStore(state => state.globalSettings.debugMode);
+const customInstructions = useUIStore(state => state.preferences.customInstructions);
+const customInstructionsEnabled = useUIStore(state => state.preferences.customInstructionsEnabled);
+Final verdict
+
+REVISE → then ENTER_UI4_TDD.
+
+必须修：
+
+mcpEnabled selector 改为 state.mcpEnabled。
+
+connectionType initial/fallback 改为 'streamable-http'。
+
+修完这两个点后，UI-4 的 3-file plan 是合理的，可以进入 TDD / implementation。
