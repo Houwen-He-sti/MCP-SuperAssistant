@@ -1,4 +1,4 @@
-import { useAppStore, useConfigStore, useConnectionStore, useToolStore, useUIStore } from '@src/stores';
+import { useAppStore, useConfigStore, useConnectionStore, useServerConfigStore, useToolStore, useUIStore, normalizeConnectionType } from '@src/stores';
 import { useEffect, useState } from 'react';
 
 // Custom hook for event-driven hydration with timeout fallback.
@@ -65,35 +65,17 @@ export const SidePanelApp = () => {
     const { tools } = useToolStore();
     const isHydrated = useHydration();
 
-    // [UI-3] Fetch initial snapshot from background and subscribe to runtime broadcasts
+    // [UI-4] Settings + Prompt selectors
+    const uri = useServerConfigStore(state => state.uri);
+    const connectionType = useServerConfigStore(state => state.connectionType);
+    const mcpEnabled = useUIStore(state => state.mcpEnabled); // ← top-level, NOT preferences.mcpEnabled
+    const debugMode = useAppStore(state => state.globalSettings.debugMode);
+    const customInstructions = useUIStore(state => state.preferences.customInstructions);
+    const customInstructionsEnabled = useUIStore(state => state.preferences.customInstructionsEnabled);
+
+    // [UI-3] Fetch initial snapshot from background and subscribe to runtime broadcasts (listener-first to prevent race conditions)
     useEffect(() => {
-        // Initial connection status fetch
-        chrome.runtime.sendMessage(
-            { type: 'mcp:get-connection-status', origin: 'side-panel', timestamp: Date.now() },
-            (res) => {
-                if (chrome.runtime.lastError) return;
-                if (res?.success && res.payload) {
-                    useConnectionStore.getState().setConnectionStatus({
-                        status: res.payload.status ?? 'disconnected',
-                        isConnected: res.payload.isConnected ?? false,
-                        error: res.payload.error,
-                    });
-                }
-            },
-        );
-
-        // Initial tools fetch
-        chrome.runtime.sendMessage(
-            { type: 'mcp:get-tools', origin: 'side-panel', timestamp: Date.now() },
-            (res) => {
-                if (chrome.runtime.lastError) return;
-                if (res?.success && Array.isArray(res.payload)) {
-                    useToolStore.getState().setTools(res.payload);
-                }
-            },
-        );
-
-        // Subscribe to background broadcasts (connection status + tools updates)
+        // Subscribe to background broadcasts (connection status + tools + server config updates)
         const handleMessage = (msg: { type?: string; payload?: any }) => {
             if (msg.type === 'connection:status-changed' && msg.payload) {
                 useConnectionStore.getState().setConnectionStatus({
@@ -105,9 +87,66 @@ export const SidePanelApp = () => {
             if (msg.type === 'mcp:tool-update' && Array.isArray(msg.payload?.tools)) {
                 useToolStore.getState().setTools(msg.payload.tools);
             }
+            if (msg.type === 'mcp:server-config-updated' && msg.payload?.config) {
+                useServerConfigStore.getState().setServerConfig({
+                    uri: msg.payload.config.uri ?? '',
+                    connectionType: normalizeConnectionType(msg.payload.config.connectionType),
+                });
+            }
         };
 
+        // 1. Register listener first
         chrome.runtime.onMessage.addListener(handleMessage);
+
+        // 2. Fetch initial connection status snapshot
+        const connectionRequestedAt = Date.now();
+        chrome.runtime.sendMessage(
+            { type: 'mcp:get-connection-status', origin: 'side-panel', timestamp: connectionRequestedAt },
+            (res) => {
+                if (chrome.runtime.lastError) return;
+                if (res?.success && res.payload) {
+                    const current = useConnectionStore.getState();
+                    if (current.lastUpdatedAt && current.lastUpdatedAt > connectionRequestedAt) return;
+                    useConnectionStore.getState().setConnectionStatus({
+                        status: res.payload.status ?? 'disconnected',
+                        isConnected: res.payload.isConnected ?? false,
+                        error: res.payload.error,
+                    });
+                }
+            },
+        );
+
+        // 3. Fetch initial tools snapshot
+        const toolsRequestedAt = Date.now();
+        chrome.runtime.sendMessage(
+            { type: 'mcp:get-tools', origin: 'side-panel', timestamp: toolsRequestedAt },
+            (res) => {
+                if (chrome.runtime.lastError) return;
+                if (res?.success && Array.isArray(res.payload)) {
+                    const current = useToolStore.getState();
+                    if (current.lastUpdatedAt && current.lastUpdatedAt > toolsRequestedAt) return;
+                    useToolStore.getState().setTools(res.payload);
+                }
+            },
+        );
+
+        // 4. [UI-4] Fetch initial server config snapshot
+        const configRequestedAt = Date.now();
+        chrome.runtime.sendMessage(
+            { type: 'mcp:get-server-config', origin: 'side-panel', timestamp: configRequestedAt },
+            (res) => {
+                if (chrome.runtime.lastError) return;
+                if (res?.success && res.payload) {
+                    const current = useServerConfigStore.getState();
+                    if (current.lastUpdatedAt && current.lastUpdatedAt > configRequestedAt) return;
+                    useServerConfigStore.getState().setServerConfig({
+                        uri: typeof res.payload.uri === 'string' ? res.payload.uri : '',
+                        connectionType: normalizeConnectionType(res.payload.connectionType),
+                    });
+                }
+            },
+        );
+
         return () => {
             chrome.runtime.onMessage.removeListener(handleMessage);
         };
@@ -170,10 +209,38 @@ export const SidePanelApp = () => {
                     )}
                 </div>
                 <div className={`absolute inset-0 p-4 ${activeTab === 'prompt' ? 'block' : 'hidden'}`}>
-                    <div className="text-sm text-slate-500">Prompt Panel (WIP)</div>
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">Custom Instructions</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${customInstructionsEnabled ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                                {customInstructionsEnabled ? 'Enabled' : 'Disabled'}
+                            </span>
+                        </div>
+                        <div className="text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 rounded p-3 min-h-16 max-h-64 overflow-y-auto whitespace-pre-wrap break-words border border-slate-200 dark:border-slate-700">
+                            {customInstructions || <span className="text-slate-400 italic">No custom instructions set.</span>}
+                        </div>
+                    </div>
                 </div>
                 <div className={`absolute inset-0 p-4 ${activeTab === 'settings' ? 'block' : 'hidden'}`}>
-                    <div className="text-sm text-slate-500">Settings Panel (WIP)</div>
+                    <div className="space-y-4">
+                        <div>
+                            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">MCP Server</p>
+                            <p className="text-sm font-mono break-all bg-slate-50 dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700">{uri || '(not set)'}</p>
+                            <p className="text-xs text-slate-500 mt-1 uppercase">{connectionType}</p>
+                        </div>
+                        <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-3">
+                            <span className="text-sm">MCP Enabled</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${mcpEnabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                                {mcpEnabled ? 'On' : 'Off'}
+                            </span>
+                        </div>
+                        <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-3">
+                            <span className="text-sm">Debug Mode</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${debugMode ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                                {debugMode ? 'On' : 'Off'}
+                            </span>
+                        </div>
+                    </div>
                 </div>
             </main>
         </div>

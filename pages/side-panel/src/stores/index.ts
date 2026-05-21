@@ -239,3 +239,30 @@ export const useToolStore = create<ToolStoreState>()((set) => ({
   setTools: (tools) => set({ tools, lastUpdatedAt: Date.now() }),
 }));
 
+// --- Server Config Store (UI-4, runtime-only) ---
+type TransportType = 'sse' | 'websocket' | 'streamable-http'; // mirrors chrome-extension TransportType
+
+const DEFAULT_SERVER_CONNECTION_TYPE: TransportType = 'streamable-http'; // matches background DEFAULT_CONNECTION_TYPE
+
+const isTransportType = (v: unknown): v is TransportType =>
+  v === 'sse' || v === 'websocket' || v === 'streamable-http';
+
+export const normalizeConnectionType = (v: unknown): TransportType =>
+  isTransportType(v) ? v : DEFAULT_SERVER_CONNECTION_TYPE;
+
+interface ServerConfigStoreState {
+  uri: string;
+  connectionType: TransportType;
+  lastUpdatedAt: number | null;
+  setServerConfig: (payload: { uri: string; connectionType: TransportType }) => void;
+}
+
+export const useServerConfigStore = create<ServerConfigStoreState>()((set) => ({
+  uri: '',
+  connectionType: DEFAULT_SERVER_CONNECTION_TYPE,
+  lastUpdatedAt: null,
+  setServerConfig: ({ uri, connectionType }) =>
+    set({ uri, connectionType, lastUpdatedAt: Date.now() }),
+}));
+
+

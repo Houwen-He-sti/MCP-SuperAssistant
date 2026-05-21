@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
 
 import { isCspEvalError } from './evalErrorGuard.ts';
@@ -31,7 +32,7 @@ describe('isCspEvalError — CSP guard for plugin getPrimitives', () => {
   });
 
   test('Both plugins use shared isCspEvalError guard', async () => {
-    const baseDir = path.dirname(new URL(import.meta.url).pathname);
+    const baseDir = path.dirname(fileURLToPath(import.meta.url));
     const ssePath = path.join(baseDir, 'sse', 'SSEPlugin.ts');
     const httpPath = path.join(baseDir, 'streamable-http', 'StreamableHttpPlugin.ts');
 
