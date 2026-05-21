@@ -40,6 +40,10 @@ export function isSupportedPath(pathname: string, hasNativeInput: boolean): bool
     // /chat is always supported (native AI chat page)
     if (pathname.startsWith('/chat')) return true;
 
+    // /ai is the Notion AI production URL (notion.so/ai) — Slice V explicit support
+    // Exact match only (not startsWith) to avoid false-positives like /aifoo.
+    if (pathname === '/ai') return true;
+
     // Other Notion pages require native AI input element
     if (hasNativeInput) return true;
 

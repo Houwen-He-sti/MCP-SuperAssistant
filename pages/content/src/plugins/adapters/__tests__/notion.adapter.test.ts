@@ -36,15 +36,16 @@ describe('NotionAdapter route functions', () => {
         it('should return false for /ai/chat/123 without native input', () => {
             assert.equal(isSupportedPath('/ai/chat/123', false), false);
         });
-        it('should return false for /ai without native input', () => {
-            assert.equal(isSupportedPath('/ai', false), false);
+        it('T-R-3: /ai without native input → true (Notion AI production URL, Slice V)', () => {
+            assert.equal(isSupportedPath('/ai', false), true);
         });
 
         it('should return false for /agent/ without native input', () => {
             assert.equal(isSupportedPath('/agent/bla', false), false);
         });
-        it('should return false for /ai without native input', () => {
-            assert.equal(isSupportedPath('/ai', false), false);
+
+        it('T-R-3b: /aifoo without native input → false (no false-positive partial prefix match)', () => {
+            assert.equal(isSupportedPath('/aifoo', false), false);
         });
 
         it('should return false for /agent/ without native input', () => {

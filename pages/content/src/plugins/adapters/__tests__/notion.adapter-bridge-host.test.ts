@@ -268,6 +268,47 @@ function makeSelectorDocument(map: Record<string, object | null>): Document {
     } as unknown as Document;
 }
 
+/**
+ * Multi-instance FakeMutationObserver factory for deferred-observer tests (Slice V).
+ * Each constructor call appends to the returned `instances` array.
+ * Instance 0 = document-level watcher; Instance 1 = real container observer.
+ */
+function makeMultiFakeMO(): {
+    MOClass: new (cb: MutationCallback) => MutationObserver;
+    instances: FakeMOInstance[];
+} {
+    const instances: FakeMOInstance[] = [];
+
+    class MultiFakeMO {
+        private readonly cb: MutationCallback;
+        disconnected = false;
+        observed = false;
+
+        constructor(cb: MutationCallback) {
+            this.cb = cb;
+            // eslint-disable-next-line @typescript-eslint/no-this-alias
+            instances.push(this as unknown as FakeMOInstance);
+        }
+
+        observe(_target: Node, _options?: MutationObserverInit): void {
+            this.observed = true;
+        }
+
+        disconnect(): void {
+            this.disconnected = true;
+        }
+
+        fire(records: Partial<MutationRecord>[]): void {
+            this.cb(records as MutationRecord[], this as unknown as MutationObserver);
+        }
+    }
+
+    return {
+        MOClass: MultiFakeMO as unknown as new (cb: MutationCallback) => MutationObserver,
+        instances,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // T-BH-08..T-BH-11 — isStreaming()
 // ---------------------------------------------------------------------------
@@ -315,7 +356,7 @@ describe('NotionAdapterBridgeHost.isStreaming()', () => {
 describe('NotionAdapterBridgeHost.observeAssistantMessages()', () => {
     it('T-BH-12: new content node → callback emitted once with { content, isComplete, timestamp }', () => {
         const { MOClass, lastInstance } = makeFakeMO();
-        const container = {};
+        const container = { childNodes: [] };
         const host = new NotionAdapterBridgeHost({
             adapter: makeMockAdapter(),
             document: makeSelectorDocument({ '.layout-content': container }),
@@ -337,7 +378,7 @@ describe('NotionAdapterBridgeHost.observeAssistantMessages()', () => {
 
     it('T-BH-12b: whitespace/empty node → callback NOT emitted', () => {
         const { MOClass, lastInstance } = makeFakeMO();
-        const container = {};
+        const container = { childNodes: [] };
         const host = new NotionAdapterBridgeHost({
             adapter: makeMockAdapter(),
             document: makeSelectorDocument({ '.layout-content': container }),
@@ -355,7 +396,7 @@ describe('NotionAdapterBridgeHost.observeAssistantMessages()', () => {
 
     it('T-BH-13: same DOM node in two mutation records → callback emitted exactly once', () => {
         const { MOClass, lastInstance } = makeFakeMO();
-        const container = {};
+        const container = { childNodes: [] };
         const host = new NotionAdapterBridgeHost({
             adapter: makeMockAdapter(),
             document: makeSelectorDocument({ '.layout-content': container }),
@@ -374,7 +415,7 @@ describe('NotionAdapterBridgeHost.observeAssistantMessages()', () => {
 
     it('T-BH-14: dispose() → subsequent mutations → callback NOT called', () => {
         const { MOClass, lastInstance } = makeFakeMO();
-        const container = {};
+        const container = { childNodes: [] };
         const host = new NotionAdapterBridgeHost({
             adapter: makeMockAdapter(),
             document: makeSelectorDocument({ '.layout-content': container }),
@@ -395,5 +436,166 @@ describe('NotionAdapterBridgeHost.observeAssistantMessages()', () => {
 
         // Mutations after dispose should not reach callback
         // (Observer is disconnected — in real DOM, no callbacks would fire)
+    });
+});
+
+// ---------------------------------------------------------------------------
+// T-BH-12c..T-BH-12f — observeAssistantMessages() deferred path (Slice V)
+//
+// Tests the React SPA timing fix: .layout-content not present at document_idle
+// → no throw, deferred document-level watcher → real observer attached on appearance.
+// ---------------------------------------------------------------------------
+
+describe('NotionAdapterBridgeHost.observeAssistantMessages() — deferred path (Slice V)', () => {
+    it('T-BH-12c: .layout-content absent at call time → no throw; container appears → callback fires', () => {
+        let containerReady = false;
+        const containerEl = { childNodes: [] as unknown as NodeList };
+        const doc = {
+            documentElement: {} as unknown as Node,
+            querySelector: (sel: string) =>
+                sel === '.layout-content' && containerReady ? containerEl : null,
+        } as unknown as Document;
+
+        const { MOClass, instances } = makeMultiFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: doc,
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        // Must NOT throw even though container is absent
+        const disposable = host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        assert.equal(instances.length, 1, 'document-level watcher created');
+        assert.equal(received.length, 0, 'no callback before container appears');
+
+        // Simulate .layout-content appearing in DOM
+        containerReady = true;
+        instances[0].fire([{ addedNodes: [] as unknown as NodeList, type: 'childList' }]);
+
+        assert.equal(instances.length, 2, 'real container observer created after container found');
+
+        // Simulate new message via real observer
+        const msgNode = { textContent: 'Hello from AI' };
+        instances[1].fire([{ addedNodes: [msgNode] as unknown as NodeList, type: 'childList' }]);
+
+        assert.equal(received.length, 1);
+        assert.equal(received[0], 'Hello from AI');
+
+        disposable.dispose();
+    });
+
+    it('T-BH-12d: dispose() before container appears → watcher stopped, no real observer created', () => {
+        let containerReady = false;
+        const doc = {
+            documentElement: {} as unknown as Node,
+            querySelector: (sel: string) =>
+                sel === '.layout-content' && containerReady ? {} : null,
+        } as unknown as Document;
+
+        const { MOClass, instances } = makeMultiFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: doc,
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        const disposable = host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        assert.equal(instances.length, 1);
+
+        // Dispose BEFORE container appears
+        disposable.dispose();
+        assert.equal(instances[0].disconnected, true, 'watcher disconnected on dispose');
+
+        // Now container appears and a queued callback fires (race condition scenario)
+        containerReady = true;
+        instances[0].fire([{ addedNodes: [] as unknown as NodeList, type: 'childList' }]);
+
+        // Real observer must NOT have been created (disposed flag blocks it)
+        assert.equal(instances.length, 1, 'no real observer created after dispose');
+        assert.equal(received.length, 0, 'no callbacks after dispose');
+    });
+
+    it('T-BH-12e: initial scan — pre-existing nodes in container emitted when container appears', () => {
+        let containerReady = false;
+        const existingNode = { textContent: 'Pre-existing AI message' };
+        const containerEl = { childNodes: [existingNode] as unknown as NodeList };
+        const doc = {
+            documentElement: {} as unknown as Node,
+            querySelector: (sel: string) =>
+                sel === '.layout-content' && containerReady ? containerEl : null,
+        } as unknown as Document;
+
+        const { MOClass, instances } = makeMultiFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: doc,
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        assert.equal(received.length, 0, 'no callback before container appears');
+
+        containerReady = true;
+        instances[0].fire([{ addedNodes: [] as unknown as NodeList, type: 'childList' }]);
+
+        // Initial scan should have emitted the pre-existing node
+        assert.equal(received.length, 1, 'initial scan emitted existing node');
+        assert.equal(received[0], 'Pre-existing AI message');
+    });
+
+    it('T-BH-12f: initial scan node seen by mutation observer → callback NOT emitted twice', () => {
+        let containerReady = false;
+        const existingNode = { textContent: 'Scanned node' };
+        const containerEl = { childNodes: [existingNode] as unknown as NodeList };
+        const doc = {
+            documentElement: {} as unknown as Node,
+            querySelector: (sel: string) =>
+                sel === '.layout-content' && containerReady ? containerEl : null,
+        } as unknown as Document;
+
+        const { MOClass, instances } = makeMultiFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: doc,
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        containerReady = true;
+        instances[0].fire([{ addedNodes: [] as unknown as NodeList, type: 'childList' }]);
+
+        // Initial scan already emitted existingNode
+        assert.equal(received.length, 1, 'initial scan emitted once');
+
+        // Same node arrives via MutationObserver (React might re-add it)
+        instances[1].fire([{ addedNodes: [existingNode] as unknown as NodeList, type: 'childList' }]);
+
+        // Must NOT emit again (shared WeakSet prevents double-fire)
+        assert.equal(received.length, 1, 'same node not emitted twice');
+    });
+
+    it('T-BH-12g: fast path with pre-existing nodes → initial scan emits them', () => {
+        const existingNode = { textContent: 'Pre-existing in fast path' };
+        const container = { childNodes: [existingNode] as unknown as NodeList };
+        const { MOClass } = makeFakeMO();
+        const host = new NotionAdapterBridgeHost({
+            adapter: makeMockAdapter(),
+            document: makeSelectorDocument({ '.layout-content': container }),
+            MutationObserver: MOClass,
+        });
+
+        const received: string[] = [];
+        host.observeAssistantMessages((msg) => received.push(msg.content));
+
+        assert.equal(received.length, 1, 'initial scan emitted pre-existing node');
+        assert.equal(received[0], 'Pre-existing in fast path');
     });
 });
